@@ -128,6 +128,7 @@ public final class SystemSessionProperties
     public static final String REQUIRED_WORKERS_MAX_WAIT_TIME = "required_workers_max_wait_time";
     public static final String COST_ESTIMATION_WORKER_COUNT = "cost_estimation_worker_count";
     public static final String OMIT_DATETIME_TYPE_PRECISION = "omit_datetime_type_precision";
+    public static final String USE_LEGACY_WINDOW_FILTER_PUSHDOWN = "use_legacy_window_filter_pushdown";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -301,8 +302,8 @@ public final class SystemSessionProperties
                         false),
                 booleanProperty(
                         PLAN_WITH_TABLE_NODE_PARTITIONING,
-                        "Experimental: Adapt plan to pre-partitioned tables",
-                        true,
+                        "Adapt plan to pre-partitioned tables",
+                        featuresConfig.isPlanWithTableNodePartitioning(),
                         false),
                 enumProperty(
                         JOIN_REORDERING_STRATEGY,
@@ -573,6 +574,11 @@ public final class SystemSessionProperties
                         OMIT_DATETIME_TYPE_PRECISION,
                         "Omit precision when rendering datetime type names with default precision",
                         featuresConfig.isOmitDateTimeTypePrecision(),
+                        false),
+                booleanProperty(
+                        USE_LEGACY_WINDOW_FILTER_PUSHDOWN,
+                        "Use legacy window filter pushdown optimizer",
+                        featuresConfig.isUseLegacyWindowFilterPushdown(),
                         false));
     }
 
@@ -1029,5 +1035,10 @@ public final class SystemSessionProperties
     public static boolean isOmitDateTimeTypePrecision(Session session)
     {
         return session.getSystemProperty(OMIT_DATETIME_TYPE_PRECISION, Boolean.class);
+    }
+
+    public static boolean useLegacyWindowFilterPushdown(Session session)
+    {
+        return session.getSystemProperty(USE_LEGACY_WINDOW_FILTER_PUSHDOWN, Boolean.class);
     }
 }

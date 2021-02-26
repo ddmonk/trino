@@ -311,8 +311,8 @@ Type mapping configuration properties
     - Session property name
     - Description
     - Default
-  * - ``unsupported-type.handling-strategy``
-    - ``unsupported_type_handling_strategy``
+  * - ``unsupported-type-handling``
+    - ``unsupported_type_handling``
     - Configures how unsupported column data types are handled:
 
       - ``IGNORE`` - column is not accessible.

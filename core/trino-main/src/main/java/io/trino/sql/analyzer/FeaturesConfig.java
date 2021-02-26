@@ -128,6 +128,8 @@ public class FeaturesConfig
     private boolean iterativeRuleBasedColumnPruning = true;
     private boolean rewriteFilteringSemiJoinToInnerJoin = true;
     private boolean optimizeDuplicateInsensitiveJoins = true;
+    private boolean useLegacyWindowFilterPushdown;
+    private boolean planWithTableNodePartitioning = true;
 
     private Duration iterativeOptimizerTimeout = new Duration(3, MINUTES); // by default let optimizer wait a long time in case it retrieves some data from ConnectorMetadata
     private DataSize filterAndProjectMinOutputPageSize = DataSize.of(500, KILOBYTE);
@@ -988,6 +990,31 @@ public class FeaturesConfig
     public FeaturesConfig setOptimizeDuplicateInsensitiveJoins(boolean optimizeDuplicateInsensitiveJoins)
     {
         this.optimizeDuplicateInsensitiveJoins = optimizeDuplicateInsensitiveJoins;
+        return this;
+    }
+
+    public boolean isUseLegacyWindowFilterPushdown()
+    {
+        return useLegacyWindowFilterPushdown;
+    }
+
+    @Config("optimizer.use-legacy-window-filter-pushdown")
+    public FeaturesConfig setUseLegacyWindowFilterPushdown(boolean useLegacyWindowFilterPushdown)
+    {
+        this.useLegacyWindowFilterPushdown = useLegacyWindowFilterPushdown;
+        return this;
+    }
+
+    public boolean isPlanWithTableNodePartitioning()
+    {
+        return planWithTableNodePartitioning;
+    }
+
+    @Config("optimizer.plan-with-table-node-partitioning")
+    @ConfigDescription("Adapt plan to pre-partitioned tables")
+    public FeaturesConfig setPlanWithTableNodePartitioning(boolean planWithTableNodePartitioning)
+    {
+        this.planWithTableNodePartitioning = planWithTableNodePartitioning;
         return this;
     }
 }

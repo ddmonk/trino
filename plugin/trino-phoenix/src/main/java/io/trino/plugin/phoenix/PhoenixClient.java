@@ -26,6 +26,7 @@ import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
@@ -243,15 +244,18 @@ public class PhoenixClient
             throws SQLException
     {
         PhoenixSplit phoenixSplit = (PhoenixSplit) split;
-        PreparedStatement query = new QueryBuilder(this).buildSql(
+        QueryBuilder queryBuilder = new QueryBuilder(this);
+        PreparedQuery preparedQuery = queryBuilder.prepareQuery(
                 session,
                 connection,
-                table.getRemoteTableName(),
-                table.getGroupingSets(),
+                table.getRelationHandle(),
+                Optional.empty(),
                 columnHandles,
+                ImmutableMap.of(),
                 phoenixSplit.getConstraint(),
-                split.getAdditionalPredicate(),
-                tryApplyLimit(table.getLimit()));
+                split.getAdditionalPredicate());
+        preparedQuery = preparedQuery.transformQuery(tryApplyLimit(table.getLimit()));
+        PreparedStatement query = queryBuilder.prepareStatement(session, connection, preparedQuery);
         QueryPlan queryPlan = getQueryPlan((PhoenixPreparedStatement) query);
         ResultSet resultSet = getResultSet(phoenixSplit.getPhoenixInputSplit(), queryPlan);
         return new DelegatePreparedStatement(query)
@@ -344,16 +348,16 @@ public class PhoenixClient
                 return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0)), UNNECESSARY));
 
             case Types.CHAR:
-                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case VARCHAR:
             case NVARCHAR:
             case LONGVARCHAR:
             case LONGNVARCHAR:
                 if (typeHandle.getColumnSize().isEmpty()) {
-                    return Optional.of(varcharColumnMapping(createUnboundedVarcharType()));
+                    return Optional.of(varcharColumnMapping(createUnboundedVarcharType(), true));
                 }
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case Types.VARBINARY:
                 return Optional.of(varbinaryColumnMapping());

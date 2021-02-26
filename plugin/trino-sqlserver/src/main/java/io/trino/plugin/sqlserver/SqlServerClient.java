@@ -15,6 +15,8 @@ package io.trino.plugin.sqlserver;
 
 import com.google.common.base.Enums;
 import com.google.common.base.Joiner;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
@@ -48,6 +50,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -63,9 +66,9 @@ import java.sql.Types;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.function.BiFunction;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.microsoft.sqlserver.jdbc.SQLServerConnection.TRANSACTION_SNAPSHOT;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
@@ -84,16 +87,19 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.timeColumnMapping;
-import static io.trino.plugin.jdbc.StandardColumnMappings.timestampColumnMappingUsingSqlTimestamp;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampColumnMapping;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.sqlserver.SqlServerTableProperties.DATA_COMPRESSION;
 import static io.trino.plugin.sqlserver.SqlServerTableProperties.getDataCompression;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -103,13 +109,16 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME;
-import static io.trino.spi.type.TimestampType.TIMESTAMP;
+import static io.trino.spi.type.TimestampType.MAX_SHORT_PRECISION;
+import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Math.max;
+import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.math.RoundingMode.UNNECESSARY;
+import static java.time.Duration.ofMinutes;
 import static java.util.stream.Collectors.joining;
 
 public class SqlServerClient
@@ -120,7 +129,14 @@ public class SqlServerClient
 
     private static final Joiner DOT_JOINER = Joiner.on(".");
 
+    private final Cache<SnapshotIsolationEnabledCacheKey, Boolean> snapshotIsolationEnabled = CacheBuilder.newBuilder()
+            .maximumSize(1)
+            .expireAfterWrite(ofMinutes(5))
+            .build();
+
     private final AggregateFunctionRewriter aggregateFunctionRewriter;
+
+    private static final int MAX_SUPPORTED_TIMESTAMP_PRECISION = 7;
 
     @Inject
     public SqlServerClient(BaseJdbcConfig config, ConnectionFactory connectionFactory)
@@ -142,6 +158,7 @@ public class SqlServerClient
                         .add(new ImplementSqlServerStddevPop())
                         .add(new ImplementSqlServerVariance())
                         .add(new ImplementSqlServerVariancePop())
+                        // SQL Server doesn't have covar_samp and covar_pop functions so we can't implement pushdown for them
                         .build());
     }
 
@@ -223,7 +240,7 @@ public class SqlServerClient
             case Types.NUMERIC:
             case Types.DECIMAL: {
                 int columnSize = typeHandle.getRequiredColumnSize();
-                int decimalDigits = typeHandle.getDecimalDigits().orElseThrow(() -> new IllegalStateException("decimal digits not present"));
+                int decimalDigits = typeHandle.getRequiredDecimalDigits();
                 // TODO does sql server support negative scale?
                 int precision = columnSize + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
                 if (precision > Decimals.MAX_PRECISION) {
@@ -234,11 +251,11 @@ public class SqlServerClient
 
             case Types.CHAR:
             case Types.NCHAR:
-                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), false));
 
             case Types.VARCHAR:
             case Types.NVARCHAR:
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), false));
 
             case Types.BINARY:
             case Types.VARBINARY:
@@ -252,7 +269,8 @@ public class SqlServerClient
                 return Optional.of(timeColumnMapping(TIME));
 
             case Types.TIMESTAMP:
-                return Optional.of(timestampColumnMappingUsingSqlTimestamp(TIMESTAMP));
+                int precision = typeHandle.getRequiredDecimalDigits();
+                return Optional.of(timestampColumnMapping(createTimestampType(precision)));
         }
 
         // TODO (https://github.com/trinodb/trino/issues/4593) implement proper type mapping
@@ -315,6 +333,15 @@ public class SqlServerClient
             return WriteMapping.longMapping("date", dateWriteFunction());
         }
 
+        if (type instanceof TimestampType) {
+            TimestampType timestampType = (TimestampType) type;
+            String dataType = format("datetime2(%d)", min(timestampType.getPrecision(), MAX_SUPPORTED_TIMESTAMP_PRECISION));
+            if (timestampType.getPrecision() <= MAX_SHORT_PRECISION) {
+                return WriteMapping.longMapping(dataType, timestampWriteFunction(timestampType));
+            }
+            return WriteMapping.objectMapping(dataType, longTimestampWriteFunction(timestampType));
+        }
+
         // TODO implement proper type mapping
         return legacyToWriteMapping(session, type);
     }
@@ -334,11 +361,7 @@ public class SqlServerClient
     @Override
     protected Optional<BiFunction<String, Long, String>> limitFunction()
     {
-        return Optional.of((sql, limit) -> {
-            String start = "SELECT ";
-            checkArgument(sql.startsWith(start));
-            return "SELECT TOP " + limit + " " + sql.substring(start.length());
-        });
+        return Optional.of((sql, limit) -> format("SELECT TOP %s * FROM (%s) o", limit, sql));
     }
 
     @Override
@@ -362,6 +385,9 @@ public class SqlServerClient
     @Override
     public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle tableHandle)
     {
+        if (!tableHandle.isNamedRelation()) {
+            return ImmutableMap.of();
+        }
         try (Connection connection = configureConnectionTransactionIsolation(connectionFactory.openConnection(session));
                 Handle handle = Jdbi.open(connection)) {
             return getTableDataCompression(handle, tableHandle)
@@ -387,12 +413,14 @@ public class SqlServerClient
         return configureConnectionTransactionIsolation(super.getConnection(session, split));
     }
 
-    private static Connection configureConnectionTransactionIsolation(Connection connection)
+    private Connection configureConnectionTransactionIsolation(Connection connection)
             throws SQLException
     {
         try {
-            // SQL Server's READ COMMITTED + SNAPSHOT ISOLATION is equivalent to ordinary READ COMMITTED in e.g. Oracle, PostgreSQL.
-            connection.setTransactionIsolation(TRANSACTION_SNAPSHOT);
+            if (hasSnapshotIsolationEnabled(connection)) {
+                // SQL Server's READ COMMITTED + SNAPSHOT ISOLATION is equivalent to ordinary READ COMMITTED in e.g. Oracle, PostgreSQL.
+                connection.setTransactionIsolation(TRANSACTION_SNAPSHOT);
+            }
         }
         catch (SQLException e) {
             connection.close();
@@ -400,6 +428,24 @@ public class SqlServerClient
         }
 
         return connection;
+    }
+
+    private boolean hasSnapshotIsolationEnabled(Connection connection)
+            throws SQLException
+    {
+        try {
+            return snapshotIsolationEnabled.get(SnapshotIsolationEnabledCacheKey.INSTANCE, () -> {
+                Handle handle = Jdbi.open(connection);
+                return handle.createQuery("SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = :name")
+                        .bind("name", connection.getCatalog())
+                        .mapTo(Boolean.class)
+                        .findOne()
+                        .orElse(false);
+            });
+        }
+        catch (ExecutionException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
+        }
     }
 
     private static String singleQuote(String... objects)
@@ -457,5 +503,12 @@ public class SqlServerClient
                 .mapTo(String.class)
                 .findOne()
                 .flatMap(dataCompression -> Enums.getIfPresent(DataCompression.class, dataCompression).toJavaUtil());
+    }
+
+    private enum SnapshotIsolationEnabledCacheKey
+    {
+        // The snapshot isolation can be enabled or disabled on database level. We connect to single
+        // database, so from our perspective, this is a global property.
+        INSTANCE
     }
 }

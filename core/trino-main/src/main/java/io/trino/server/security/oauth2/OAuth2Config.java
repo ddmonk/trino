@@ -17,6 +17,7 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
@@ -41,6 +42,7 @@ public class OAuth2Config
     private String clientSecret;
     private Optional<String> audience = Optional.empty();
     private Set<String> scopes = ImmutableSet.of(OPENID_SCOPE);
+    private String principalField = "sub";
     private Duration challengeTimeout = new Duration(15, TimeUnit.MINUTES);
     private Optional<String> userMappingPattern = Optional.empty();
     private Optional<File> userMappingFile = Optional.empty();
@@ -121,6 +123,7 @@ public class OAuth2Config
     }
 
     @Config("http-server.authentication.oauth2.client-secret")
+    @ConfigSecuritySensitive
     @ConfigDescription("Client secret")
     public OAuth2Config setClientSecret(String clientSecret)
     {
@@ -152,6 +155,19 @@ public class OAuth2Config
     public OAuth2Config setScopes(String scopes)
     {
         this.scopes = Splitter.on(',').trimResults().omitEmptyStrings().splitToStream(scopes).collect(toImmutableSet());
+        return this;
+    }
+
+    @NotNull
+    public String getPrincipalField()
+    {
+        return principalField;
+    }
+
+    @Config("http-server.authentication.oauth2.principal-field")
+    public OAuth2Config setPrincipalField(String principalField)
+    {
+        this.principalField = principalField;
         return this;
     }
 

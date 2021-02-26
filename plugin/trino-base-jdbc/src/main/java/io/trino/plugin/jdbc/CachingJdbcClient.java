@@ -130,7 +130,7 @@ public class CachingJdbcClient
         if (tableHandle.getColumns().isPresent()) {
             return tableHandle.getColumns().get();
         }
-        ColumnsCacheKey key = new ColumnsCacheKey(JdbcIdentity.from(session), getSessionProperties(session), tableHandle.getSchemaTableName());
+        ColumnsCacheKey key = new ColumnsCacheKey(JdbcIdentity.from(session), getSessionProperties(session), tableHandle.getRequiredNamedRelation().getSchemaTableName());
         return get(columnsCache, key, () -> delegate.getColumns(session, tableHandle));
     }
 
@@ -150,12 +150,6 @@ public class CachingJdbcClient
     public WriteMapping toWriteMapping(ConnectorSession session, Type type)
     {
         return delegate.toWriteMapping(session, type);
-    }
-
-    @Override
-    public boolean supportsGroupingSets()
-    {
-        return delegate.supportsGroupingSets();
     }
 
     @Override
@@ -188,6 +182,17 @@ public class CachingJdbcClient
             throws SQLException
     {
         delegate.abortReadConnection(connection);
+    }
+
+    @Override
+    public PreparedQuery prepareQuery(
+            ConnectorSession session,
+            JdbcTableHandle table,
+            Optional<List<List<JdbcColumnHandle>>> groupingSets,
+            List<JdbcColumnHandle> columns,
+            Map<String, String> columnExpressions)
+    {
+        return delegate.prepareQuery(session, table, groupingSets, columns, columnExpressions);
     }
 
     @Override
@@ -249,7 +254,7 @@ public class CachingJdbcClient
     public void dropTable(ConnectorSession session, JdbcTableHandle jdbcTableHandle)
     {
         delegate.dropTable(session, jdbcTableHandle);
-        invalidateTableCaches(jdbcTableHandle.getSchemaTableName());
+        invalidateTableCaches(jdbcTableHandle.asPlainTable().getSchemaTableName());
     }
 
     @Override
@@ -302,35 +307,35 @@ public class CachingJdbcClient
     public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
     {
         delegate.setColumnComment(session, handle, column, comment);
-        invalidateColumnsCache(handle.getSchemaTableName());
+        invalidateColumnsCache(handle.asPlainTable().getSchemaTableName());
     }
 
     @Override
     public void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column)
     {
         delegate.addColumn(session, handle, column);
-        invalidateColumnsCache(handle.getSchemaTableName());
+        invalidateColumnsCache(handle.asPlainTable().getSchemaTableName());
     }
 
     @Override
     public void dropColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
         delegate.dropColumn(session, handle, column);
-        invalidateColumnsCache(handle.getSchemaTableName());
+        invalidateColumnsCache(handle.asPlainTable().getSchemaTableName());
     }
 
     @Override
     public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName)
     {
         delegate.renameColumn(session, handle, jdbcColumn, newColumnName);
-        invalidateColumnsCache(handle.getSchemaTableName());
+        invalidateColumnsCache(handle.asPlainTable().getSchemaTableName());
     }
 
     @Override
     public void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName)
     {
         delegate.renameTable(session, handle, newTableName);
-        invalidateTableCaches(handle.getSchemaTableName());
+        invalidateTableCaches(handle.asPlainTable().getSchemaTableName());
         invalidateTableCaches(newTableName);
     }
 

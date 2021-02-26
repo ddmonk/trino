@@ -15,7 +15,9 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import io.trino.memory.context.AggregatedMemoryContext;
+import io.trino.orc.NameBasedFieldMapper;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcDataSource;
@@ -74,6 +76,7 @@ import javax.inject.Inject;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -85,6 +88,7 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Maps.uniqueIndex;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.INITIAL_BATCH_SIZE;
+import static io.trino.orc.OrcReader.ProjectedLayout.fullyProjectedLayout;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.getParquetTypeByName;
@@ -232,8 +236,9 @@ public class IcebergPageSourceProvider
                                 .withMaxReadBlockSize(getParquetMaxReadBlockSize(session)),
                         predicate,
                         fileFormatDataSourceStats);
+            default:
+                throw new TrinoException(NOT_SUPPORTED, "File format not supported for Iceberg: " + fileFormat);
         }
-        throw new TrinoException(NOT_SUPPORTED, "File format not supported for Iceberg: " + fileFormat);
     }
 
     private static ConnectorPageSource createOrcPageSource(
@@ -310,13 +315,17 @@ public class IcebergPageSourceProvider
             OrcRecordReader recordReader = reader.createRecordReader(
                     fileReadColumns,
                     fileReadTypes,
+                    Collections.nCopies(fileReadColumns.size(), fullyProjectedLayout()),
                     predicateBuilder.build(),
                     start,
                     length,
                     UTC,
                     systemMemoryUsage,
                     INITIAL_BATCH_SIZE,
-                    exception -> handleException(orcDataSourceId, exception));
+                    exception -> handleException(orcDataSourceId, exception),
+                    fileColumnsByIcebergId.isEmpty()
+                            ? NameBasedFieldMapper::create
+                            : new IdBasedFieldMapperFactory(columns));
 
             return new OrcPageSource(
                     recordReader,
@@ -343,6 +352,71 @@ public class IcebergPageSourceProvider
                 throw new TrinoException(ICEBERG_MISSING_DATA, message, e);
             }
             throw new TrinoException(ICEBERG_CANNOT_OPEN_SPLIT, message, e);
+        }
+    }
+
+    private static class IdBasedFieldMapperFactory
+            implements OrcReader.FieldMapperFactory
+    {
+        // Stores a mapping between subfield names and ids for every top-level/nested column id
+        private final Map<Integer, Map<String, Integer>> fieldNameToIdMappingForTableColumns;
+
+        public IdBasedFieldMapperFactory(List<IcebergColumnHandle> columns)
+        {
+            requireNonNull(columns, "columns is null");
+
+            ImmutableMap.Builder<Integer, Map<String, Integer>> mapping = ImmutableMap.builder();
+            for (IcebergColumnHandle column : columns) {
+                // Recursively compute subfield name to id mapping for every column
+                populateMapping(column.getColumnIdentity(), mapping);
+            }
+
+            this.fieldNameToIdMappingForTableColumns = mapping.build();
+        }
+
+        @Override
+        public OrcReader.FieldMapper create(OrcColumn column)
+        {
+            Map<Integer, OrcColumn> nestedColumns = Maps.uniqueIndex(
+                    column.getNestedColumns(),
+                    field -> Integer.valueOf(field.getAttributes().get(ORC_ICEBERG_ID_KEY)));
+
+            int icebergId = Integer.valueOf(column.getAttributes().get(ORC_ICEBERG_ID_KEY));
+            return new IdBasedFieldMapper(nestedColumns, fieldNameToIdMappingForTableColumns.get(icebergId));
+        }
+
+        private static void populateMapping(
+                ColumnIdentity identity,
+                ImmutableMap.Builder<Integer, Map<String, Integer>> fieldNameToIdMappingForTableColumns)
+        {
+            fieldNameToIdMappingForTableColumns.put(
+                    identity.getId(),
+                    identity.getChildren().stream()
+                            .collect(toImmutableMap(ColumnIdentity::getName, ColumnIdentity::getId)));
+
+            for (ColumnIdentity child : identity.getChildren()) {
+                populateMapping(child, fieldNameToIdMappingForTableColumns);
+            }
+        }
+    }
+
+    private static class IdBasedFieldMapper
+            implements OrcReader.FieldMapper
+    {
+        private final Map<Integer, OrcColumn> idToColumnMappingForFile;
+        private final Map<String, Integer> nameToIdMappingForTableColumns;
+
+        public IdBasedFieldMapper(Map<Integer, OrcColumn> idToColumnMappingForFile, Map<String, Integer> nameToIdMappingForTableColumns)
+        {
+            this.idToColumnMappingForFile = requireNonNull(idToColumnMappingForFile, "idToColumnMappingForFile is null");
+            this.nameToIdMappingForTableColumns = requireNonNull(nameToIdMappingForTableColumns, "nameToIdMappingForTableColumns is null");
+        }
+
+        @Override
+        public OrcColumn get(String fieldName)
+        {
+            int fieldId = nameToIdMappingForTableColumns.get(fieldName);
+            return idToColumnMappingForFile.get(fieldId);
         }
     }
 

@@ -167,9 +167,9 @@ public class TestOAuth2WebUiAuthenticationFilter
             throws IOException
     {
         try (Response response = httpClient
-                .newCall(uiCall().build())
+                .newCall(apiCall().build())
                 .execute()) {
-            assertRedirectResponse(response);
+            assertUnauthorizedResponse(response);
         }
     }
 
@@ -240,7 +240,7 @@ public class TestOAuth2WebUiAuthenticationFilter
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/6223", match = OAUTH2_COOKIE + " is missing")
+    @Flaky(issue = "https://github.com/trinodb/trino/issues/6223", match = "^" /* the test is flaky in a variety of ways due to Selenium usage */)
     public void testSuccessfulFlow()
             throws Exception
     {
@@ -252,7 +252,7 @@ public class TestOAuth2WebUiAuthenticationFilter
     }
 
     @Test
-    @Flaky(issue = "https://github.com/trinodb/trino/issues/6223", match = OAUTH2_COOKIE + " is missing")
+    @Flaky(issue = "https://github.com/trinodb/trino/issues/6223", match = "^"  /* the test is flaky in a variety of ways due to Selenium usage */)
     public void testExpiredAccessToken()
             throws Exception
     {
@@ -269,6 +269,13 @@ public class TestOAuth2WebUiAuthenticationFilter
     {
         return new Request.Builder()
                 .url(serverUri.resolve("/ui/").toString())
+                .get();
+    }
+
+    private Request.Builder apiCall()
+    {
+        return new Request.Builder()
+                .url(serverUri.resolve("/ui/api/cluster").toString())
                 .get();
     }
 

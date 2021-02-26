@@ -64,14 +64,17 @@ import io.trino.spi.block.Block;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ConnectorBucketNodeMap;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNewTableLayout;
+import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -473,7 +476,7 @@ public abstract class AbstractTestHive
     private static final BlockTypeOperators BLOCK_TYPE_OPERATORS = new BlockTypeOperators(TYPE_OPERATORS);
     private static final JoinCompiler JOIN_COMPILER = new JoinCompiler(TYPE_OPERATORS);
 
-    private static final List<ColumnMetadata> STATISTICS_TABLE_COLUMNS = ImmutableList.<ColumnMetadata>builder()
+    protected static final List<ColumnMetadata> STATISTICS_TABLE_COLUMNS = ImmutableList.<ColumnMetadata>builder()
             .add(new ColumnMetadata("t_boolean", BOOLEAN))
             .add(new ColumnMetadata("t_bigint", BIGINT))
             .add(new ColumnMetadata("t_integer", INTEGER))
@@ -500,7 +503,7 @@ public abstract class AbstractTestHive
     protected static final PartitionStatistics BASIC_STATISTICS_1 = new PartitionStatistics(new HiveBasicStatistics(0, 20, 3, 0), ImmutableMap.of());
     protected static final PartitionStatistics BASIC_STATISTICS_2 = new PartitionStatistics(new HiveBasicStatistics(0, 30, 2, 0), ImmutableMap.of());
 
-    private static final PartitionStatistics STATISTICS_1 =
+    protected static final PartitionStatistics STATISTICS_1 =
             new PartitionStatistics(
                     BASIC_STATISTICS_1.getBasicStatistics(),
                     ImmutableMap.<String, HiveColumnStatistics>builder()
@@ -513,15 +516,15 @@ public abstract class AbstractTestHive
                             .put("t_float", createDoubleColumnStatistics(OptionalDouble.of(123.25), OptionalDouble.of(567.58), OptionalLong.of(9), OptionalLong.of(10)))
                             .put("t_string", createStringColumnStatistics(OptionalLong.of(10), OptionalLong.of(50), OptionalLong.of(3), OptionalLong.of(7)))
                             .put("t_varchar", createStringColumnStatistics(OptionalLong.of(100), OptionalLong.of(230), OptionalLong.of(5), OptionalLong.of(3)))
-                            .put("t_char", createStringColumnStatistics(OptionalLong.of(5), OptionalLong.of(500), OptionalLong.of(1), OptionalLong.of(4)))
-                            .put("t_varbinary", createBinaryColumnStatistics(OptionalLong.of(4), OptionalLong.of(300), OptionalLong.of(1)))
+                            .put("t_char", createStringColumnStatistics(OptionalLong.of(5), OptionalLong.of(50), OptionalLong.of(1), OptionalLong.of(4)))
+                            .put("t_varbinary", createBinaryColumnStatistics(OptionalLong.of(4), OptionalLong.of(50), OptionalLong.of(1)))
                             .put("t_date", createDateColumnStatistics(Optional.of(LocalDate.ofEpochDay(1)), Optional.of(LocalDate.ofEpochDay(2)), OptionalLong.of(7), OptionalLong.of(6)))
                             .put("t_timestamp", createIntegerColumnStatistics(OptionalLong.of(1234567L), OptionalLong.of(71234567L), OptionalLong.of(7), OptionalLong.of(5)))
                             .put("t_short_decimal", createDecimalColumnStatistics(Optional.of(new BigDecimal(10)), Optional.of(new BigDecimal(12)), OptionalLong.of(3), OptionalLong.of(5)))
                             .put("t_long_decimal", createDecimalColumnStatistics(Optional.of(new BigDecimal("12345678901234567.123")), Optional.of(new BigDecimal("81234567890123456.123")), OptionalLong.of(2), OptionalLong.of(1)))
                             .build());
 
-    private static final PartitionStatistics STATISTICS_1_1 =
+    protected static final PartitionStatistics STATISTICS_1_1 =
             new PartitionStatistics(
                     new HiveBasicStatistics(OptionalLong.of(0), OptionalLong.of(15), OptionalLong.empty(), OptionalLong.of(0)),
                     STATISTICS_1.getColumnStatistics().entrySet()
@@ -529,7 +532,7 @@ public abstract class AbstractTestHive
                             .filter(entry -> entry.getKey().hashCode() % 2 == 0)
                             .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue)));
 
-    private static final PartitionStatistics STATISTICS_1_2 =
+    protected static final PartitionStatistics STATISTICS_1_2 =
             new PartitionStatistics(
                     new HiveBasicStatistics(OptionalLong.of(0), OptionalLong.of(15), OptionalLong.of(3), OptionalLong.of(0)),
                     STATISTICS_1.getColumnStatistics().entrySet()
@@ -545,10 +548,10 @@ public abstract class AbstractTestHive
                             .put("t_bigint", createIntegerColumnStatistics(OptionalLong.of(2345L), OptionalLong.of(6789L), OptionalLong.of(4), OptionalLong.of(7)))
                             .put("t_integer", createIntegerColumnStatistics(OptionalLong.of(234L), OptionalLong.of(678L), OptionalLong.of(5), OptionalLong.of(6)))
                             .put("t_smallint", createIntegerColumnStatistics(OptionalLong.of(23L), OptionalLong.of(65L), OptionalLong.of(7), OptionalLong.of(5)))
-                            .put("t_tinyint", createIntegerColumnStatistics(OptionalLong.of(12), OptionalLong.of(3L), OptionalLong.of(2), OptionalLong.of(3)))
+                            .put("t_tinyint", createIntegerColumnStatistics(OptionalLong.of(3L), OptionalLong.of(12L), OptionalLong.of(2), OptionalLong.of(3)))
                             .put("t_double", createDoubleColumnStatistics(OptionalDouble.of(2345.25), OptionalDouble.of(6785.58), OptionalLong.of(6), OptionalLong.of(3)))
                             .put("t_float", createDoubleColumnStatistics(OptionalDouble.of(235.25), OptionalDouble.of(676.58), OptionalLong.of(7), OptionalLong.of(11)))
-                            .put("t_string", createStringColumnStatistics(OptionalLong.of(11), OptionalLong.of(600), OptionalLong.of(2), OptionalLong.of(6)))
+                            .put("t_string", createStringColumnStatistics(OptionalLong.of(301), OptionalLong.of(600), OptionalLong.of(2), OptionalLong.of(6)))
                             .put("t_varchar", createStringColumnStatistics(OptionalLong.of(99), OptionalLong.of(223), OptionalLong.of(7), OptionalLong.of(1)))
                             .put("t_char", createStringColumnStatistics(OptionalLong.of(6), OptionalLong.of(60), OptionalLong.of(0), OptionalLong.of(3)))
                             .put("t_varbinary", createBinaryColumnStatistics(OptionalLong.of(2), OptionalLong.of(10), OptionalLong.of(2)))
@@ -617,6 +620,7 @@ public abstract class AbstractTestHive
     protected ConnectorSplitManager splitManager;
     protected ConnectorPageSourceProvider pageSourceProvider;
     protected ConnectorPageSinkProvider pageSinkProvider;
+    protected ConnectorNodePartitioningProvider nodePartitioningProvider;
     protected ExecutorService executor;
 
     private ScheduledExecutorService heartbeatService;
@@ -826,6 +830,9 @@ public abstract class AbstractTestHive
                 getDefaultHiveRecordCursorProviders(hiveConfig, hdfsEnvironment),
                 new GenericHiveRecordCursorProvider(hdfsEnvironment, hiveConfig),
                 Optional.empty());
+        nodePartitioningProvider = new HiveNodePartitioningProvider(
+                new TestingNodeManager("fake-environment"),
+                TYPE_MANAGER);
     }
 
     protected HdfsConfiguration createTestHdfsConfiguration()
@@ -4942,6 +4949,80 @@ public abstract class AbstractTestHive
     }
 
     @Test
+    public void testInsertBucketedTableLayout()
+            throws Exception
+    {
+        SchemaTableName tableName = temporaryTable("empty_bucketed_table");
+        try {
+            List<Column> columns = ImmutableList.of(
+                    new Column("column1", HIVE_STRING, Optional.empty()),
+                    new Column("column2", HIVE_LONG, Optional.empty()));
+            HiveBucketProperty bucketProperty = new HiveBucketProperty(ImmutableList.of("column1"), BUCKETING_V1, 4, ImmutableList.of());
+            createEmptyTable(tableName, ORC, columns, ImmutableList.of(), Optional.of(bucketProperty));
+
+            try (Transaction transaction = newTransaction()) {
+                ConnectorMetadata metadata = transaction.getMetadata();
+                ConnectorSession session = newSession();
+                ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
+                Optional<ConnectorNewTableLayout> insertLayout = metadata.getInsertLayout(session, tableHandle);
+                assertTrue(insertLayout.isPresent());
+                ConnectorPartitioningHandle partitioningHandle = new HivePartitioningHandle(
+                        bucketProperty.getBucketingVersion(),
+                        bucketProperty.getBucketCount(),
+                        ImmutableList.of(HIVE_STRING),
+                        OptionalInt.empty(),
+                        false);
+                assertEquals(insertLayout.get().getPartitioning(), Optional.of(partitioningHandle));
+                assertEquals(insertLayout.get().getPartitionColumns(), ImmutableList.of("column1"));
+                ConnectorBucketNodeMap connectorBucketNodeMap = nodePartitioningProvider.getBucketNodeMap(transaction.getTransactionHandle(), session, partitioningHandle);
+                assertEquals(connectorBucketNodeMap.getBucketCount(), 4);
+                assertFalse(connectorBucketNodeMap.hasFixedMapping());
+            }
+        }
+        finally {
+            dropTable(tableName);
+        }
+    }
+
+    @Test
+    public void testInsertPartitionedBucketedTableLayout()
+            throws Exception
+    {
+        SchemaTableName tableName = temporaryTable("empty_partitioned_table");
+        try {
+            Column partitioningColumn = new Column("column2", HIVE_LONG, Optional.empty());
+            List<Column> columns = ImmutableList.of(
+                    new Column("column1", HIVE_STRING, Optional.empty()),
+                    partitioningColumn);
+            HiveBucketProperty bucketProperty = new HiveBucketProperty(ImmutableList.of("column1"), BUCKETING_V1, 4, ImmutableList.of());
+            createEmptyTable(tableName, ORC, columns, ImmutableList.of(partitioningColumn), Optional.of(bucketProperty));
+
+            try (Transaction transaction = newTransaction()) {
+                ConnectorMetadata metadata = transaction.getMetadata();
+                ConnectorSession session = newSession();
+                ConnectorTableHandle tableHandle = getTableHandle(metadata, tableName);
+                Optional<ConnectorNewTableLayout> insertLayout = metadata.getInsertLayout(session, tableHandle);
+                assertTrue(insertLayout.isPresent());
+                ConnectorPartitioningHandle partitioningHandle = new HivePartitioningHandle(
+                        bucketProperty.getBucketingVersion(),
+                        bucketProperty.getBucketCount(),
+                        ImmutableList.of(HIVE_STRING),
+                        OptionalInt.empty(),
+                        true);
+                assertEquals(insertLayout.get().getPartitioning(), Optional.of(partitioningHandle));
+                assertEquals(insertLayout.get().getPartitionColumns(), ImmutableList.of("column1", "column2"));
+                ConnectorBucketNodeMap connectorBucketNodeMap = nodePartitioningProvider.getBucketNodeMap(transaction.getTransactionHandle(), session, partitioningHandle);
+                assertEquals(connectorBucketNodeMap.getBucketCount(), 32);
+                assertTrue(connectorBucketNodeMap.hasFixedMapping());
+                assertEquals(connectorBucketNodeMap.getFixedMapping().size(), 32);
+            }
+        }
+        finally {
+            dropTable(tableName);
+        }
+    }
+
+    @Test
     public void testPreferredCreateTableLayout()
     {
         try (Transaction transaction = newTransaction()) {
@@ -4962,6 +5043,73 @@ public abstract class AbstractTestHive
             assertTrue(newTableLayout.isPresent());
             assertFalse(newTableLayout.get().getPartitioning().isPresent());
             assertEquals(newTableLayout.get().getPartitionColumns(), ImmutableList.of("column2"));
+        }
+    }
+
+    @Test
+    public void testCreateBucketedTableLayout()
+    {
+        try (Transaction transaction = newTransaction()) {
+            ConnectorMetadata metadata = transaction.getMetadata();
+            ConnectorSession session = newSession();
+            Optional<ConnectorNewTableLayout> newTableLayout = metadata.getNewTableLayout(
+                    session,
+                    new ConnectorTableMetadata(
+                            new SchemaTableName("schema", "table"),
+                            ImmutableList.of(
+                                    new ColumnMetadata("column1", BIGINT),
+                                    new ColumnMetadata("column2", BIGINT)),
+                            ImmutableMap.of(
+                                    PARTITIONED_BY_PROPERTY, ImmutableList.of(),
+                                    BUCKETED_BY_PROPERTY, ImmutableList.of("column1"),
+                                    BUCKET_COUNT_PROPERTY, 10,
+                                    SORTED_BY_PROPERTY, ImmutableList.of())));
+            assertTrue(newTableLayout.isPresent());
+            ConnectorPartitioningHandle partitioningHandle = new HivePartitioningHandle(
+                    BUCKETING_V1,
+                    10,
+                    ImmutableList.of(HIVE_LONG),
+                    OptionalInt.empty(),
+                    false);
+            assertEquals(newTableLayout.get().getPartitioning(), Optional.of(partitioningHandle));
+            assertEquals(newTableLayout.get().getPartitionColumns(), ImmutableList.of("column1"));
+            ConnectorBucketNodeMap connectorBucketNodeMap = nodePartitioningProvider.getBucketNodeMap(transaction.getTransactionHandle(), session, partitioningHandle);
+            assertEquals(connectorBucketNodeMap.getBucketCount(), 10);
+            assertFalse(connectorBucketNodeMap.hasFixedMapping());
+        }
+    }
+
+    @Test
+    public void testCreatePartitionedBucketedTableLayout()
+    {
+        try (Transaction transaction = newTransaction()) {
+            ConnectorMetadata metadata = transaction.getMetadata();
+            ConnectorSession session = newSession();
+            Optional<ConnectorNewTableLayout> newTableLayout = metadata.getNewTableLayout(
+                    session,
+                    new ConnectorTableMetadata(
+                            new SchemaTableName("schema", "table"),
+                            ImmutableList.of(
+                                    new ColumnMetadata("column1", BIGINT),
+                                    new ColumnMetadata("column2", BIGINT)),
+                            ImmutableMap.of(
+                                    PARTITIONED_BY_PROPERTY, ImmutableList.of("column2"),
+                                    BUCKETED_BY_PROPERTY, ImmutableList.of("column1"),
+                                    BUCKET_COUNT_PROPERTY, 10,
+                                    SORTED_BY_PROPERTY, ImmutableList.of())));
+            assertTrue(newTableLayout.isPresent());
+            ConnectorPartitioningHandle partitioningHandle = new HivePartitioningHandle(
+                    BUCKETING_V1,
+                    10,
+                    ImmutableList.of(HIVE_LONG),
+                    OptionalInt.empty(),
+                    true);
+            assertEquals(newTableLayout.get().getPartitioning(), Optional.of(partitioningHandle));
+            assertEquals(newTableLayout.get().getPartitionColumns(), ImmutableList.of("column1", "column2"));
+            ConnectorBucketNodeMap connectorBucketNodeMap = nodePartitioningProvider.getBucketNodeMap(transaction.getTransactionHandle(), session, partitioningHandle);
+            assertEquals(connectorBucketNodeMap.getBucketCount(), 32);
+            assertTrue(connectorBucketNodeMap.hasFixedMapping());
+            assertEquals(connectorBucketNodeMap.getFixedMapping().size(), 32);
         }
     }
 

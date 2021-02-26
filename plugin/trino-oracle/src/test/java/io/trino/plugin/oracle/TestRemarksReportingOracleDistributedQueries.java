@@ -16,8 +16,10 @@ package io.trino.plugin.oracle;
 import com.google.common.collect.ImmutableMap;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.SqlExecutor;
-import io.trino.tpch.TpchTable;
 import org.testng.annotations.AfterClass;
+
+import static io.trino.plugin.oracle.TestingOracleServer.TEST_PASS;
+import static io.trino.plugin.oracle.TestingOracleServer.TEST_USER;
 
 public class TestRemarksReportingOracleDistributedQueries
         extends BaseTestOracleDistributedQueries
@@ -29,7 +31,18 @@ public class TestRemarksReportingOracleDistributedQueries
             throws Exception
     {
         this.oracleServer = new TestingOracleServer();
-        return OracleQueryRunner.createOracleQueryRunner(oracleServer, ImmutableMap.of(), TpchTable.getTables(), false, true);
+        return OracleQueryRunner.createOracleQueryRunner(
+                oracleServer,
+                ImmutableMap.of(),
+                ImmutableMap.<String, String>builder()
+                        .put("connection-url", oracleServer.getJdbcUrl())
+                        .put("connection-user", TEST_USER)
+                        .put("connection-password", TEST_PASS)
+                        .put("allow-drop-table", "true")
+                        .put("oracle.connection-pool.enabled", "false")
+                        .put("oracle.remarks-reporting.enabled", "true")
+                        .build(),
+                REQUIRED_TPCH_TABLES);
     }
 
     @AfterClass(alwaysRun = true)

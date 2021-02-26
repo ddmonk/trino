@@ -42,10 +42,19 @@ import io.trino.plugin.jdbc.expression.AggregateFunctionRewriter;
 import io.trino.plugin.jdbc.expression.AggregateFunctionRule;
 import io.trino.plugin.jdbc.expression.ImplementAvgDecimal;
 import io.trino.plugin.jdbc.expression.ImplementAvgFloatingPoint;
+import io.trino.plugin.jdbc.expression.ImplementCorr;
 import io.trino.plugin.jdbc.expression.ImplementCount;
 import io.trino.plugin.jdbc.expression.ImplementCountAll;
+import io.trino.plugin.jdbc.expression.ImplementCovariancePop;
+import io.trino.plugin.jdbc.expression.ImplementCovarianceSamp;
 import io.trino.plugin.jdbc.expression.ImplementMinMax;
+import io.trino.plugin.jdbc.expression.ImplementRegrIntercept;
+import io.trino.plugin.jdbc.expression.ImplementRegrSlope;
+import io.trino.plugin.jdbc.expression.ImplementStddevPop;
+import io.trino.plugin.jdbc.expression.ImplementStddevSamp;
 import io.trino.plugin.jdbc.expression.ImplementSum;
+import io.trino.plugin.jdbc.expression.ImplementVariancePop;
+import io.trino.plugin.jdbc.expression.ImplementVarianceSamp;
 import io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -80,7 +89,6 @@ import javax.inject.Inject;
 import java.io.IOException;
 import java.sql.Array;
 import java.sql.Connection;
-import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -184,7 +192,6 @@ import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.math.RoundingMode.UNNECESSARY;
 import static java.sql.DatabaseMetaData.columnNoNulls;
-import static java.util.Collections.addAll;
 import static java.util.Objects.requireNonNull;
 
 public class PostgreSqlClient
@@ -204,7 +211,7 @@ public class PostgreSqlClient
     private final Type jsonType;
     private final Type uuidType;
     private final MapType varcharMapType;
-    private final String[] tableTypes;
+    private final List<String> tableTypes;
     private final AggregateFunctionRewriter aggregateFunctionRewriter;
 
     @Inject
@@ -219,12 +226,12 @@ public class PostgreSqlClient
         this.uuidType = typeManager.getType(new TypeSignature(StandardTypes.UUID));
         this.varcharMapType = (MapType) typeManager.getType(mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
 
-        List<String> tableTypes = new ArrayList<>();
-        addAll(tableTypes, "TABLE", "VIEW", "MATERIALIZED VIEW", "FOREIGN TABLE");
+        ImmutableList.Builder<String> tableTypes = ImmutableList.builder();
+        tableTypes.add("TABLE", "VIEW", "MATERIALIZED VIEW", "FOREIGN TABLE");
         if (postgreSqlConfig.isIncludeSystemTables()) {
-            addAll(tableTypes, "SYSTEM TABLE", "SYSTEM VIEW");
+            tableTypes.add("SYSTEM TABLE", "SYSTEM VIEW");
         }
-        this.tableTypes = tableTypes.toArray(new String[0]);
+        this.tableTypes = tableTypes.build();
 
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         this.aggregateFunctionRewriter = new AggregateFunctionRewriter(
@@ -237,6 +244,15 @@ public class PostgreSqlClient
                         .add(new ImplementAvgFloatingPoint())
                         .add(new ImplementAvgDecimal())
                         .add(new ImplementAvgBigint())
+                        .add(new ImplementStddevSamp())
+                        .add(new ImplementStddevPop())
+                        .add(new ImplementVarianceSamp())
+                        .add(new ImplementVariancePop())
+                        .add(new ImplementCovarianceSamp())
+                        .add(new ImplementCovariancePop())
+                        .add(new ImplementCorr())
+                        .add(new ImplementRegrIntercept())
+                        .add(new ImplementRegrSlope())
                         .build());
     }
 
@@ -277,15 +293,9 @@ public class PostgreSqlClient
     }
 
     @Override
-    protected ResultSet getTables(Connection connection, Optional<String> schemaName, Optional<String> tableName)
-            throws SQLException
+    protected Optional<List<String>> getTableTypes()
     {
-        DatabaseMetaData metadata = connection.getMetaData();
-        return metadata.getTables(
-                connection.getCatalog(),
-                escapeNamePattern(schemaName, metadata.getSearchStringEscape()).orElse(null),
-                escapeNamePattern(tableName, metadata.getSearchStringEscape()).orElse(null),
-                tableTypes.clone());
+        return Optional.of(tableTypes);
     }
 
     @Override
@@ -294,6 +304,8 @@ public class PostgreSqlClient
         if (tableHandle.getColumns().isPresent()) {
             return tableHandle.getColumns().get();
         }
+        checkArgument(tableHandle.isNamedRelation(), "Cannot get columns for %s", tableHandle);
+        SchemaTableName schemaTableName = tableHandle.getRequiredNamedRelation().getSchemaTableName();
 
         try (Connection connection = connectionFactory.openConnection(session)) {
             Map<String, Integer> arrayColumnDimensions = ImmutableMap.of();
@@ -312,7 +324,7 @@ public class PostgreSqlClient
                             Optional.ofNullable(arrayColumnDimensions.get(columnName)),
                             Optional.empty());
                     Optional<ColumnMapping> columnMapping = toColumnMapping(session, connection, typeHandle);
-                    log.debug("Mapping data type of '%s' column '%s': %s mapped to %s", tableHandle.getSchemaTableName(), columnName, typeHandle, columnMapping);
+                    log.debug("Mapping data type of '%s' column '%s': %s mapped to %s", schemaTableName, columnName, typeHandle, columnMapping);
                     // skip unsupported column types
                     if (columnMapping.isPresent()) {
                         boolean nullable = (resultSet.getInt("NULLABLE") != columnNoNulls);
@@ -336,7 +348,7 @@ public class PostgreSqlClient
                 }
                 if (columns.isEmpty()) {
                     // In rare cases a table might have no columns.
-                    throw new TableNotFoundException(tableHandle.getSchemaTableName());
+                    throw new TableNotFoundException(schemaTableName);
                 }
                 return ImmutableList.copyOf(columns);
             }
@@ -441,14 +453,14 @@ public class PostgreSqlClient
             }
 
             case Types.CHAR:
-                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case Types.VARCHAR:
                 if (!jdbcTypeName.equals("varchar")) {
                     // This can be e.g. an ENUM
                     return Optional.of(typedVarcharColumnMapping(jdbcTypeName));
                 }
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize()));
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case Types.BINARY:
                 return Optional.of(varbinaryColumnMapping());
@@ -729,7 +741,7 @@ public class PostgreSqlClient
     {
         String sql = format(
                 "COMMENT ON COLUMN %s.%s IS %s",
-                quoted(handle.getRemoteTableName()),
+                quoted(handle.asPlainTable().getRemoteTableName()),
                 quoted(column.getColumnName()),
                 comment.isPresent() ? format("'%s'", comment.get()) : "NULL");
         execute(session, sql);
@@ -738,7 +750,7 @@ public class PostgreSqlClient
     private static ColumnMapping timestampWithTimeZoneColumnMapping(int precision)
     {
         // PostgreSQL supports timestamptz precision up to microseconds
-        checkArgument(precision <= POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION, "unsupported precision value %d", precision);
+        checkArgument(precision <= POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION, "unsupported precision value %s", precision);
         TimestampWithTimeZoneType prestoType = createTimestampWithTimeZoneType(precision);
         if (precision <= TimestampWithTimeZoneType.MAX_SHORT_PRECISION) {
             return ColumnMapping.longMapping(

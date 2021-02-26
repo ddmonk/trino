@@ -40,7 +40,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -400,28 +399,17 @@ public final class KuduTableProperties
                 return bound.getShort(idx);
             case INT8:
                 return (short) bound.getByte(idx);
+            case FLOAT:
+            case DOUBLE:
+            case DECIMAL:
+                // TODO unsupported
+                break;
             case BOOL:
                 return bound.getBoolean(idx);
             case BINARY:
                 return bound.getBinaryCopy(idx);
-            default:
-                throw new IllegalStateException("Unhandled type " + type + " for range partition");
         }
-    }
-
-    private static LinkedHashMap<String, ColumnDesign> getColumns(KuduTable table)
-    {
-        Schema schema = table.getSchema();
-        LinkedHashMap<String, ColumnDesign> columns = new LinkedHashMap<>();
-        for (ColumnSchema columnSchema : schema.getColumns()) {
-            ColumnDesign design = new ColumnDesign();
-            design.setNullable(columnSchema.isNullable());
-            design.setPrimaryKey(columnSchema.isKey());
-            design.setCompression(lookupCompressionString(columnSchema.getCompressionAlgorithm()));
-            design.setEncoding(lookupEncodingString(columnSchema.getEncoding()));
-            columns.put(columnSchema.getName(), design);
-        }
-        return columns;
+        throw new IllegalStateException("Unhandled type " + type + " for range partition");
     }
 
     public static PartitionDesign getPartitionDesign(KuduTable table)

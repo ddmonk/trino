@@ -17,14 +17,17 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.ExchangeNode;
+import io.trino.sql.planner.plan.FilterNode;
+import io.trino.sql.planner.plan.MarkDistinctNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.testing.AbstractTestIntegrationSmokeTest;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.TestTable;
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import static io.trino.SystemSessionProperties.USE_MARK_DISTINCT;
 import static io.trino.plugin.sqlserver.DataCompression.NONE;
 import static io.trino.plugin.sqlserver.DataCompression.PAGE;
 import static io.trino.plugin.sqlserver.DataCompression.ROW;
@@ -41,8 +44,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
-@Test
 public class TestSqlServerIntegrationSmokeTest
+        // TODO extend BaseConnectorTest
         extends AbstractTestIntegrationSmokeTest
 {
     protected TestingSqlServer sqlServer;
@@ -51,15 +54,9 @@ public class TestSqlServerIntegrationSmokeTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        sqlServer = new TestingSqlServer();
+        sqlServer = closeAfterClass(new TestingSqlServer());
         sqlServer.start();
         return createSqlServerQueryRunner(sqlServer, ImmutableMap.of(), ImmutableMap.of(), ImmutableList.of(CUSTOMER, NATION, ORDERS, REGION));
-    }
-
-    @AfterClass(alwaysRun = true)
-    public final void destroy()
-    {
-        sqlServer.close();
     }
 
     @Test
@@ -103,14 +100,68 @@ public class TestSqlServerIntegrationSmokeTest
         assertThat(query("SELECT count(*) FROM orders")).isFullyPushedDown();
         assertThat(query("SELECT count(nationkey) FROM nation")).isFullyPushedDown();
         assertThat(query("SELECT min(totalprice) FROM orders")).isFullyPushedDown();
+
+        // GROUP BY
+        assertThat(query("SELECT regionkey, min(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
         assertThat(query("SELECT regionkey, max(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
         assertThat(query("SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
-
         assertThat(query("SELECT regionkey, avg(nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
 
-        try (AutoCloseable ignoreTable = withTable("test_aggregation_pushdown", "(short_decimal decimal(9, 3), long_decimal decimal(30, 10), varchar_column varchar(10))")) {
-            sqlServer.execute("INSERT INTO test_aggregation_pushdown VALUES (100.000, 100000000.000000000, 'ala')");
-            sqlServer.execute("INSERT INTO test_aggregation_pushdown VALUES (123.321, 123456789.987654321, 'kot')");
+        Session withMarkDistinct = Session.builder(getSession())
+                .setSystemProperty(USE_MARK_DISTINCT, "true")
+                .build();
+
+        // distinct aggregation
+        assertThat(query(withMarkDistinct, "SELECT count(DISTINCT regionkey) FROM nation")).isFullyPushedDown();
+        // distinct aggregation with GROUP BY
+        assertThat(query(withMarkDistinct, "SELECT count(DISTINCT nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
+        // distinct aggregation with varchar
+        assertThat(query(withMarkDistinct, "SELECT count(DISTINCT comment) FROM nation")).isFullyPushedDown();
+        // two distinct aggregations
+        assertThat(query(withMarkDistinct, "SELECT count(DISTINCT regionkey), count(DISTINCT nationkey) FROM nation"))
+                .isNotFullyPushedDown(MarkDistinctNode.class, ExchangeNode.class, ExchangeNode.class, ProjectNode.class);
+        // distinct aggregation and a non-distinct aggregation
+        assertThat(query(withMarkDistinct, "SELECT count(DISTINCT regionkey), sum(nationkey) FROM nation"))
+                .isNotFullyPushedDown(MarkDistinctNode.class, ExchangeNode.class, ExchangeNode.class, ProjectNode.class);
+
+        Session withoutMarkDistinct = Session.builder(getSession())
+                .setSystemProperty(USE_MARK_DISTINCT, "false")
+                .build();
+
+        // distinct aggregation
+        assertThat(query(withoutMarkDistinct, "SELECT count(DISTINCT regionkey) FROM nation")).isFullyPushedDown();
+        // distinct aggregation with GROUP BY
+        assertThat(query(withoutMarkDistinct, "SELECT count(DISTINCT nationkey) FROM nation GROUP BY regionkey")).isFullyPushedDown();
+        // distinct aggregation with varchar
+        assertThat(query(withoutMarkDistinct, "SELECT count(DISTINCT comment) FROM nation")).isFullyPushedDown();
+        // two distinct aggregations
+        assertThat(query(withoutMarkDistinct, "SELECT count(DISTINCT regionkey), count(DISTINCT nationkey) FROM nation"))
+                .isNotFullyPushedDown(AggregationNode.class, ExchangeNode.class, ExchangeNode.class);
+        // distinct aggregation and a non-distinct aggregation
+        assertThat(query(withoutMarkDistinct, "SELECT count(DISTINCT regionkey), sum(nationkey) FROM nation"))
+                .isNotFullyPushedDown(AggregationNode.class, ExchangeNode.class, ExchangeNode.class);
+
+        // GROUP BY and WHERE on bigint column
+        // GROUP BY and WHERE on aggregation key
+        assertThat(query("SELECT regionkey, sum(nationkey) FROM nation WHERE regionkey < 4 GROUP BY regionkey")).isFullyPushedDown();
+
+        // GROUP BY and WHERE on varchar column
+        // GROUP BY and WHERE on "other" (not aggregation key, not aggregation input)
+        assertThat(query("SELECT regionkey, sum(nationkey) FROM nation WHERE regionkey < 4 AND name > 'AAA' GROUP BY regionkey"))
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
+
+        // GROUP BY above WHERE and LIMIT
+        assertThat(query("" +
+                "SELECT regionkey, sum(nationkey) " +
+                "FROM (SELECT * FROM nation WHERE regionkey < 3 LIMIT 11) " +
+                "GROUP BY regionkey"))
+                .isFullyPushedDown();
+
+        // decimals
+        try (AutoCloseable ignoreTable = withTable("test_aggregation_pushdown", "(short_decimal decimal(9, 3), long_decimal decimal(30, 10), varchar_column varchar(10), bigint_column bigint)")) {
+            sqlServer.execute("INSERT INTO test_aggregation_pushdown VALUES (100.000, 100000000.000000000, 'ala', 1)");
+            sqlServer.execute("INSERT INTO test_aggregation_pushdown VALUES (123.321, 123456789.987654321, 'kot', 2)");
 
             assertThat(query("SELECT min(short_decimal), min(long_decimal) FROM test_aggregation_pushdown")).isFullyPushedDown();
             assertThat(query("SELECT max(short_decimal), max(long_decimal) FROM test_aggregation_pushdown")).isFullyPushedDown();
@@ -130,18 +181,24 @@ public class TestSqlServerIntegrationSmokeTest
             // GROUP BY with WHERE on aggregation column
             assertThat(query("SELECT short_decimal, min(long_decimal) FROM test_aggregation_pushdown WHERE long_decimal < 124 GROUP BY short_decimal")).isFullyPushedDown();
             // GROUP BY with WHERE on neither grouping nor aggregation column
-            assertThat(query("SELECT short_decimal, min(long_decimal) FROM test_aggregation_pushdown WHERE varchar_column = 'ala' GROUP BY short_decimal")).isFullyPushedDown();
+            assertThat(query("SELECT short_decimal, min(long_decimal) FROM test_aggregation_pushdown WHERE bigint_column = 1 GROUP BY short_decimal"))
+                    .isFullyPushedDown();
+            assertThat(query("SELECT short_decimal, min(long_decimal) FROM test_aggregation_pushdown WHERE varchar_column = 'ala' GROUP BY short_decimal"))
+                    // SQL Server is case insensitive by default
+                    .isNotFullyPushedDown(FilterNode.class);
             // aggregation on varchar column
             assertThat(query("SELECT min(varchar_column) FROM test_aggregation_pushdown")).isFullyPushedDown();
             // aggregation on varchar column with GROUPING
             assertThat(query("SELECT short_decimal, min(varchar_column) FROM test_aggregation_pushdown GROUP BY short_decimal")).isFullyPushedDown();
             // aggregation on varchar column with WHERE
-            assertThat(query("SELECT min(varchar_column) FROM test_aggregation_pushdown WHERE varchar_column ='ala'")).isFullyPushedDown();
+            assertThat(query("SELECT min(varchar_column) FROM test_aggregation_pushdown WHERE varchar_column ='ala'"))
+                    // SQL Server is case insensitive by default
+                    .isNotFullyPushedDown(FilterNode.class);
 
             // not supported yet
-            assertThat(query("SELECT min(DISTINCT short_decimal) FROM test_aggregation_pushdown")).isNotFullyPushedDown(AggregationNode.class);
-            // TODO: Improve assertion framework. Here min(long_decimal) is pushed down. There remains ProjectNode above it which relates to DISTINCT in the query.
-            assertThat(query("SELECT DISTINCT short_decimal, min(long_decimal) FROM test_aggregation_pushdown GROUP BY short_decimal")).isNotFullyPushedDown(ProjectNode.class);
+            assertThat(query("SELECT min(DISTINCT short_decimal) FROM test_aggregation_pushdown")).isFullyPushedDown();
+            assertThat(query("SELECT DISTINCT short_decimal, min(long_decimal) FROM test_aggregation_pushdown GROUP BY short_decimal"))
+                    .isFullyPushedDown();
         }
 
         // array_agg returns array, which is not supported
@@ -158,7 +215,7 @@ public class TestSqlServerIntegrationSmokeTest
     }
 
     @Test
-    public void testStddevPushdown()
+    public void testStddevAggregationPushdown()
     {
         try (TestTable testTable = new TestTable(sqlServer::execute, getSession().getSchema().orElseThrow() + ".test_stddev_pushdown",
                 "(t_double DOUBLE PRECISION)")) {
@@ -195,7 +252,7 @@ public class TestSqlServerIntegrationSmokeTest
     }
 
     @Test
-    public void testVariancePushdown()
+    public void testVarianceAggregationPushdown()
     {
         try (TestTable testTable = new TestTable(sqlServer::execute, getSession().getSchema().orElseThrow() + ".test_variance_pushdown",
                 "(t_double DOUBLE PRECISION)")) {
@@ -253,9 +310,64 @@ public class TestSqlServerIntegrationSmokeTest
     }
 
     @Test
-    public void testDecimalPredicatePushdown()
+    public void testPredicatePushdown()
             throws Exception
     {
+        // varchar equality
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'ROMANIA'"))
+                .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
+
+        // varchar range
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name BETWEEN 'POLAND' AND 'RPA'"))
+                .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
+
+        // varchar different case
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'romania'"))
+                .returnsEmptyResult()
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
+
+        // bigint equality
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE nationkey = 19"))
+                .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
+                .isFullyPushedDown();
+
+        // bigint equality with small compaction threshold
+        assertThat(query(
+                Session.builder(getSession())
+                        .setCatalogSessionProperty("sqlserver", "domain_compaction_threshold", "1")
+                        .build(),
+                "SELECT regionkey, nationkey, name FROM nation WHERE nationkey IN (19, 21)"))
+                .matches("VALUES " +
+                        "(BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25))), " +
+                        "(BIGINT '2', BIGINT '21', CAST('VIETNAM' AS varchar(25)))")
+                .isNotFullyPushedDown(FilterNode.class);
+
+        // bigint range, with decimal to bigint simplification
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE nationkey BETWEEN 18.5 AND 19.5"))
+                .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
+                .isFullyPushedDown();
+
+        // date equality
+        assertThat(query("SELECT orderkey FROM orders WHERE orderdate = DATE '1992-09-29'"))
+                .matches("VALUES BIGINT '1250', 34406, 38436, 57570")
+                .isFullyPushedDown();
+
+        // predicate over aggregation key (likely to be optimized before being pushed down into the connector)
+        assertThat(query("SELECT * FROM (SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey) WHERE regionkey = 3"))
+                .matches("VALUES (BIGINT '3', BIGINT '77')")
+                .isFullyPushedDown();
+
+        // predicate over aggregation result
+        assertThat(query("SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey HAVING sum(nationkey) = 77"))
+                .matches("VALUES (BIGINT '3', BIGINT '77')")
+                .isFullyPushedDown();
+
+        // decimals
         try (AutoCloseable ignoreTable = withTable("test_decimal_pushdown",
                 "(short_decimal decimal(9, 3), long_decimal decimal(30, 10))")) {
             sqlServer.execute("INSERT INTO test_decimal_pushdown VALUES (123.321, 123456789.987654321)");
@@ -293,7 +405,9 @@ public class TestSqlServerIntegrationSmokeTest
         assertThat(query("SELECT name FROM nation WHERE regionkey = 3 LIMIT 5")).isFullyPushedDown();
 
         // with filter over varchar column
-        assertThat(query("SELECT name FROM nation WHERE name < 'EEE' LIMIT 5")).isFullyPushedDown();
+        assertThat(query("SELECT name FROM nation WHERE name < 'EEE' LIMIT 5"))
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
 
         // with aggregation
         assertThat(query("SELECT max(regionkey) FROM nation LIMIT 5")).isFullyPushedDown(); // global aggregation, LIMIT removed
@@ -302,7 +416,9 @@ public class TestSqlServerIntegrationSmokeTest
 
         // with filter and aggregation
         assertThat(query("SELECT regionkey, count(*) FROM nation WHERE nationkey < 5 GROUP BY regionkey LIMIT 3")).isFullyPushedDown();
-        assertThat(query("SELECT regionkey, count(*) FROM nation WHERE name < 'EGYPT' GROUP BY regionkey LIMIT 3")).isFullyPushedDown();
+        assertThat(query("SELECT regionkey, count(*) FROM nation WHERE name < 'EGYPT' GROUP BY regionkey LIMIT 3"))
+                // SQL Server is case insensitive by default
+                .isNotFullyPushedDown(FilterNode.class);
     }
 
     @Test

@@ -18,14 +18,11 @@ import io.trino.testing.AbstractTestDistributedQueries;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.TestTable;
 import io.trino.tpch.TpchTable;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
 
 import java.util.Optional;
 
 import static io.trino.plugin.sqlserver.SqlServerQueryRunner.createSqlServerQueryRunner;
 
-@Test
 public class TestSqlServerDistributedQueries
         extends AbstractTestDistributedQueries
 {
@@ -35,7 +32,7 @@ public class TestSqlServerDistributedQueries
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        this.sqlServer = new TestingSqlServer();
+        this.sqlServer = closeAfterClass(new TestingSqlServer());
         sqlServer.start();
         return createSqlServerQueryRunner(
                 sqlServer,
@@ -46,13 +43,6 @@ public class TestSqlServerDistributedQueries
                         .put("metadata.cache-missing", "true")
                         .build(),
                 TpchTable.getTables());
-    }
-
-    @AfterClass(alwaysRun = true)
-    public final void destroy()
-    {
-        sqlServer.close();
-        sqlServer = null;
     }
 
     @Override
@@ -103,7 +93,6 @@ public class TestSqlServerDistributedQueries
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
         if (typeName.equals("time")
-                || typeName.equals("timestamp")
                 || typeName.equals("timestamp(3) with time zone")) {
             return Optional.of(dataMappingTestSetup.asUnsupported());
         }

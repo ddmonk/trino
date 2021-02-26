@@ -232,7 +232,7 @@ public class TestAccumuloDistributedQueries
                 + "(SELECT orderkey FROM orders WHERE 0=1) "
                 + "is not null");
 
-        // subquery results and in in-predicate
+        // subquery results and an in-predicate
         assertQuery("SELECT (SELECT 1) IN (1, 2, 3)");
         assertQuery("SELECT (SELECT 1) IN (   2, 3)");
 
@@ -355,6 +355,16 @@ public class TestAccumuloDistributedQueries
             return Optional.of(dataMappingTestSetup.asUnsupported());
         }
 
+        return Optional.of(dataMappingTestSetup);
+    }
+
+    @Override
+    protected Optional<DataMappingTestSetup> filterCaseSensitiveDataMappingTestData(DataMappingTestSetup dataMappingTestSetup)
+    {
+        String typeName = dataMappingTestSetup.getTrinoTypeName();
+        if (typeName.equals("char(1)")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
+        }
         return Optional.of(dataMappingTestSetup);
     }
 }

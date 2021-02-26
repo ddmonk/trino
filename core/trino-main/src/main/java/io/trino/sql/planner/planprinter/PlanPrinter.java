@@ -32,7 +32,6 @@ import io.trino.metadata.TableHandle;
 import io.trino.operator.StageExecutionDescriptor;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.Marker;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -94,6 +93,7 @@ import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.UnnestNode;
+import io.trino.sql.planner.plan.UpdateNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.planner.planprinter.NodeRepresentation.TypedSymbol;
@@ -417,7 +417,9 @@ public class PlanPrinter
             }
 
             node.getDistributionType().ifPresent(distributionType -> nodeOutput.appendDetailsLine("Distribution: %s", distributionType));
-            nodeOutput.appendDetailsLine("maySkipOutputDuplicates = %s", node.isMaySkipOutputDuplicates());
+            if (node.isMaySkipOutputDuplicates()) {
+                nodeOutput.appendDetailsLine("maySkipOutputDuplicates = %s", node.isMaySkipOutputDuplicates());
+            }
             if (!node.getDynamicFilters().isEmpty()) {
                 nodeOutput.appendDetails("dynamicFilterAssignments = %s", printDynamicFilterAssignments(node.getDynamicFilters()));
             }
@@ -782,7 +784,7 @@ public class PlanPrinter
                 formatString += "filterPredicate = %s, ";
                 Expression predicate = filterNode.get().getPredicate();
                 DynamicFilters.ExtractResult extractResult = extractDynamicFilters(predicate);
-                arguments.add(combineConjunctsWithDuplicates(extractResult.getStaticConjuncts()));
+                arguments.add(unresolveFunctions(combineConjunctsWithDuplicates(extractResult.getStaticConjuncts())));
                 if (!extractResult.getDynamicConjuncts().isEmpty()) {
                     formatString += "dynamicFilter = %s, ";
                     arguments.add(printDynamicFilters(extractResult.getDynamicConjuncts()));
@@ -813,9 +815,7 @@ public class PlanPrinter
                     ImmutableList.of(),
                     Optional.empty());
 
-            if (projectNode.isPresent()) {
-                printAssignments(nodeOutput, projectNode.get().getAssignments());
-            }
+            projectNode.ifPresent(value -> printAssignments(nodeOutput, value.getAssignments()));
 
             if (scanNode.isPresent()) {
                 printTableScanInfo(nodeOutput, scanNode.get());
@@ -1112,6 +1112,18 @@ public class PlanPrinter
         }
 
         @Override
+        public Void visitUpdate(UpdateNode node, Void context)
+        {
+            NodeRepresentation nodeOutput = addNode(node, format("Update[%s]", node.getTarget()));
+            int index = 0;
+            for (String columnName : node.getTarget().getUpdatedColumns()) {
+                nodeOutput.appendDetailsLine("%s := %s", columnName, node.getColumnValueAndRowIdSymbols().get(index).getName());
+                index++;
+            }
+            return processChildren(node, context);
+        }
+
+        @Override
         public Void visitTableDelete(TableDeleteNode node, Void context)
         {
             addNode(node, "TableDelete", format("[%s]", node.getTarget()));
@@ -1218,25 +1230,25 @@ public class PlanPrinter
                                 builder.append('[').append(value).append(']');
                             }
                             else {
-                                builder.append((range.getLow().getBound() == Marker.Bound.EXACTLY) ? '[' : '(');
+                                builder.append(range.isLowInclusive() ? '[' : '(');
 
-                                if (range.getLow().isLowerUnbounded()) {
+                                if (range.isLowUnbounded()) {
                                     builder.append("<min>");
                                 }
                                 else {
-                                    builder.append(valuePrinter.castToVarchar(type, range.getLow().getValue()));
+                                    builder.append(valuePrinter.castToVarchar(type, range.getLowBoundedValue()));
                                 }
 
                                 builder.append(", ");
 
-                                if (range.getHigh().isUpperUnbounded()) {
+                                if (range.isHighUnbounded()) {
                                     builder.append("<max>");
                                 }
                                 else {
-                                    builder.append(valuePrinter.castToVarchar(type, range.getHigh().getValue()));
+                                    builder.append(valuePrinter.castToVarchar(type, range.getHighBoundedValue()));
                                 }
 
-                                builder.append((range.getHigh().getBound() == Marker.Bound.EXACTLY) ? ']' : ')');
+                                builder.append(range.isHighInclusive() ? ']' : ')');
                             }
                             parts.add(builder.toString());
                         }

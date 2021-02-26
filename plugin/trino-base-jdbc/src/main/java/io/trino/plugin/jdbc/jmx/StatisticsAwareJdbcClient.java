@@ -21,6 +21,7 @@ import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
@@ -121,12 +122,6 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public boolean supportsGroupingSets()
-    {
-        return delegate().supportsGroupingSets();
-    }
-
-    @Override
     public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<List<ColumnHandle>> groupingSets)
     {
         return delegate().supportsAggregationPushdown(session, table, groupingSets);
@@ -156,6 +151,17 @@ public final class StatisticsAwareJdbcClient
             throws SQLException
     {
         stats.getAbortReadConnection().wrap(() -> delegate().abortReadConnection(connection));
+    }
+
+    @Override
+    public PreparedQuery prepareQuery(
+            ConnectorSession session,
+            JdbcTableHandle table,
+            Optional<List<List<JdbcColumnHandle>>> groupingSets,
+            List<JdbcColumnHandle> columns,
+            Map<String, String> columnExpressions)
+    {
+        return stats.getPrepareQuery().wrap(() -> delegate().prepareQuery(session, table, groupingSets, columns, columnExpressions));
     }
 
     @Override

@@ -15,6 +15,7 @@ package io.trino.sql.planner;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import io.trino.SystemSessionProperties;
 import io.trino.cost.CostCalculator;
 import io.trino.cost.CostCalculator.EstimatedExchanges;
 import io.trino.cost.CostComparator;
@@ -32,6 +33,8 @@ import io.trino.sql.planner.iterative.rule.AddIntermediateAggregations;
 import io.trino.sql.planner.iterative.rule.ApplyTableScanRedirection;
 import io.trino.sql.planner.iterative.rule.CanonicalizeExpressions;
 import io.trino.sql.planner.iterative.rule.CreatePartialTopN;
+import io.trino.sql.planner.iterative.rule.DecorrelateInnerUnnestWithGlobalAggregation;
+import io.trino.sql.planner.iterative.rule.DecorrelateLeftUnnestWithGlobalAggregation;
 import io.trino.sql.planner.iterative.rule.DesugarArrayConstructor;
 import io.trino.sql.planner.iterative.rule.DesugarAtTimeZone;
 import io.trino.sql.planner.iterative.rule.DesugarCurrentPath;
@@ -113,6 +116,7 @@ import io.trino.sql.planner.iterative.rule.PruneUnionColumns;
 import io.trino.sql.planner.iterative.rule.PruneUnionSourceColumns;
 import io.trino.sql.planner.iterative.rule.PruneUnnestColumns;
 import io.trino.sql.planner.iterative.rule.PruneUnnestSourceColumns;
+import io.trino.sql.planner.iterative.rule.PruneUpdateSourceColumns;
 import io.trino.sql.planner.iterative.rule.PruneValuesColumns;
 import io.trino.sql.planner.iterative.rule.PruneWindowColumns;
 import io.trino.sql.planner.iterative.rule.PushAggregationIntoTableScan;
@@ -131,6 +135,7 @@ import io.trino.sql.planner.iterative.rule.PushDownDereferencesThroughSort;
 import io.trino.sql.planner.iterative.rule.PushDownDereferencesThroughTopN;
 import io.trino.sql.planner.iterative.rule.PushDownDereferencesThroughTopNRanking;
 import io.trino.sql.planner.iterative.rule.PushDownDereferencesThroughWindow;
+import io.trino.sql.planner.iterative.rule.PushJoinIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushLimitIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushLimitThroughMarkDistinct;
 import io.trino.sql.planner.iterative.rule.PushLimitThroughOffset;
@@ -154,6 +159,10 @@ import io.trino.sql.planner.iterative.rule.PushTopNIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushTopNThroughOuterJoin;
 import io.trino.sql.planner.iterative.rule.PushTopNThroughProject;
 import io.trino.sql.planner.iterative.rule.PushTopNThroughUnion;
+import io.trino.sql.planner.iterative.rule.PushdownFilterIntoRowNumber;
+import io.trino.sql.planner.iterative.rule.PushdownFilterIntoWindow;
+import io.trino.sql.planner.iterative.rule.PushdownLimitIntoRowNumber;
+import io.trino.sql.planner.iterative.rule.PushdownLimitIntoWindow;
 import io.trino.sql.planner.iterative.rule.RemoveAggregationInSemiJoin;
 import io.trino.sql.planner.iterative.rule.RemoveDuplicateConditions;
 import io.trino.sql.planner.iterative.rule.RemoveEmptyDelete;
@@ -174,6 +183,7 @@ import io.trino.sql.planner.iterative.rule.RemoveUnreferencedScalarApplyNodes;
 import io.trino.sql.planner.iterative.rule.RemoveUnreferencedScalarSubqueries;
 import io.trino.sql.planner.iterative.rule.RemoveUnsupportedDynamicFilters;
 import io.trino.sql.planner.iterative.rule.ReorderJoins;
+import io.trino.sql.planner.iterative.rule.ReplaceWindowWithRowNumber;
 import io.trino.sql.planner.iterative.rule.RewriteSpatialPartitioningAggregation;
 import io.trino.sql.planner.iterative.rule.SimplifyCountOverConstant;
 import io.trino.sql.planner.iterative.rule.SimplifyExpressions;
@@ -305,6 +315,7 @@ public class PlanOptimizers
                 new PruneCorrelatedJoinColumns(),
                 new PruneCorrelatedJoinCorrelation(),
                 new PruneDeleteSourceColumns(),
+                new PruneUpdateSourceColumns(),
                 new PruneDistinctLimitSourceColumns(),
                 new PruneEnforceSingleRowColumns(),
                 new PruneExceptSourceColumns(),
@@ -512,6 +523,8 @@ public class PlanOptimizers
                                 new TransformUncorrelatedSubqueryToJoin(),
                                 new TransformUncorrelatedInPredicateSubqueryToSemiJoin(),
                                 new TransformCorrelatedJoinToJoin(metadata),
+                                new DecorrelateInnerUnnestWithGlobalAggregation(),
+                                new DecorrelateLeftUnnestWithGlobalAggregation(),
                                 new TransformCorrelatedGlobalAggregationWithProjection(metadata),
                                 new TransformCorrelatedGlobalAggregationWithoutProjection(metadata),
                                 new TransformCorrelatedDistinctAggregationWithProjection(metadata),
@@ -574,13 +587,13 @@ public class PlanOptimizers
                         .add(new PushLimitIntoTableScan(metadata))
                         .add(new PushPredicateIntoTableScan(metadata, typeOperators, typeAnalyzer))
                         .add(new PushSampleIntoTableScan(metadata))
+                        .add(new PushJoinIntoTableScan(metadata))
                         .add(new PushAggregationIntoTableScan(metadata))
                         .add(new PushDistinctLimitIntoTableScan(metadata))
                         .build());
         builder.add(pushIntoTableScanOptimizer);
         builder.add(new UnaliasSymbolReferences(metadata));
         builder.add(pushIntoTableScanOptimizer); // TODO (https://github.com/trinodb/trino/issues/811) merge with the above after migrating UnaliasSymbolReferences to rules
-
         builder.add(
                 new IterativeOptimizer(
                         ruleStats,
@@ -615,7 +628,19 @@ public class PlanOptimizers
                 columnPruningOptimizer, // Make sure to run this before index join. Filtered projections may not have all the columns.
                 new IndexJoinOptimizer(metadata, typeOperators), // Run this after projections and filters have been fully simplified and pushed down
                 new LimitPushDown(), // Run LimitPushDown before WindowFilterPushDown
-                new WindowFilterPushDown(metadata, typeOperators), // This must run after PredicatePushDown and LimitPushDown so that it squashes any successive filter nodes and limits
+                // This must run after PredicatePushDown and LimitPushDown so that it squashes any successive filter nodes and limits
+                new IterativeOptimizer(
+                        ruleStats,
+                        statsCalculator,
+                        estimatedExchangesCostCalculator,
+                        SystemSessionProperties::useLegacyWindowFilterPushdown,
+                        ImmutableList.of(new WindowFilterPushDown(metadata, typeOperators)),
+                        ImmutableSet.of(
+                                new PushdownLimitIntoRowNumber(),
+                                new PushdownLimitIntoWindow(metadata),
+                                new PushdownFilterIntoRowNumber(metadata, typeOperators),
+                                new PushdownFilterIntoWindow(metadata, typeOperators),
+                                new ReplaceWindowWithRowNumber(metadata))),
                 new IterativeOptimizer(
                         ruleStats,
                         statsCalculator,
@@ -659,7 +684,8 @@ public class PlanOptimizers
                         ruleStats,
                         statsCalculator,
                         estimatedExchangesCostCalculator,
-                        ImmutableSet.of(new PushPredicateIntoTableScan(metadata, typeOperators, typeAnalyzer))),
+                        ImmutableSet.of(
+                                new PushPredicateIntoTableScan(metadata, typeOperators, typeAnalyzer))),
                 columnPruningOptimizer,
                 new IterativeOptimizer(
                         ruleStats,

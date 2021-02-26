@@ -20,6 +20,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -28,30 +29,77 @@ import static org.testng.Assert.fail;
 
 public class TestRange
 {
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    @Test(expectedExceptions = IllegalArgumentException.class)
+    @Test
     public void testMismatchedTypes()
     {
-        // NEVER DO THIS
-        new Range(Marker.exactly(BIGINT, 1L), Marker.exactly(VARCHAR, utf8Slice("a")));
+        assertThatThrownBy(() -> new Range(Marker.exactly(BIGINT, 1L), Marker.exactly(VARCHAR, utf8Slice("a"))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Marker types do not match: bigint vs varchar");
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class)
+    @Test
     public void testInvertedBounds()
     {
-        new Range(Marker.exactly(BIGINT, 1L), Marker.exactly(BIGINT, 0L));
+        assertThatThrownBy(() -> new Range(Marker.exactly(BIGINT, 1L), Marker.exactly(BIGINT, 0L)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("low must be less than or equal to high");
+
+        assertThatThrownBy(() -> Range.range(BIGINT, 1L, true, 0L, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("low must be less than or equal to high");
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class)
+    /**
+     * Test Range construction when low and high bounds are equal, but one of them is not inclusive.
+     */
+    @Test
+    public void testSingleValueExclusive()
+    {
+        // (10, 10] using Marker
+        assertThatThrownBy(() -> new Range(Marker.above(BIGINT, 10L), Marker.exactly(BIGINT, 10L)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+
+        // [10, 10) using Marker
+        assertThatThrownBy(() -> new Range(Marker.exactly(BIGINT, 10L), Marker.below(BIGINT, 10L)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+
+        // (10, 10) using Marker
+        assertThatThrownBy(() -> new Range(Marker.above(BIGINT, 10L), Marker.below(BIGINT, 10L)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+
+        // (10, 10]
+        assertThatThrownBy(() -> Range.range(BIGINT, 10L, false, 10L, true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+
+        // [10, 10)
+        assertThatThrownBy(() -> Range.range(BIGINT, 10L, true, 10L, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+
+        // (10, 10)
+        assertThatThrownBy(() -> Range.range(BIGINT, 10L, false, 10L, false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("invalid bounds for single value range");
+    }
+
+    @Test
     public void testLowerUnboundedOnly()
     {
-        new Range(Marker.lowerUnbounded(BIGINT), Marker.lowerUnbounded(BIGINT));
+        assertThatThrownBy(() -> new Range(Marker.lowerUnbounded(BIGINT), Marker.lowerUnbounded(BIGINT)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("high bound must be EXACTLY or BELOW");
     }
 
-    @Test(expectedExceptions = IllegalArgumentException.class)
+    @Test
     public void testUpperUnboundedOnly()
     {
-        new Range(Marker.upperUnbounded(BIGINT), Marker.upperUnbounded(BIGINT));
+        assertThatThrownBy(() -> new Range(Marker.upperUnbounded(BIGINT), Marker.upperUnbounded(BIGINT)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("low bound must be EXACTLY or ABOVE");
     }
 
     @Test
@@ -233,11 +281,16 @@ public class TestRange
     @Test
     public void testIntersect()
     {
-        assertEquals(Range.greaterThan(BIGINT, 1L).intersect(Range.lessThanOrEqual(BIGINT, 2L)), Range.range(BIGINT, 1L, false, 2L, true));
-        assertEquals(Range.range(BIGINT, 1L, true, 3L, false).intersect(Range.equal(BIGINT, 2L)), Range.equal(BIGINT, 2L));
-        assertEquals(Range.range(BIGINT, 1L, true, 3L, false).intersect(Range.range(BIGINT, 2L, false, 10L, false)), Range.range(BIGINT, 2L, false, 3L, false));
-        assertEquals(Range.range(BIGINT, 1L, true, 3L, true).intersect(Range.range(BIGINT, 3L, true, 10L, false)), Range.equal(BIGINT, 3L));
-        assertEquals(Range.all(BIGINT).intersect(Range.equal(BIGINT, Long.MAX_VALUE)), Range.equal(BIGINT, Long.MAX_VALUE));
+        assertThat(Range.greaterThan(BIGINT, 1L).intersect(Range.lessThanOrEqual(BIGINT, 2L)))
+                .contains(Range.range(BIGINT, 1L, false, 2L, true));
+        assertThat(Range.range(BIGINT, 1L, true, 3L, false).intersect(Range.equal(BIGINT, 2L)))
+                .contains(Range.equal(BIGINT, 2L));
+        assertThat(Range.range(BIGINT, 1L, true, 3L, false).intersect(Range.range(BIGINT, 2L, false, 10L, false)))
+                .contains(Range.range(BIGINT, 2L, false, 3L, false));
+        assertThat(Range.range(BIGINT, 1L, true, 3L, true).intersect(Range.range(BIGINT, 3L, true, 10L, false)))
+                .contains(Range.equal(BIGINT, 3L));
+        assertThat(Range.all(BIGINT).intersect(Range.equal(BIGINT, Long.MAX_VALUE)))
+                .contains(Range.equal(BIGINT, Long.MAX_VALUE));
     }
 
     @Test
@@ -245,14 +298,12 @@ public class TestRange
     {
         Range greaterThan2 = Range.greaterThan(BIGINT, 2L);
         Range lessThan2 = Range.lessThan(BIGINT, 2L);
-        assertThatThrownBy(() -> greaterThan2.intersect(lessThan2))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Cannot intersect non-overlapping ranges");
+        assertThat(greaterThan2.intersect(lessThan2))
+                .isEmpty();
 
         Range range1To3Exclusive = Range.range(BIGINT, 1L, true, 3L, false);
         Range range3To10 = Range.range(BIGINT, 3L, true, 10L, false);
-        assertThatThrownBy(() -> range1To3Exclusive.intersect(range3To10))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Cannot intersect non-overlapping ranges");
+        assertThat(range1To3Exclusive.intersect(range3To10))
+                .isEmpty();
     }
 }

@@ -13,7 +13,7 @@ env:
   MAVEN_OPTS: "-Xmx512M -XX:+ExitOnOutOfMemoryError -Dmaven.wagon.rto=60000"
   MAVEN_INSTALL_OPTS: "-Xmx2G -XX:+ExitOnOutOfMemoryError -Dmaven.wagon.rto=60000"
   MAVEN_FAST_INSTALL: "-B -V --quiet -T C1 -DskipTests -Dair.check.skip-all"
-  MAVEN_TEST: "-B -Dair.check.skip-all -DLogTestDurationListener.enabled=true --fail-at-end"
+  MAVEN_TEST: "-B -Dair.check.skip-all --fail-at-end"
   RETRY: .github/bin/retry
 
 jobs:
@@ -64,6 +64,9 @@ jobs:
       - name: Error Prone Checks
         run: |
           export MAVEN_OPTS="${MAVEN_INSTALL_OPTS}"
+          # Run Error Prone on one module with a retry to ensure all runtime dependencies are fetched
+          $RETRY ./mvnw ${MAVEN_TEST} -T C1 clean test-compile -P errorprone-compiler -pl ':trino-spi'
+          # The main Error Prone run
           ./mvnw ${MAVEN_TEST} -T C1 clean test-compile -P errorprone-compiler \
             -pl '!:trino-docs,!:trino-server,!:trino-server-rpm'
 
@@ -295,6 +298,13 @@ jobs:
           if [ "${BIGQUERY_CREDENTIALS_KEY}" != "" ]; then
             ./mvnw test ${MAVEN_TEST} -pl :trino-bigquery -Pcloud-tests -Dbigquery.credentials-key="${BIGQUERY_CREDENTIALS_KEY}"
           fi
+      - name: Cloud BigQuery Case Insensitive Mapping Tests
+        env:
+          BIGQUERY_CREDENTIALS_KEY: ${{ secrets.BIGQUERY_CREDENTIALS_KEY }}
+        run: |
+          if [ "${BIGQUERY_CREDENTIALS_KEY}" != "" ]; then
+            ./mvnw test ${MAVEN_TEST} -pl :trino-bigquery -Pcloud-tests-case-insensitive-mapping -Dbigquery.credentials-key="${BIGQUERY_CREDENTIALS_KEY}"
+          fi
 
   pt:
     runs-on: ubuntu-latest
@@ -315,6 +325,7 @@ jobs:
           - suite-7-non-generic
           - suite-8-non-generic
           - suite-tpcds
+          - suite-oauth2
         exclude:
           - config: config-hdp3
             suite: suite-6-non-generic
@@ -324,6 +335,8 @@ jobs:
             suite: suite-8-non-generic
           - config: config-hdp3
             suite: suite-tpcds
+          - config: config-hdp3
+            suite: suite-oauth2
           - config: config-cdh5
             suite: suite-6-non-generic
           - config: config-cdh5
@@ -332,6 +345,8 @@ jobs:
             suite: suite-8-non-generic
           - config: config-cdh5
             suite: suite-tpcds
+          - config: config-cdh5
+            suite: suite-oauth2
     # PT Launcher's timeout defaults to 2h, account for preparation steps (compilation) and add some margin
     timeout-minutes: 140
     steps:

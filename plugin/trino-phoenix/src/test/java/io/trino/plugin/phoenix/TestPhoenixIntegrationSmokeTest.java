@@ -18,6 +18,7 @@ import io.trino.Session;
 import io.trino.plugin.jdbc.UnsupportedTypeHandling;
 import io.trino.testing.AbstractTestIntegrationSmokeTest;
 import io.trino.testing.QueryRunner;
+import io.trino.tpch.TpchTable;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.Test;
 
@@ -34,6 +35,7 @@ import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
 public class TestPhoenixIntegrationSmokeTest
+        // TODO extend BaseConnectorTest
         extends AbstractTestIntegrationSmokeTest
 {
     private TestingPhoenixServer testingPhoenixServer;
@@ -43,7 +45,7 @@ public class TestPhoenixIntegrationSmokeTest
             throws Exception
     {
         testingPhoenixServer = TestingPhoenixServer.getInstance();
-        return createPhoenixQueryRunner(testingPhoenixServer, ImmutableMap.of());
+        return createPhoenixQueryRunner(testingPhoenixServer, ImmutableMap.of(), TpchTable.getTables());
     }
 
     @AfterClass(alwaysRun = true)
@@ -135,17 +137,17 @@ public class TestPhoenixIntegrationSmokeTest
         assertTableColumnNames("test_create_table_with_properties", "created_date", "a", "b", "c", "d");
         assertThat(computeActual("SHOW CREATE TABLE test_create_table_with_properties").getOnlyValue())
                 .isEqualTo("CREATE TABLE phoenix.tpch.test_create_table_with_properties (\n" +
-                           "   created_date date,\n" +
-                           "   a bigint NOT NULL,\n" +
-                           "   b double NOT NULL,\n" +
-                           "   c varchar(10) NOT NULL,\n" +
-                           "   d varchar(10)\n" +
-                           ")\n" +
-                           "WITH (\n" +
-                           "   data_block_encoding = 'FAST_DIFF',\n" +
-                           "   rowkeys = 'A,B,C',\n" +
-                           "   salt_buckets = 10\n" +
-                           ")");
+                        "   created_date date,\n" +
+                        "   a bigint NOT NULL,\n" +
+                        "   b double NOT NULL,\n" +
+                        "   c varchar(10) NOT NULL,\n" +
+                        "   d varchar(10)\n" +
+                        ")\n" +
+                        "WITH (\n" +
+                        "   data_block_encoding = 'FAST_DIFF',\n" +
+                        "   rowkeys = 'A,B,C',\n" +
+                        "   salt_buckets = 10\n" +
+                        ")");
 
         assertUpdate("DROP TABLE test_create_table_with_properties");
     }
