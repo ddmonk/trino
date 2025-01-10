@@ -18,19 +18,20 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.SymbolMapper;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.Set;
 
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.iterative.rule.DereferencePushdown.exclusiveDereferences;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.iterative.rule.Util.transpose;
 import static io.trino.sql.planner.plan.Patterns.limit;
 import static io.trino.sql.planner.plan.Patterns.project;
@@ -63,21 +64,26 @@ public class PushLimitThroughProject
         // undoing of PushDownDereferencesThroughLimit. We still push limit in the case of overlapping dereferences since
         // it enables PushDownDereferencesThroughLimit rule to push optimal dereferences.
         Set<Expression> projections = ImmutableSet.copyOf(projectNode.getAssignments().getExpressions());
-        if (!extractDereferences(projections, false).isEmpty() && exclusiveDereferences(projections)) {
+        if (!extractRowSubscripts(projections, false).isEmpty()
+                && exclusiveDereferences(projections)) {
             return Result.empty();
         }
 
-        // for a LimitNode without ties, simply reorder the nodes
-        if (!parent.isWithTies()) {
+        // for a LimitNode without ties and pre-sorted inputs, simply reorder the nodes
+        if (!parent.isWithTies() && !parent.requiresPreSortedInputs()) {
             return Result.ofPlanNode(transpose(parent, projectNode));
         }
 
         // for a LimitNode with ties, the tiesResolvingScheme must be rewritten in terms of symbols before projection
         SymbolMapper.Builder symbolMapper = SymbolMapper.builder();
-        for (Symbol symbol : parent.getTiesResolvingScheme().get().getOrderBy()) {
+        Set<Symbol> symbolsForRewrite = ImmutableSet.<Symbol>builder()
+                .addAll(parent.getPreSortedInputs())
+                .addAll(parent.getTiesResolvingScheme().map(OrderingScheme::orderBy).orElse(ImmutableList.of()))
+                .build();
+        for (Symbol symbol : symbolsForRewrite) {
             Expression expression = projectNode.getAssignments().get(symbol);
             // if a symbol results from some computation, the translation fails
-            if (!(expression instanceof SymbolReference)) {
+            if (!(expression instanceof Reference)) {
                 return Result.empty();
             }
             symbolMapper.put(symbol, Symbol.from(expression));

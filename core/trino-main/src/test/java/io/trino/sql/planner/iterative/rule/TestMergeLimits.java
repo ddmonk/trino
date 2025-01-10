@@ -16,7 +16,7 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.sql.planner.assertions.PlanMatchPattern.limit;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
@@ -97,5 +97,60 @@ public class TestMergeLimits
                                     p.values(a)));
                 })
                 .doesNotFire();
+    }
+
+    @Test
+    public void testOrderSensitiveChild()
+    {
+        tester().assertThat(new MergeLimits())
+                .on(p -> p.limit(
+                        5,
+                        p.limit(3, false, ImmutableList.of(p.symbol("a")), p.values())))
+                .matches(
+                        limit(
+                                3,
+                                ImmutableList.of(),
+                                false,
+                                ImmutableList.of("a"),
+                                values()));
+    }
+
+    @Test
+    public void testOrderSensitiveParent()
+    {
+        tester().assertThat(new MergeLimits())
+                .on(p -> p.limit(
+                        3,
+                        false,
+                        ImmutableList.of(p.symbol("a")),
+                        p.limit(5, p.values())))
+                .matches(
+                        limit(
+                                3,
+                                ImmutableList.of(),
+                                false,
+                                ImmutableList.of("a"),
+                                values()));
+    }
+
+    @Test
+    public void testOrderSensitiveParentAndChild()
+    {
+        tester().assertThat(new MergeLimits())
+                .on(p -> p.limit(
+                        3,
+                        false,
+                        ImmutableList.of(p.symbol("a")),
+                        p.limit(
+                                5,
+                                ImmutableList.of(p.symbol("a"), p.symbol("b")),
+                                p.values())))
+                .matches(
+                        limit(
+                                3,
+                                ImmutableList.of(),
+                                false,
+                                ImmutableList.of("a", "b"),
+                                values()));
     }
 }

@@ -13,65 +13,30 @@
  */
 package io.trino.plugin.google.sheets;
 
-import com.fasterxml.jackson.databind.DeserializationContext;
-import com.fasterxml.jackson.databind.deser.std.FromStringDeserializer;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
-import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeId;
-import io.trino.spi.type.TypeManager;
+import io.trino.plugin.google.sheets.ptf.Sheet;
+import io.trino.spi.function.table.ConnectorTableFunction;
 
-import javax.inject.Inject;
-
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
-import static io.airlift.json.JsonBinder.jsonBinder;
-import static io.airlift.json.JsonCodec.listJsonCodec;
-import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
-import static java.util.Objects.requireNonNull;
 
 public class SheetsModule
         implements Module
 {
-    private final TypeManager typeManager;
-
-    public SheetsModule(TypeManager typeManager)
-    {
-        this.typeManager = requireNonNull(typeManager, "typeManager is null");
-    }
-
     @Override
     public void configure(Binder binder)
     {
-        binder.bind(TypeManager.class).toInstance(typeManager);
         binder.bind(SheetsConnector.class).in(Scopes.SINGLETON);
         binder.bind(SheetsMetadata.class).in(Scopes.SINGLETON);
         binder.bind(SheetsClient.class).in(Scopes.SINGLETON);
         binder.bind(SheetsSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(SheetsRecordSetProvider.class).in(Scopes.SINGLETON);
+        binder.bind(SheetsPageSinkProvider.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(SheetsConfig.class);
 
-        jsonBinder(binder).addDeserializerBinding(Type.class).to(TypeDeserializer.class);
-        jsonCodecBinder(binder).bindMapJsonCodec(String.class, listJsonCodec(SheetsTable.class));
-    }
-
-    public static final class TypeDeserializer
-            extends FromStringDeserializer<Type>
-    {
-        private final TypeManager typeManager;
-
-        @Inject
-        public TypeDeserializer(TypeManager typeManager)
-        {
-            super(Type.class);
-            this.typeManager = requireNonNull(typeManager, "typeManager is null");
-        }
-
-        @Override
-        protected Type _deserialize(String value, DeserializationContext context)
-        {
-            return typeManager.getType(TypeId.of(value));
-        }
+        newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Sheet.class).in(Scopes.SINGLETON);
     }
 }

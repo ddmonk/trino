@@ -15,82 +15,82 @@ package io.trino.operator.aggregation;
 
 import io.trino.operator.aggregation.state.LongDecimalWithOverflowState;
 import io.trino.operator.aggregation.state.LongDecimalWithOverflowStateFactory;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.Int128ArrayBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.UnscaledDecimal128Arithmetic;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import io.trino.spi.type.Int128;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 
 import static io.trino.spi.type.DecimalType.createDecimalType;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimal;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@Test(singleThreaded = true)
 public class TestDecimalSumAggregation
 {
     private static final BigInteger TWO = new BigInteger("2");
     private static final DecimalType TYPE = createDecimalType(38, 0);
 
-    private LongDecimalWithOverflowState state;
-
-    @BeforeMethod
-    public void setUp()
-    {
-        state = new LongDecimalWithOverflowStateFactory().createSingleState();
-    }
-
     @Test
     public void testOverflow()
     {
-        addToState(state, TWO.pow(126));
-
-        assertEquals(state.getOverflow(), 0);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(126)));
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
 
         addToState(state, TWO.pow(126));
 
-        assertEquals(state.getOverflow(), 1);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(0));
+        assertThat(state.getOverflow()).isEqualTo(0);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(TWO.pow(126)));
+
+        addToState(state, TWO.pow(126));
+
+        assertThat(state.getOverflow()).isEqualTo(1);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(1L << 63, 0));
     }
 
     @Test
     public void testUnderflow()
     {
-        addToState(state, TWO.pow(126).negate());
-
-        assertEquals(state.getOverflow(), 0);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(126).negate()));
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
 
         addToState(state, TWO.pow(126).negate());
 
-        assertEquals(state.getOverflow(), -1);
-        assertEquals(UnscaledDecimal128Arithmetic.compare(state.getLongDecimal(), unscaledDecimal(0)), 0);
+        assertThat(state.getOverflow()).isEqualTo(0);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(TWO.pow(126).negate()));
+
+        addToState(state, TWO.pow(126).negate());
+
+        assertThat(state.getOverflow()).isEqualTo(0);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(0x8000000000000000L, 0));
     }
 
     @Test
     public void testUnderflowAfterOverflow()
     {
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
+
         addToState(state, TWO.pow(126));
         addToState(state, TWO.pow(126));
         addToState(state, TWO.pow(125));
 
-        assertEquals(state.getOverflow(), 1);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(125)));
+        assertThat(state.getOverflow()).isEqualTo(1);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf((1L << 63) | (1L << 61), 0));
 
         addToState(state, TWO.pow(126).negate());
         addToState(state, TWO.pow(126).negate());
         addToState(state, TWO.pow(126).negate());
 
-        assertEquals(state.getOverflow(), 0);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(125).negate()));
+        assertThat(state.getOverflow()).isEqualTo(0);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(TWO.pow(125).negate()));
     }
 
     @Test
     public void testCombineOverflow()
     {
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
+
         addToState(state, TWO.pow(125));
         addToState(state, TWO.pow(126));
 
@@ -100,13 +100,15 @@ public class TestDecimalSumAggregation
         addToState(otherState, TWO.pow(126));
 
         DecimalSumAggregation.combine(state, otherState);
-        assertEquals(state.getOverflow(), 1);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(126)));
+        assertThat(state.getOverflow()).isEqualTo(1);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(0xC000000000000000L, 0));
     }
 
     @Test
     public void testCombineUnderflow()
     {
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
+
         addToState(state, TWO.pow(125).negate());
         addToState(state, TWO.pow(126).negate());
 
@@ -116,25 +118,41 @@ public class TestDecimalSumAggregation
         addToState(otherState, TWO.pow(126).negate());
 
         DecimalSumAggregation.combine(state, otherState);
-        assertEquals(state.getOverflow(), -1);
-        assertEquals(state.getLongDecimal(), unscaledDecimal(TWO.pow(126).negate()));
+        assertThat(state.getOverflow()).isEqualTo(-1);
+        assertThat(getDecimal(state)).isEqualTo(Int128.valueOf(0x4000000000000000L, 0));
     }
 
-    @Test(expectedExceptions = ArithmeticException.class)
+    @Test
     public void testOverflowOnOutput()
     {
+        LongDecimalWithOverflowState state = new LongDecimalWithOverflowStateFactory().createSingleState();
+
         addToState(state, TWO.pow(126));
         addToState(state, TWO.pow(126));
 
-        assertEquals(state.getOverflow(), 1);
-        DecimalSumAggregation.outputLongDecimal(TYPE, state, new VariableWidthBlockBuilder(null, 10, 100));
+        assertThat(state.getOverflow()).isEqualTo(1);
+        assertThatThrownBy(() -> DecimalSumAggregation.outputDecimal(state, new VariableWidthBlockBuilder(null, 10, 100)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessage("Decimal overflow");
     }
 
     private static void addToState(LongDecimalWithOverflowState state, BigInteger value)
     {
-        BlockBuilder blockBuilder = TYPE.createFixedSizeBlockBuilder(1);
-        TYPE.writeSlice(blockBuilder, unscaledDecimal(value));
+        if (TYPE.isShort()) {
+            DecimalSumAggregation.inputShortDecimal(state, Int128.valueOf(value).toLongExact());
+        }
+        else {
+            BlockBuilder blockBuilder = TYPE.createFixedSizeBlockBuilder(1);
+            TYPE.writeObject(blockBuilder, Int128.valueOf(value));
+            DecimalSumAggregation.inputLongDecimal(state, (Int128ArrayBlock) blockBuilder.buildValueBlock(), 0);
+        }
+    }
 
-        DecimalSumAggregation.inputLongDecimal(TYPE, state, blockBuilder.build(), 0);
+    private Int128 getDecimal(LongDecimalWithOverflowState state)
+    {
+        long[] decimal = state.getDecimalArray();
+        int offset = state.getDecimalArrayOffset();
+
+        return Int128.valueOf(decimal[offset], decimal[offset + 1]);
     }
 }

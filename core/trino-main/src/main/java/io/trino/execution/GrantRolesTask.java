@@ -14,14 +14,16 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.MetadataUtil;
 import io.trino.security.AccessControl;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.GrantRoles;
-import io.trino.transaction.TransactionManager;
+import io.trino.sql.tree.Identifier;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,16 +32,26 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.metadata.MetadataUtil.checkRoleExists;
 import static io.trino.metadata.MetadataUtil.createPrincipal;
-import static io.trino.metadata.MetadataUtil.getSessionCatalog;
-import static io.trino.spi.StandardErrorCode.ROLE_NOT_FOUND;
+import static io.trino.metadata.MetadataUtil.processRoleCommandCatalog;
 import static io.trino.spi.security.PrincipalType.ROLE;
-import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class GrantRolesTask
         implements DataDefinitionTask<GrantRoles>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public GrantRolesTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -47,7 +59,11 @@ public class GrantRolesTask
     }
 
     @Override
-    public ListenableFuture<?> execute(GrantRoles statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            GrantRoles statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
 
@@ -57,9 +73,8 @@ public class GrantRolesTask
                 .collect(toImmutableSet());
         boolean adminOption = statement.isAdminOption();
         Optional<TrinoPrincipal> grantor = statement.getGrantor().map(specification -> createPrincipal(session, specification));
-        String catalog = getSessionCatalog(metadata, session, statement);
+        Optional<String> catalog = processRoleCommandCatalog(metadata, session, statement, statement.getCatalog().map(Identifier::getValue));
 
-        Set<String> availableRoles = metadata.listRoles(session, catalog);
         Set<String> specifiedRoles = new LinkedHashSet<>();
         specifiedRoles.addAll(roles);
         grantees.stream()
@@ -71,14 +86,12 @@ public class GrantRolesTask
         }
 
         for (String role : specifiedRoles) {
-            if (!availableRoles.contains(role)) {
-                throw semanticException(ROLE_NOT_FOUND, statement, "Role '%s' does not exist", role);
-            }
+            checkRoleExists(session, statement, metadata, role, catalog);
         }
 
         accessControl.checkCanGrantRoles(session.toSecurityContext(), roles, grantees, adminOption, grantor, catalog);
         metadata.grantRoles(session, roles, grantees, adminOption, grantor, catalog);
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

@@ -14,14 +14,12 @@
 package io.trino.operator.aggregation.state;
 
 import io.airlift.slice.Slice;
-import io.airlift.slice.SliceInput;
-import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.function.AccumulatorStateSerializer;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.UnscaledDecimal128Arithmetic;
 
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 
@@ -37,28 +35,60 @@ public class LongDecimalWithOverflowStateSerializer
     @Override
     public void serialize(LongDecimalWithOverflowState state, BlockBuilder out)
     {
-        if (state.getLongDecimal() == null) {
+        if (!state.isNotNull()) {
             out.appendNull();
+            return;
         }
-        else {
-            Slice slice = Slices.allocate(Long.BYTES + UnscaledDecimal128Arithmetic.UNSCALED_DECIMAL_128_SLICE_LENGTH);
-            SliceOutput output = slice.getOutput();
 
-            output.writeLong(state.getOverflow());
-            output.writeBytes(state.getLongDecimal());
-
-            VARBINARY.writeSlice(out, slice);
-        }
+        long overflow = state.getOverflow();
+        long[] decimal = state.getDecimalArray();
+        int offset = state.getDecimalArrayOffset();
+        Slice buffer = Slices.allocate(Long.BYTES * 3);
+        long low = decimal[offset + 1];
+        long high = decimal[offset];
+        buffer.setLong(0, low);
+        buffer.setLong(Long.BYTES, high);
+        buffer.setLong(Long.BYTES * 2, overflow);
+        // if high == 0 and overflow == 0 we only write low (bufferLength = 1)
+        // if high != 0 and overflow == 0 we write both low and high (bufferLength = 2)
+        // if overflow != 0 we write all values (bufferLength = 3)
+        int decimalsCount = 1 + (high == 0 ? 0 : 1);
+        int bufferLength = overflow == 0 ? decimalsCount : 3;
+        VARBINARY.writeSlice(out, buffer, 0, bufferLength * Long.BYTES);
     }
 
     @Override
     public void deserialize(Block block, int index, LongDecimalWithOverflowState state)
     {
-        if (!block.isNull(index)) {
-            SliceInput slice = VARBINARY.getSlice(block, index).getInput();
-
-            state.setOverflow(slice.readLong());
-            state.setLongDecimal(Slices.copyOf(slice.readSlice(slice.available())));
+        if (block.isNull(index)) {
+            return;
         }
+
+        index = block.getUnderlyingValuePosition(index);
+        block = block.getUnderlyingValueBlock();
+        VariableWidthBlock variableWidthBlock = (VariableWidthBlock) block;
+        Slice slice = variableWidthBlock.getRawSlice();
+        int sliceOffset = variableWidthBlock.getRawSliceOffset(index);
+        int sliceLength = variableWidthBlock.getSliceLength(index);
+
+        long[] decimal = state.getDecimalArray();
+        int offset = state.getDecimalArrayOffset();
+
+        long low = slice.getLong(sliceOffset);
+        long high = 0;
+        long overflow = 0;
+
+        switch (sliceLength) {
+            case Long.BYTES * 3:
+                overflow = slice.getLong(sliceOffset + Long.BYTES * 2);
+                // fall through
+            case Long.BYTES * 2:
+                high = slice.getLong(sliceOffset + Long.BYTES);
+        }
+
+        decimal[offset + 1] = low;
+        decimal[offset] = high;
+        state.setOverflow(overflow);
+        state.setNotNull();
     }
 }

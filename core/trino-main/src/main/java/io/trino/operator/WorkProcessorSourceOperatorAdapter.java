@@ -13,19 +13,18 @@
  */
 package io.trino.operator;
 
+import com.google.common.base.Suppliers;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.trino.Session;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.spi.Page;
-import io.trino.spi.connector.UpdatablePageSource;
+import io.trino.spi.metrics.Metrics;
 import io.trino.sql.planner.plan.PlanNodeId;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.function.Supplier;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Map;
 
 import static io.trino.operator.WorkProcessor.ProcessState.blocked;
 import static io.trino.operator.WorkProcessor.ProcessState.finished;
@@ -53,31 +52,17 @@ public class WorkProcessorSourceOperatorAdapter
     private long previousReadTimeNanos;
     private long previousDynamicFilterSplitsProcessed;
 
-    public interface AdapterWorkProcessorSourceOperatorFactory
-            extends WorkProcessorSourceOperatorFactory
-    {
-        default WorkProcessorSourceOperator createAdapterOperator(
-                Session session,
-                MemoryTrackingContext memoryTrackingContext,
-                DriverYieldSignal yieldSignal,
-                WorkProcessor<Split> splits)
-        {
-            return create(session, memoryTrackingContext, yieldSignal, splits);
-        }
-    }
-
-    public WorkProcessorSourceOperatorAdapter(OperatorContext operatorContext, AdapterWorkProcessorSourceOperatorFactory sourceOperatorFactory)
+    public WorkProcessorSourceOperatorAdapter(OperatorContext operatorContext, WorkProcessorSourceOperatorFactory sourceOperatorFactory)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
-        this.sourceId = requireNonNull(sourceOperatorFactory, "sourceOperatorFactory is null").getSourceId();
+        this.sourceId = sourceOperatorFactory.getSourceId();
         this.splitBuffer = new SplitBuffer();
         this.sourceOperator = sourceOperatorFactory
-                .createAdapterOperator(
-                        operatorContext.getSession(),
+                .create(
+                        operatorContext,
                         new MemoryTrackingContext(
                                 operatorContext.aggregateUserMemoryContext(),
-                                operatorContext.aggregateRevocableMemoryContext(),
-                                operatorContext.aggregateSystemMemoryContext()),
+                                operatorContext.aggregateRevocableMemoryContext()),
                         operatorContext.getDriverContext().getYieldSignal(),
                         WorkProcessor.create(splitBuffer));
         this.pages = sourceOperator.getOutputPages()
@@ -94,19 +79,18 @@ public class WorkProcessorSourceOperatorAdapter
     }
 
     @Override
-    public Supplier<Optional<UpdatablePageSource>> addSplit(Split split)
+    public void addSplit(Split split)
     {
         if (operatorFinishing) {
-            return Optional::empty;
+            return;
         }
 
-        Object splitInfo = split.getInfo();
-        if (splitInfo != null) {
-            operatorContext.setInfoSupplier(() -> new SplitOperatorInfo(split.getCatalogName(), splitInfo));
+        Map<String, String> splitInfo = split.getInfo();
+        if (!splitInfo.isEmpty()) {
+            operatorContext.setInfoSupplier(Suppliers.ofInstance(new SplitOperatorInfo(split.getCatalogHandle(), splitInfo)));
         }
 
         splitBuffer.add(split);
-        return sourceOperator.getUpdatablePageSourceSupplier();
     }
 
     @Override
@@ -122,7 +106,7 @@ public class WorkProcessorSourceOperatorAdapter
     }
 
     @Override
-    public ListenableFuture<?> isBlocked()
+    public ListenableFuture<Void> isBlocked()
     {
         if (!pages.isBlocked()) {
             return NOT_BLOCKED;
@@ -175,6 +159,8 @@ public class WorkProcessorSourceOperatorAdapter
             throws Exception
     {
         sourceOperator.close();
+        operatorContext.setLatestMetrics(sourceOperator.getMetrics());
+        operatorContext.setLatestConnectorMetrics(sourceOperator.getConnectorMetrics());
     }
 
     private void updateOperatorStats()
@@ -190,6 +176,8 @@ public class WorkProcessorSourceOperatorAdapter
         long currentInputPositions = sourceOperator.getInputPositions();
 
         long currentDynamicFilterSplitsProcessed = sourceOperator.getDynamicFilterSplitsProcessed();
+        Metrics currentMetrics = sourceOperator.getMetrics();
+        Metrics currentConnectorMetrics = sourceOperator.getConnectorMetrics();
 
         if (currentPhysicalInputBytes != previousPhysicalInputBytes
                 || currentPhysicalInputPositions != previousPhysicalInputPositions
@@ -228,14 +216,17 @@ public class WorkProcessorSourceOperatorAdapter
             operatorContext.recordDynamicFilterSplitProcessed(currentDynamicFilterSplitsProcessed - previousDynamicFilterSplitsProcessed);
             previousDynamicFilterSplitsProcessed = currentDynamicFilterSplitsProcessed;
         }
+
+        operatorContext.setLatestMetrics(currentMetrics);
+        operatorContext.setLatestConnectorMetrics(currentConnectorMetrics);
     }
 
     private static class SplitBuffer
             implements WorkProcessor.Process<Split>
     {
-        private final List<Split> pendingSplits = new ArrayList<>();
+        private final Deque<Split> pendingSplits = new ArrayDeque<>();
 
-        private SettableFuture<?> blockedOnSplits = SettableFuture.create();
+        private SettableFuture<Void> blockedOnSplits = SettableFuture.create();
         private boolean noMoreSplits;
 
         @Override
@@ -250,7 +241,7 @@ public class WorkProcessorSourceOperatorAdapter
                 return blocked(blockedOnSplits);
             }
 
-            return ofResult(pendingSplits.remove(0));
+            return ofResult(pendingSplits.remove());
         }
 
         void add(Split split)

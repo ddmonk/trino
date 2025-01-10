@@ -15,7 +15,7 @@ package io.trino.sql.analyzer;
 
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.Identifier;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Comparator;
 import java.util.Locale;
@@ -91,6 +91,7 @@ public class TestTypeSignatureTranslator
         assertRoundTrip("ROW(a BIGINT,b VARCHAR)");
         assertRoundTrip("ROW(\"a\" BIGINT, \"from\" VARCHAR)");
         assertRoundTrip("ROW(\"$x\" BIGINT, \"$y\" VARCHAR)");
+        assertRoundTrip("ROW(\"ident with spaces\" BIGINT)");
     }
 
     @Test

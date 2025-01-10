@@ -16,7 +16,7 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -140,5 +140,28 @@ public class TestPushdownLimitIntoRowNumber
                                         p.symbol("row_number"),
                                         p.values(p.symbol("a")))))
                 .doesNotFire();
+    }
+
+    @Test
+    public void testLimitWithPreSortedInputs()
+    {
+        tester().assertThat(new PushdownLimitIntoRowNumber())
+                .on(p -> {
+                    Symbol a = p.symbol("a");
+                    return p.limit(
+                            5,
+                            false,
+                            ImmutableList.of(a),
+                            p.rowNumber(
+                                    ImmutableList.of(),
+                                    Optional.of(3),
+                                    p.symbol("row_number"), p.values(a)));
+                })
+                .matches(
+                        rowNumber(rowNumber -> rowNumber
+                                        .partitionBy(ImmutableList.of())
+                                        .maxRowCountPerPartition(Optional.of(3))
+                                        .orderSensitive(true),
+                                values("a")));
     }
 }

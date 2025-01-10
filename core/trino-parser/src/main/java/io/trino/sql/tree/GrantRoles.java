@@ -31,38 +31,22 @@ public class GrantRoles
     private final Set<PrincipalSpecification> grantees;
     private final boolean adminOption;
     private final Optional<GrantorSpecification> grantor;
+    private final Optional<Identifier> catalog;
 
     public GrantRoles(
             NodeLocation location,
             Set<Identifier> roles,
             Set<PrincipalSpecification> grantees,
             boolean adminOption,
-            Optional<GrantorSpecification> grantor)
-    {
-        this(Optional.of(location), roles, grantees, adminOption, grantor);
-    }
-
-    public GrantRoles(
-            Set<Identifier> roles,
-            Set<PrincipalSpecification> grantees,
-            boolean adminOption,
-            Optional<GrantorSpecification> grantor)
-    {
-        this(Optional.empty(), roles, grantees, adminOption, grantor);
-    }
-
-    private GrantRoles(
-            Optional<NodeLocation> location,
-            Set<Identifier> roles,
-            Set<PrincipalSpecification> grantees,
-            boolean adminOption,
-            Optional<GrantorSpecification> grantor)
+            Optional<GrantorSpecification> grantor,
+            Optional<Identifier> catalog)
     {
         super(location);
         this.roles = ImmutableSet.copyOf(requireNonNull(roles, "roles is null"));
         this.grantees = ImmutableSet.copyOf(requireNonNull(grantees, "grantees is null"));
         this.adminOption = adminOption;
         this.grantor = requireNonNull(grantor, "grantor is null");
+        this.catalog = requireNonNull(catalog, "catalog is null");
     }
 
     public Set<Identifier> getRoles()
@@ -83,6 +67,11 @@ public class GrantRoles
     public Optional<GrantorSpecification> getGrantor()
     {
         return grantor;
+    }
+
+    public Optional<Identifier> getCatalog()
+    {
+        return catalog;
     }
 
     @Override
@@ -110,13 +99,14 @@ public class GrantRoles
         return adminOption == grantRoles.adminOption &&
                 Objects.equals(roles, grantRoles.roles) &&
                 Objects.equals(grantees, grantRoles.grantees) &&
-                Objects.equals(grantor, grantRoles.grantor);
+                Objects.equals(grantor, grantRoles.grantor) &&
+                Objects.equals(catalog, grantRoles.catalog);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(roles, grantees, adminOption, grantor);
+        return Objects.hash(roles, grantees, adminOption, grantor, catalog);
     }
 
     @Override
@@ -127,6 +117,7 @@ public class GrantRoles
                 .add("grantees", grantees)
                 .add("adminOption", adminOption)
                 .add("grantor", grantor)
+                .add("catalog", catalog)
                 .toString();
     }
 }

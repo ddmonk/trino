@@ -17,17 +17,20 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.ConfigurationFactory;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import jakarta.validation.constraints.AssertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
-import static java.util.concurrent.TimeUnit.MINUTES;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.testing.ValidationAssertions.assertValidates;
+import static io.airlift.units.Duration.ZERO;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
 
 public class TestBaseJdbcConfig
 {
@@ -36,47 +39,94 @@ public class TestBaseJdbcConfig
     {
         assertRecordedDefaults(recordDefaults(BaseJdbcConfig.class)
                 .setConnectionUrl(null)
-                .setCaseInsensitiveNameMatching(false)
-                .setCaseInsensitiveNameMatchingCacheTtl(new Duration(1, MINUTES))
-                .setJdbcTypesMappedToVarchar("")
-                .setMetadataCacheTtl(Duration.valueOf("0m"))
-                .setCacheMissing(false));
+                .setJdbcTypesMappedToVarchar(ImmutableSet.of())
+                .setMetadataCacheTtl(ZERO)
+                .setSchemaNamesCacheTtl(null)
+                .setTableNamesCacheTtl(null)
+                .setStatisticsCacheTtl(null)
+                .setCacheMissing(false)
+                .setCacheMaximumSize(10000));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("connection-url", "jdbc:h2:mem:config")
-                .put("case-insensitive-name-matching", "true")
-                .put("case-insensitive-name-matching.cache-ttl", "1s")
                 .put("jdbc-types-mapped-to-varchar", "mytype,struct_type1")
                 .put("metadata.cache-ttl", "1s")
+                .put("metadata.schemas.cache-ttl", "2s")
+                .put("metadata.tables.cache-ttl", "3s")
+                .put("metadata.statistics.cache-ttl", "7s")
                 .put("metadata.cache-missing", "true")
-                .build();
+                .put("metadata.cache-maximum-size", "5000")
+                .buildOrThrow();
 
         BaseJdbcConfig expected = new BaseJdbcConfig()
                 .setConnectionUrl("jdbc:h2:mem:config")
-                .setCaseInsensitiveNameMatching(true)
-                .setCaseInsensitiveNameMatchingCacheTtl(new Duration(1, SECONDS))
-                .setJdbcTypesMappedToVarchar("mytype, struct_type1")
-                .setMetadataCacheTtl(Duration.valueOf("1s"))
-                .setCacheMissing(true);
+                .setJdbcTypesMappedToVarchar(ImmutableSet.of("mytype", "struct_type1"))
+                .setMetadataCacheTtl(new Duration(1, SECONDS))
+                .setSchemaNamesCacheTtl(new Duration(2, SECONDS))
+                .setTableNamesCacheTtl(new Duration(3, SECONDS))
+                .setStatisticsCacheTtl(new Duration(7, SECONDS))
+                .setCacheMissing(true)
+                .setCacheMaximumSize(5000);
 
         assertFullMapping(properties, expected);
 
-        assertEquals(expected.getJdbcTypesMappedToVarchar(), ImmutableSet.of("mytype", "struct_type1"));
+        assertThat(expected.getJdbcTypesMappedToVarchar()).containsOnly("mytype", "struct_type1");
     }
 
     @Test
     public void testConnectionUrlIsValid()
     {
         assertThatThrownBy(() -> buildConfig(ImmutableMap.of("connection-url", "jdbc:")))
-                .hasMessageContaining("must match the following regular expression: ^jdbc:[a-z0-9]+:(?s:.*)$");
+                .hasMessageContaining("must match \"^jdbc:[a-z0-9]+:(?s:.*)$\"");
         assertThatThrownBy(() -> buildConfig(ImmutableMap.of("connection-url", "jdbc:protocol")))
-                .hasMessageContaining("must match the following regular expression: ^jdbc:[a-z0-9]+:(?s:.*)$");
+                .hasMessageContaining("must match \"^jdbc:[a-z0-9]+:(?s:.*)$\"");
         buildConfig(ImmutableMap.of("connection-url", "jdbc:protocol:uri"));
         buildConfig(ImmutableMap.of("connection-url", "jdbc:protocol:"));
+    }
+
+    @Test
+    public void testCacheConfigValidation()
+    {
+        assertValidates(new BaseJdbcConfig()
+                .setConnectionUrl("jdbc:h2:mem:config")
+                .setMetadataCacheTtl(new Duration(1, SECONDS))
+                .setSchemaNamesCacheTtl(new Duration(2, SECONDS))
+                .setTableNamesCacheTtl(new Duration(3, SECONDS))
+                .setCacheMaximumSize(5000));
+
+        assertValidates(new BaseJdbcConfig()
+                .setConnectionUrl("jdbc:h2:mem:config")
+                .setStatisticsCacheTtl(new Duration(7, SECONDS))
+                .setCacheMaximumSize(5000));
+
+        assertValidates(new BaseJdbcConfig()
+                .setConnectionUrl("jdbc:h2:mem:config")
+                .setMetadataCacheTtl(new Duration(1, SECONDS)));
+
+        assertFailsValidation(
+                new BaseJdbcConfig()
+                        .setCacheMaximumSize(5000),
+                "cacheMaximumSizeConsistent",
+                "metadata.cache-ttl or metadata.statistics.cache-ttl must be set to a non-zero value when metadata.cache-maximum-size is set",
+                AssertTrue.class);
+
+        assertFailsValidation(
+                new BaseJdbcConfig()
+                        .setSchemaNamesCacheTtl(new Duration(1, SECONDS)),
+                "schemaNamesCacheTtlConsistent",
+                "metadata.schemas.cache-ttl must not be set when metadata.cache-ttl is not set",
+                AssertTrue.class);
+
+        assertFailsValidation(
+                new BaseJdbcConfig()
+                        .setTableNamesCacheTtl(new Duration(1, SECONDS)),
+                "tableNamesCacheTtlConsistent",
+                "metadata.tables.cache-ttl must not be set when metadata.cache-ttl is not set",
+                AssertTrue.class);
     }
 
     private static void buildConfig(Map<String, String> properties)

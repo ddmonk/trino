@@ -14,27 +14,28 @@
 
 package io.trino.type.setdigest;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableSet;
-import io.airlift.json.ObjectMapperProvider;
-import io.airlift.slice.Slice;
-import org.testng.annotations.Test;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.TypeOperators;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.type.setdigest.SetDigest.DEFAULT_MAX_HASHES;
 import static io.trino.type.setdigest.SetDigest.NUMBER_OF_BUCKETS;
 import static io.trino.type.setdigest.SetDigestFunctions.hashCounts;
 import static io.trino.type.setdigest.SetDigestFunctions.intersectionCardinality;
 import static java.lang.String.format;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSetDigest
 {
@@ -82,14 +83,14 @@ public class TestSetDigest
             }
 
             long estimatedCardinality = intersectionCardinality(digest1.serialize(), digest2.serialize());
-            assertTrue(Math.abs(expectedCardinality - estimatedCardinality) / (double) expectedCardinality < 0.10,
-                    format("Expected intersection cardinality %d +/- 10%%, got %d, for set of size %d", expectedCardinality, estimatedCardinality, size));
+            assertThat(Math.abs(expectedCardinality - estimatedCardinality) / (double) expectedCardinality < 0.10)
+                    .describedAs(format("Expected intersection cardinality %d +/- 10%%, got %d, for set of size %d", expectedCardinality, estimatedCardinality, size))
+                    .isTrue();
         }
     }
 
     @Test
     public void testHashCounts()
-            throws Exception
     {
         SetDigest digest1 = new SetDigest();
         digest1.add(0);
@@ -102,18 +103,23 @@ public class TestSetDigest
         digest2.add(2);
         digest2.add(2);
 
-        ObjectMapper mapper = new ObjectMapperProvider().get();
-
-        Slice slice = hashCounts(digest1.serialize());
-        Map<Long, Short> counts = mapper.readValue(slice.toStringUtf8(), new TypeReference<>() {});
+        MapType mapType = new MapType(BIGINT, SMALLINT, new TypeOperators());
+        SqlMap sqlMap = hashCounts(mapType, digest1.serialize());
+        Set<Short> blockValues = new HashSet<>();
+        for (int i = 0; i < sqlMap.getSize(); i++) {
+            blockValues.add(SMALLINT.getShort(sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + i));
+        }
         Set<Short> expected = ImmutableSet.of((short) 1, (short) 2);
-        assertEquals(counts.values(), expected);
+        assertThat(blockValues).isEqualTo(expected);
 
         digest1.mergeWith(digest2);
-        slice = hashCounts(digest1.serialize());
-        counts = mapper.readValue(slice.toStringUtf8(), new TypeReference<>() {});
+        sqlMap = hashCounts(mapType, digest1.serialize());
         expected = ImmutableSet.of((short) 1, (short) 2, (short) 4);
-        assertEquals(ImmutableSet.copyOf(counts.values()), expected);
+        blockValues = new HashSet<>();
+        for (int i = 0; i < sqlMap.getSize(); i++) {
+            blockValues.add(SMALLINT.getShort(sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + i));
+        }
+        assertThat(blockValues).isEqualTo(expected);
     }
 
     @Test
@@ -157,10 +163,10 @@ public class TestSetDigest
                 long estIntersectionCardinality =
                         intersectionCardinality(digest1.serialize(), digest2.serialize());
                 double size2 = digest2.cardinality();
-                assertTrue(estIntersectionCardinality <= size2);
+                assertThat(estIntersectionCardinality <= size2).isTrue();
                 int expectedCardinality = pair.getValue();
-                assertTrue(Math.abs(expectedCardinality - estIntersectionCardinality) /
-                        (double) size1 < 0.05);
+                assertThat(Math.abs(expectedCardinality - estIntersectionCardinality) /
+                        (double) size1 < 0.05).isTrue();
             }
         }
     }

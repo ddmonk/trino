@@ -15,10 +15,12 @@ package io.trino.parquet;
 
 import io.airlift.slice.Slice;
 
+import java.util.OptionalLong;
+
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
-public class DataPageV1
+public final class DataPageV1
         extends DataPage
 {
     private final Slice slice;
@@ -30,11 +32,12 @@ public class DataPageV1
             Slice slice,
             int valueCount,
             int uncompressedSize,
+            OptionalLong firstRowIndex,
             ParquetEncoding repetitionLevelEncoding,
             ParquetEncoding definitionLevelEncoding,
             ParquetEncoding valuesEncoding)
     {
-        super(uncompressedSize, valueCount);
+        super(uncompressedSize, valueCount, firstRowIndex);
         this.slice = requireNonNull(slice, "slice is null");
         this.repetitionLevelEncoding = repetitionLevelEncoding;
         this.definitionLevelEncoding = definitionLevelEncoding;

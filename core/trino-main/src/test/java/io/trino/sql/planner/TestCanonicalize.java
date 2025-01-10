@@ -17,25 +17,23 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.ir.Constant;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.ExpectedValueProvider;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
 import io.trino.sql.planner.iterative.rule.RemoveRedundantIdentityProjections;
 import io.trino.sql.planner.optimizations.UnaliasSymbolReferences;
-import io.trino.sql.planner.plan.WindowNode;
-import org.testng.annotations.Test;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
+import org.junit.jupiter.api.Test;
 
-import java.util.Optional;
-
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.functionCall;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.specification;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.window;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.windowFunction;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestCanonicalize
         extends BasePlanTest
@@ -43,24 +41,21 @@ public class TestCanonicalize
     @Test
     public void testJoin()
     {
+        // canonicalization + constant folding
         assertPlan(
                 "SELECT *\n" +
                         "FROM (\n" +
                         "    SELECT EXTRACT(DAY FROM DATE '2017-01-01')\n" +
                         ") t\n" +
-                        "CROSS JOIN (VALUES 1)",
+                        "CROSS JOIN (VALUES 2)",
                 anyTree(
-                        join(INNER, ImmutableList.of(), Optional.empty(),
-                                project(
-                                        ImmutableMap.of("X", expression("BIGINT '1'")),
-                                        values(ImmutableMap.of())),
-                                values(ImmutableMap.of()))));
+                        values(ImmutableList.of("expr", "field"), ImmutableList.of(ImmutableList.of(new Constant(BIGINT, 1L), new Constant(INTEGER, 2L))))));
     }
 
     @Test
     public void testDuplicatesInWindowOrderBy()
     {
-        ExpectedValueProvider<WindowNode.Specification> specification = specification(
+        ExpectedValueProvider<DataOrganizationSpecification> specification = specification(
                 ImmutableList.of(),
                 ImmutableList.of("A"),
                 ImmutableMap.of("A", SortOrder.ASC_NULLS_LAST));
@@ -72,14 +67,15 @@ public class TestCanonicalize
                 anyTree(
                         window(windowMatcherBuilder -> windowMatcherBuilder
                                         .specification(specification)
-                                        .addFunction(functionCall("row_number", Optional.empty(), ImmutableList.of())),
+                                        .addFunction(windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
                                 values("A"))),
                 ImmutableList.of(
-                        new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
+                        new UnaliasSymbolReferences(),
                         new IterativeOptimizer(
+                                getPlanTester().getPlannerContext(),
                                 new RuleStatsRecorder(),
-                                getQueryRunner().getStatsCalculator(),
-                                getQueryRunner().getCostCalculator(),
+                                getPlanTester().getStatsCalculator(),
+                                getPlanTester().getCostCalculator(),
                                 ImmutableSet.of(new RemoveRedundantIdentityProjections()))));
     }
 }

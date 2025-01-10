@@ -18,14 +18,13 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.sql.planner.TypeAnalyzer;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.DereferenceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.Map;
 import java.util.Set;
@@ -33,11 +32,10 @@ import java.util.Set;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.ExpressionNodeInliner.replaceExpression;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.plan.Patterns.assignUniqueId;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Transforms:
@@ -58,12 +56,6 @@ public class PushDownDereferencesThroughAssignUniqueId
         implements Rule<ProjectNode>
 {
     private static final Capture<AssignUniqueId> CHILD = newCapture();
-    private final TypeAnalyzer typeAnalyzer;
-
-    public PushDownDereferencesThroughAssignUniqueId(TypeAnalyzer typeAnalyzer)
-    {
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-    }
 
     @Override
     public Pattern<ProjectNode> getPattern()
@@ -78,7 +70,7 @@ public class PushDownDereferencesThroughAssignUniqueId
         AssignUniqueId assignUniqueId = captures.get(CHILD);
 
         // Extract dereferences from project node assignments for pushdown
-        Set<DereferenceExpression> dereferences = extractDereferences(projectNode.getAssignments().getExpressions(), false);
+        Set<FieldReference> dereferences = extractRowSubscripts(projectNode.getAssignments().getExpressions(), false);
 
         // We do not need to filter dereferences on idColumn symbol since it is supposed to be of BIGINT type.
 
@@ -87,10 +79,10 @@ public class PushDownDereferencesThroughAssignUniqueId
         }
 
         // Create new symbols for dereference expressions
-        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSession(), context.getSymbolAllocator(), typeAnalyzer);
+        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSymbolAllocator());
 
         // Rewrite project node assignments using new symbols for dereference expressions
-        Map<Expression, SymbolReference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
+        Map<Expression, Reference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
                 .inverse()
                 .entrySet().stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().toSymbolReference()));

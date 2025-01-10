@@ -13,25 +13,34 @@
  */
 package io.trino.plugin.base.security;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege;
+import io.trino.spi.TrinoException;
+import io.trino.spi.catalog.CatalogName;
+import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.SchemaRoutineName;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
 import io.trino.spi.type.Type;
 
-import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.function.Predicate;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege.DELETE;
 import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege.GRANT_SELECT;
@@ -39,26 +48,37 @@ import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivileg
 import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege.OWNERSHIP;
 import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege.SELECT;
 import static io.trino.plugin.base.security.TableAccessControlRule.TablePrivilege.UPDATE;
-import static io.trino.plugin.base.util.JsonUtils.parseJson;
+import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_MASK;
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
+import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
+import static io.trino.spi.security.AccessDeniedException.denyCommentView;
+import static io.trino.spi.security.AccessDeniedException.denyCreateFunction;
+import static io.trino.spi.security.AccessDeniedException.denyCreateMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateRole;
 import static io.trino.spi.security.AccessDeniedException.denyCreateSchema;
 import static io.trino.spi.security.AccessDeniedException.denyCreateTable;
 import static io.trino.spi.security.AccessDeniedException.denyCreateView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateViewWithSelect;
 import static io.trino.spi.security.AccessDeniedException.denyDeleteTable;
+import static io.trino.spi.security.AccessDeniedException.denyDenySchemaPrivilege;
+import static io.trino.spi.security.AccessDeniedException.denyDenyTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyDropColumn;
+import static io.trino.spi.security.AccessDeniedException.denyDropFunction;
+import static io.trino.spi.security.AccessDeniedException.denyDropMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyDropRole;
 import static io.trino.spi.security.AccessDeniedException.denyDropSchema;
 import static io.trino.spi.security.AccessDeniedException.denyDropTable;
 import static io.trino.spi.security.AccessDeniedException.denyDropView;
+import static io.trino.spi.security.AccessDeniedException.denyExecuteProcedure;
 import static io.trino.spi.security.AccessDeniedException.denyGrantRoles;
 import static io.trino.spi.security.AccessDeniedException.denyGrantSchemaPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyInsertTable;
+import static io.trino.spi.security.AccessDeniedException.denyRefreshMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyRenameColumn;
+import static io.trino.spi.security.AccessDeniedException.denyRenameMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyRenameSchema;
 import static io.trino.spi.security.AccessDeniedException.denyRenameTable;
 import static io.trino.spi.security.AccessDeniedException.denyRenameView;
@@ -67,16 +87,21 @@ import static io.trino.spi.security.AccessDeniedException.denyRevokeSchemaPrivil
 import static io.trino.spi.security.AccessDeniedException.denyRevokeTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denySelectTable;
 import static io.trino.spi.security.AccessDeniedException.denySetCatalogSessionProperty;
+import static io.trino.spi.security.AccessDeniedException.denySetMaterializedViewProperties;
 import static io.trino.spi.security.AccessDeniedException.denySetRole;
 import static io.trino.spi.security.AccessDeniedException.denySetSchemaAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denySetTableAuthorization;
+import static io.trino.spi.security.AccessDeniedException.denySetTableProperties;
 import static io.trino.spi.security.AccessDeniedException.denySetViewAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denyShowColumns;
+import static io.trino.spi.security.AccessDeniedException.denyShowCreateFunction;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateSchema;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateTable;
+import static io.trino.spi.security.AccessDeniedException.denyShowFunctions;
 import static io.trino.spi.security.AccessDeniedException.denyShowTables;
+import static io.trino.spi.security.AccessDeniedException.denyTruncateTable;
 import static io.trino.spi.security.AccessDeniedException.denyUpdateTableColumns;
-import static java.util.Objects.requireNonNull;
+import static java.lang.String.format;
 
 public class FileBasedAccessControl
         implements ConnectorAccessControl
@@ -87,17 +112,23 @@ public class FileBasedAccessControl
     private final List<SchemaAccessControlRule> schemaRules;
     private final List<TableAccessControlRule> tableRules;
     private final List<SessionPropertyAccessControlRule> sessionPropertyRules;
+    private final List<FunctionAccessControlRule> functionRules;
+    private final List<ProcedureAccessControlRule> procedureRules;
+    private final List<AuthorizationRule> authorizationRules;
     private final Set<AnySchemaPermissionsRule> anySchemaPermissionsRules;
 
-    public FileBasedAccessControl(String catalogName, FileBasedAccessControlConfig config)
+    public FileBasedAccessControl(CatalogName catalogName, AccessControlRules rules)
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.catalogName = catalogName.toString();
 
-        AccessControlRules rules = parseJson(Paths.get(config.getConfigFile()), AccessControlRules.class);
+        checkArgument(!rules.hasRoleRules(), "File connector access control does not support role rules");
 
         this.schemaRules = rules.getSchemaRules();
         this.tableRules = rules.getTableRules();
         this.sessionPropertyRules = rules.getSessionPropertyRules();
+        this.functionRules = rules.getFunctionRules();
+        this.procedureRules = rules.getProcedureRules();
+        this.authorizationRules = rules.getAuthorizationRules();
         ImmutableSet.Builder<AnySchemaPermissionsRule> anySchemaPermissionsRules = ImmutableSet.builder();
         schemaRules.stream()
                 .map(SchemaAccessControlRule::toAnySchemaPermissionsRule)
@@ -109,11 +140,21 @@ public class FileBasedAccessControl
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .forEach(anySchemaPermissionsRules::add);
+        functionRules.stream()
+                .map(FunctionAccessControlRule::toAnySchemaPermissionsRule)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .forEach(anySchemaPermissionsRules::add);
+        procedureRules.stream()
+                .map(ProcedureAccessControlRule::toAnySchemaPermissionsRule)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .forEach(anySchemaPermissionsRules::add);
         this.anySchemaPermissionsRules = anySchemaPermissionsRules.build();
     }
 
     @Override
-    public void checkCanCreateSchema(ConnectorSecurityContext context, String schemaName)
+    public void checkCanCreateSchema(ConnectorSecurityContext context, String schemaName, Map<String, Object> properties)
     {
         if (!isSchemaOwner(context, schemaName)) {
             denyCreateSchema(schemaName);
@@ -142,12 +183,13 @@ public class FileBasedAccessControl
         if (!isSchemaOwner(context, schemaName)) {
             denySetSchemaAuthorization(schemaName, principal);
         }
+        if (!checkCanSetAuthorization(context, principal)) {
+            denySetSchemaAuthorization(schemaName, principal);
+        }
     }
 
     @Override
-    public void checkCanShowSchemas(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowSchemas(ConnectorSecurityContext context) {}
 
     @Override
     public Set<String> filterSchemas(ConnectorSecurityContext context, Set<String> schemaNames)
@@ -174,7 +216,7 @@ public class FileBasedAccessControl
     }
 
     @Override
-    public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Object> properties)
     {
         // check if user will be an owner of the table after creation
         if (!checkTablePermission(context, tableName, OWNERSHIP)) {
@@ -215,7 +257,15 @@ public class FileBasedAccessControl
     }
 
     @Override
-    public Set<String> filterColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columns)
+    public Map<SchemaTableName, Set<String>> filterColumns(ConnectorSecurityContext context, Map<SchemaTableName, Set<String>> tableColumns)
+    {
+        return tableColumns.entrySet().stream()
+                .collect(toImmutableMap(
+                        Entry::getKey,
+                        entry -> filterColumns(context, entry.getKey(), entry.getValue())));
+    }
+
+    private Set<String> filterColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columns)
     {
         if (INFORMATION_SCHEMA_NAME.equals(tableName.getSchemaName())) {
             return columns;
@@ -223,7 +273,7 @@ public class FileBasedAccessControl
 
         ConnectorIdentity identity = context.getIdentity();
         TableAccessControlRule rule = tableRules.stream()
-                .filter(tableRule -> tableRule.matches(identity.getUser(), identity.getGroups(), tableName))
+                .filter(tableRule -> tableRule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
                 .findFirst()
                 .orElse(null);
         if (rule == null || rule.getPrivileges().isEmpty()) {
@@ -251,10 +301,26 @@ public class FileBasedAccessControl
     }
 
     @Override
+    public void checkCanSetTableProperties(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Optional<Object>> properties)
+    {
+        if (!checkTablePermission(context, tableName, OWNERSHIP)) {
+            denySetTableProperties(tableName.toString());
+        }
+    }
+
+    @Override
     public void checkCanSetTableComment(ConnectorSecurityContext identity, SchemaTableName tableName)
     {
         if (!checkTablePermission(identity, tableName, OWNERSHIP)) {
             denyCommentTable(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanSetViewComment(ConnectorSecurityContext context, SchemaTableName viewName)
+    {
+        if (!checkTablePermission(context, viewName, OWNERSHIP)) {
+            denyCommentView(viewName.toString());
         }
     }
 
@@ -291,9 +357,20 @@ public class FileBasedAccessControl
     }
 
     @Override
+    public void checkCanAlterColumn(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        if (!checkTablePermission(context, tableName, OWNERSHIP)) {
+            denyAlterColumn(tableName.toString());
+        }
+    }
+
+    @Override
     public void checkCanSetTableAuthorization(ConnectorSecurityContext context, SchemaTableName tableName, TrinoPrincipal principal)
     {
         if (!checkTablePermission(context, tableName, OWNERSHIP)) {
+            denySetTableAuthorization(tableName.toString(), principal);
+        }
+        if (!checkCanSetAuthorization(context, principal)) {
             denySetTableAuthorization(tableName.toString(), principal);
         }
     }
@@ -307,7 +384,7 @@ public class FileBasedAccessControl
 
         ConnectorIdentity identity = context.getIdentity();
         boolean allowed = tableRules.stream()
-                .filter(rule -> rule.matches(identity.getUser(), identity.getGroups(), tableName))
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
                 .map(rule -> rule.canSelectColumns(columnNames))
                 .findFirst()
                 .orElse(false);
@@ -329,6 +406,14 @@ public class FileBasedAccessControl
     {
         if (!checkTablePermission(context, tableName, DELETE)) {
             denyDeleteTable(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanTruncateTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        if (!checkTablePermission(context, tableName, DELETE)) {
+            denyTruncateTable(tableName.toString());
         }
     }
 
@@ -364,6 +449,9 @@ public class FileBasedAccessControl
         if (!checkTablePermission(context, viewName, OWNERSHIP)) {
             denySetViewAuthorization(viewName.toString(), principal);
         }
+        if (!checkCanSetAuthorization(context, principal)) {
+            denySetViewAuthorization(viewName.toString(), principal);
+        }
     }
 
     @Override
@@ -383,7 +471,7 @@ public class FileBasedAccessControl
 
         ConnectorIdentity identity = context.getIdentity();
         TableAccessControlRule rule = tableRules.stream()
-                .filter(tableRule -> tableRule.matches(identity.getUser(), identity.getGroups(), tableName))
+                .filter(tableRule -> tableRule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
                 .findFirst()
                 .orElse(null);
         if (rule == null || !rule.canSelectColumns(columnNames)) {
@@ -391,6 +479,48 @@ public class FileBasedAccessControl
         }
         if (!rule.getPrivileges().contains(GRANT_SELECT)) {
             denyCreateViewWithSelect(tableName.toString(), context.getIdentity());
+        }
+    }
+
+    @Override
+    public void checkCanCreateMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Object> properties)
+    {
+        // check if user will be an owner of the view after creation
+        if (!checkTablePermission(context, materializedViewName, OWNERSHIP)) {
+            denyCreateMaterializedView(materializedViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanRefreshMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        if (!checkTablePermission(context, materializedViewName, UPDATE)) {
+            denyRefreshMaterializedView(materializedViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanDropMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        if (!checkTablePermission(context, materializedViewName, OWNERSHIP)) {
+            denyDropMaterializedView(materializedViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanRenameMaterializedView(ConnectorSecurityContext context, SchemaTableName viewName, SchemaTableName newViewName)
+    {
+        // check if user owns the existing materialized view, and if they will be an owner of the materialized view after the rename
+        if (!checkTablePermission(context, viewName, OWNERSHIP) || !checkTablePermission(context, newViewName, OWNERSHIP)) {
+            denyRenameMaterializedView(viewName.toString(), newViewName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewProperties(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Optional<Object>> properties)
+    {
+        if (!checkTablePermission(context, materializedViewName, OWNERSHIP)) {
+            denySetMaterializedViewProperties(materializedViewName.toString());
         }
     }
 
@@ -411,6 +541,14 @@ public class FileBasedAccessControl
     }
 
     @Override
+    public void checkCanDenySchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal grantee)
+    {
+        if (!isSchemaOwner(context, schemaName)) {
+            denyDenySchemaPrivilege(privilege.name(), schemaName);
+        }
+    }
+
+    @Override
     public void checkCanRevokeSchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal revokee, boolean grantOption)
     {
         if (!isSchemaOwner(context, schemaName)) {
@@ -423,6 +561,13 @@ public class FileBasedAccessControl
     {
         // file based rules are immutable
         denyGrantTablePrivilege(privilege.toString(), tableName.toString());
+    }
+
+    @Override
+    public void checkCanDenyTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal grantee)
+    {
+        // file based rules are immutable
+        denyDenyTablePrivilege(privilege.toString(), tableName.toString());
     }
 
     @Override
@@ -445,43 +590,45 @@ public class FileBasedAccessControl
     }
 
     @Override
-    public void checkCanGrantRoles(ConnectorSecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanGrantRoles(ConnectorSecurityContext context,
+            Set<String> roles,
+            Set<TrinoPrincipal> grantees,
+            boolean adminOption,
+            Optional<TrinoPrincipal> grantor)
     {
         denyGrantRoles(roles, grantees);
     }
 
     @Override
-    public void checkCanRevokeRoles(ConnectorSecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanRevokeRoles(ConnectorSecurityContext context,
+            Set<String> roles,
+            Set<TrinoPrincipal> grantees,
+            boolean adminOption,
+            Optional<TrinoPrincipal> grantor)
     {
         denyRevokeRoles(roles, grantees);
     }
 
     @Override
-    public void checkCanSetRole(ConnectorSecurityContext context, String role, String catalogName)
+    public void checkCanSetRole(ConnectorSecurityContext context, String role)
     {
         denySetRole(role);
     }
 
     @Override
-    public void checkCanShowRoleAuthorizationDescriptors(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowRoles(ConnectorSecurityContext context)
     {
         // allow, no roles are supported so show will always be empty
     }
 
     @Override
-    public void checkCanShowRoles(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowCurrentRoles(ConnectorSecurityContext context)
     {
         // allow, no roles are supported so show will always be empty
     }
 
     @Override
-    public void checkCanShowCurrentRoles(ConnectorSecurityContext context, String catalogName)
-    {
-        // allow, no roles are supported so show will always be empty
-    }
-
-    @Override
-    public void checkCanShowRoleGrants(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowRoleGrants(ConnectorSecurityContext context)
     {
         // allow, no roles are supported so show will always be empty
     }
@@ -489,21 +636,89 @@ public class FileBasedAccessControl
     @Override
     public void checkCanExecuteProcedure(ConnectorSecurityContext context, SchemaRoutineName procedure)
     {
+        ConnectorIdentity identity = context.getIdentity();
+        boolean allowed = procedureRules.stream()
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), procedure))
+                .findFirst()
+                .filter(ProcedureAccessControlRule::canExecuteProcedure)
+                .isPresent();
+        if (!allowed) {
+            denyExecuteProcedure(procedure.toString());
+        }
     }
 
     @Override
-    public Optional<ViewExpression> getRowFilter(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanExecuteTableProcedure(ConnectorSecurityContext context, SchemaTableName tableName, String procedure) {}
+
+    @Override
+    public boolean canExecuteFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        return checkFunctionPermission(context, function, FunctionAccessControlRule::canExecuteFunction);
+    }
+
+    @Override
+    public boolean canCreateViewWithExecuteFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        return checkFunctionPermission(context, function, FunctionAccessControlRule::canGrantExecuteFunction);
+    }
+
+    @Override
+    public void checkCanShowFunctions(ConnectorSecurityContext context, String schemaName)
+    {
+        if (!checkAnySchemaAccess(context, schemaName)) {
+            denyShowFunctions(schemaName);
+        }
+    }
+
+    @Override
+    public Set<SchemaFunctionName> filterFunctions(ConnectorSecurityContext context, Set<SchemaFunctionName> functionNames)
+    {
+        return functionNames.stream()
+                .filter(name -> isSchemaOwner(context, name.getSchemaName()) ||
+                        checkAnyFunctionPermission(context, new SchemaRoutineName(name.getSchemaName(), name.getFunctionName()), FunctionAccessControlRule::canExecuteFunction))
+                .collect(toImmutableSet());
+    }
+
+    @Override
+    public void checkCanCreateFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        if (!checkFunctionPermission(context, function, FunctionAccessControlRule::hasOwnership)) {
+            denyCreateFunction(function.toString());
+        }
+    }
+
+    @Override
+    public void checkCanDropFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        if (!checkFunctionPermission(context, function, FunctionAccessControlRule::hasOwnership)) {
+            denyDropFunction(function.toString());
+        }
+    }
+
+    @Override
+    public void checkCanShowCreateFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        if (!checkFunctionPermission(context, function, FunctionAccessControlRule::hasOwnership)) {
+            denyShowCreateFunction(function.getSchemaName());
+        }
+    }
+
+    @Override
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         if (INFORMATION_SCHEMA_NAME.equals(tableName.getSchemaName())) {
-            return Optional.empty();
+            return ImmutableList.of();
         }
 
         ConnectorIdentity identity = context.getIdentity();
         return tableRules.stream()
-                .filter(rule -> rule.matches(identity.getUser(), identity.getGroups(), tableName))
-                .map(rule -> rule.getFilter(identity.getUser(), catalogName, tableName.getSchemaName()))
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
+                .map(rule -> rule.getFilter(catalogName, tableName.getSchemaName()))
+                // we return the first one we find
                 .findFirst()
-                .flatMap(Function.identity());
+                .stream()
+                .flatMap(Optional::stream)
+                .collect(toImmutableList());
     }
 
     @Override
@@ -514,18 +729,51 @@ public class FileBasedAccessControl
         }
 
         ConnectorIdentity identity = context.getIdentity();
-        return tableRules.stream()
-                .filter(rule -> rule.matches(identity.getUser(), identity.getGroups(), tableName))
-                .map(rule -> rule.getColumnMask(identity.getUser(), catalogName, tableName.getSchemaName(), columnName))
+        List<ViewExpression> masks = tableRules.stream()
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
+                .map(rule -> rule.getColumnMask(catalogName, tableName.getSchemaName(), columnName))
+                // we return the first one we find
                 .findFirst()
-                .flatMap(Function.identity());
+                .stream()
+                .flatMap(Optional::stream)
+                .toList();
+
+        if (masks.size() > 1) {
+            throw new TrinoException(INVALID_COLUMN_MASK, format("Multiple masks defined for %s.%s", tableName, columnName));
+        }
+
+        return masks.stream().findFirst();
+    }
+
+    @Override
+    public Map<ColumnSchema, ViewExpression> getColumnMasks(ConnectorSecurityContext context, SchemaTableName tableName, List<ColumnSchema> columns)
+    {
+        if (INFORMATION_SCHEMA_NAME.equals(tableName.getSchemaName())) {
+            return ImmutableMap.of();
+        }
+
+        ConnectorIdentity identity = context.getIdentity();
+        try {
+            return columns.stream()
+                    .flatMap(columnSchema -> tableRules.stream()
+                            .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName))
+                            .map(rule -> rule.getColumnMask(catalogName, tableName.getSchemaName(), columnSchema.getName()))
+                            .findFirst()
+                            .stream()
+                            .flatMap(Optional::stream)
+                            .map(viewExpression -> Map.entry(columnSchema, viewExpression)))
+                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
+        }
+        catch (IllegalArgumentException exception) {
+            throw new TrinoException(INVALID_COLUMN_MASK, "Multiple column masks defined for the same column", exception);
+        }
     }
 
     private boolean canSetSessionProperty(ConnectorSecurityContext context, String property)
     {
         ConnectorIdentity identity = context.getIdentity();
         for (SessionPropertyAccessControlRule rule : sessionPropertyRules) {
-            Optional<Boolean> allowed = rule.match(identity.getUser(), identity.getGroups(), property);
+            Optional<Boolean> allowed = rule.match(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), property);
             if (allowed.isPresent()) {
                 return allowed.get();
             }
@@ -551,7 +799,7 @@ public class FileBasedAccessControl
 
         ConnectorIdentity identity = context.getIdentity();
         for (TableAccessControlRule rule : tableRules) {
-            if (rule.matches(identity.getUser(), identity.getGroups(), tableName)) {
+            if (rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), tableName)) {
                 return checkPrivileges.test(rule.getPrivileges());
             }
         }
@@ -561,18 +809,50 @@ public class FileBasedAccessControl
     private boolean checkAnySchemaAccess(ConnectorSecurityContext context, String schemaName)
     {
         ConnectorIdentity identity = context.getIdentity();
-        return anySchemaPermissionsRules.stream().anyMatch(rule -> rule.match(identity.getUser(), identity.getGroups(), schemaName));
+        return anySchemaPermissionsRules.stream().anyMatch(rule -> rule.match(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), schemaName));
     }
 
     private boolean isSchemaOwner(ConnectorSecurityContext context, String schemaName)
     {
         ConnectorIdentity identity = context.getIdentity();
         for (SchemaAccessControlRule rule : schemaRules) {
-            Optional<Boolean> owner = rule.match(identity.getUser(), identity.getGroups(), schemaName);
+            Optional<Boolean> owner = rule.match(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), schemaName);
             if (owner.isPresent()) {
                 return owner.get();
             }
         }
         return false;
+    }
+
+    private boolean checkFunctionPermission(ConnectorSecurityContext context, SchemaRoutineName functionName, Predicate<FunctionAccessControlRule> executePredicate)
+    {
+        ConnectorIdentity identity = context.getIdentity();
+        return functionRules.stream()
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), functionName))
+                .findFirst()
+                .filter(executePredicate)
+                .isPresent();
+    }
+
+    private boolean checkAnyFunctionPermission(ConnectorSecurityContext context, SchemaRoutineName functionName, Predicate<FunctionAccessControlRule> executePredicate)
+    {
+        ConnectorIdentity identity = context.getIdentity();
+        return functionRules.stream()
+                .filter(rule -> rule.matches(identity.getUser(), identity.getEnabledSystemRoles(), identity.getGroups(), functionName))
+                .findFirst()
+                .filter(executePredicate)
+                .isPresent();
+    }
+
+    private boolean checkCanSetAuthorization(ConnectorSecurityContext context, TrinoPrincipal principal)
+    {
+        ConnectorIdentity identity = context.getIdentity();
+        Set<String> roles = identity.getConnectorRole().stream()
+                .flatMap(role -> role.getRole().stream())
+                .collect(toImmutableSet());
+        return authorizationRules.stream()
+                .flatMap(rule -> rule.match(identity.getUser(), identity.getGroups(), roles, principal).stream())
+                .findFirst()
+                .orElse(false);
     }
 }

@@ -22,24 +22,18 @@ import io.trino.spi.type.Type;
 import java.util.Objects;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Redis specific connector column handle.
- */
 public final class RedisColumnHandle
         implements DecoderColumnHandle, Comparable<RedisColumnHandle>
 {
+    private static final int INSTANCE_SIZE = instanceSize(RedisColumnHandle.class);
+
     private final int ordinalPosition;
-
-    /**
-     * Column Name
-     */
     private final String name;
-
-    /**
-     * Column type
-     */
     private final Type type;
 
     /**
@@ -62,9 +56,6 @@ public final class RedisColumnHandle
      */
     private final boolean keyDecoder;
 
-    /**
-     * True if the column should be hidden.
-     */
     private final boolean hidden;
 
     /**
@@ -181,15 +172,15 @@ public final class RedisColumnHandle
         }
 
         RedisColumnHandle other = (RedisColumnHandle) obj;
-        return Objects.equals(this.ordinalPosition, other.ordinalPosition) &&
+        return this.ordinalPosition == other.ordinalPosition &&
                 Objects.equals(this.name, other.name) &&
                 Objects.equals(this.type, other.type) &&
                 Objects.equals(this.mapping, other.mapping) &&
                 Objects.equals(this.dataFormat, other.dataFormat) &&
                 Objects.equals(this.formatHint, other.formatHint) &&
-                Objects.equals(this.keyDecoder, other.keyDecoder) &&
-                Objects.equals(this.hidden, other.hidden) &&
-                Objects.equals(this.internal, other.internal);
+                this.keyDecoder == other.keyDecoder &&
+                this.hidden == other.hidden &&
+                this.internal == other.internal;
     }
 
     @Override
@@ -212,5 +203,15 @@ public final class RedisColumnHandle
                 .add("hidden", hidden)
                 .add("internal", internal)
                 .toString();
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + sizeOf(ordinalPosition)
+                + estimatedSizeOf(name)
+                + estimatedSizeOf(mapping)
+                + estimatedSizeOf(dataFormat)
+                + estimatedSizeOf(formatHint);
     }
 }

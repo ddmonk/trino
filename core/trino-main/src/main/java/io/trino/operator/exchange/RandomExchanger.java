@@ -15,7 +15,6 @@ package io.trino.operator.exchange;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.operator.exchange.PageReference.PageReleasedListener;
 import io.trino.spi.Page;
 
 import java.util.List;
@@ -27,15 +26,13 @@ import static java.util.Objects.requireNonNull;
 class RandomExchanger
         implements LocalExchanger
 {
-    private final List<Consumer<PageReference>> buffers;
+    private final List<Consumer<Page>> buffers;
     private final LocalExchangeMemoryManager memoryManager;
-    private final PageReleasedListener onPageReleased;
 
-    public RandomExchanger(List<Consumer<PageReference>> buffers, LocalExchangeMemoryManager memoryManager)
+    public RandomExchanger(List<Consumer<Page>> buffers, LocalExchangeMemoryManager memoryManager)
     {
         this.buffers = ImmutableList.copyOf(requireNonNull(buffers, "buffers is null"));
         this.memoryManager = requireNonNull(memoryManager, "memoryManager is null");
-        this.onPageReleased = PageReleasedListener.forLocalExchangeMemoryManager(memoryManager);
     }
 
     @Override
@@ -43,11 +40,11 @@ class RandomExchanger
     {
         memoryManager.updateMemoryUsage(page.getRetainedSizeInBytes());
         int randomIndex = ThreadLocalRandom.current().nextInt(buffers.size());
-        buffers.get(randomIndex).accept(new PageReference(page, 1, onPageReleased));
+        buffers.get(randomIndex).accept(page);
     }
 
     @Override
-    public ListenableFuture<?> waitForWriting()
+    public ListenableFuture<Void> waitForWriting()
     {
         return memoryManager.getNotFullFuture();
     }

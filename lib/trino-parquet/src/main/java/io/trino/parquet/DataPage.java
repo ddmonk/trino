@@ -13,15 +13,28 @@
  */
 package io.trino.parquet;
 
-public abstract class DataPage
+import java.util.OptionalLong;
+
+public abstract sealed class DataPage
         extends Page
+        permits DataPageV1, DataPageV2
 {
     protected final int valueCount;
+    private final OptionalLong firstRowIndex;
 
-    public DataPage(int uncompressedSize, int valueCount)
+    public DataPage(int uncompressedSize, int valueCount, OptionalLong firstRowIndex)
     {
         super(uncompressedSize);
         this.valueCount = valueCount;
+        this.firstRowIndex = firstRowIndex;
+    }
+
+    /**
+     * @return the index of the first row index in this page or -1 if unset.
+     */
+    public OptionalLong getFirstRowIndex()
+    {
+        return firstRowIndex;
     }
 
     public int getValueCount()

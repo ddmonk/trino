@@ -22,7 +22,6 @@ import io.trino.spi.type.TypeParameter;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.type.FunctionType.NAME;
 import static java.util.stream.Collectors.toList;
 
 public final class FunctionParametricType
@@ -30,14 +29,12 @@ public final class FunctionParametricType
 {
     public static final FunctionParametricType FUNCTION = new FunctionParametricType();
 
-    private FunctionParametricType()
-    {
-    }
+    private FunctionParametricType() {}
 
     @Override
     public String getName()
     {
-        return NAME;
+        return FunctionType.NAME;
     }
 
     @Override
@@ -50,6 +47,6 @@ public final class FunctionParametricType
                 parameters);
         List<Type> types = parameters.stream().map(TypeParameter::getType).collect(toList());
 
-        return new FunctionType(types.subList(0, types.size() - 1), types.get(types.size() - 1));
+        return new FunctionType(types.subList(0, types.size() - 1), types.getLast());
     }
 }

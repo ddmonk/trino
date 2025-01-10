@@ -14,31 +14,43 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.RedirectionAwareTableHandle;
 import io.trino.security.AccessControl;
-import io.trino.spi.TrinoException;
-import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.SetTableAuthorization;
-import io.trino.transaction.TransactionManager;
 
 import java.util.List;
+import java.util.Optional;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.metadata.MetadataUtil.checkRoleExists;
 import static io.trino.metadata.MetadataUtil.createPrincipal;
 import static io.trino.metadata.MetadataUtil.createQualifiedObjectName;
-import static io.trino.spi.StandardErrorCode.NOT_FOUND;
-import static io.trino.spi.StandardErrorCode.ROLE_NOT_FOUND;
+import static io.trino.metadata.MetadataUtil.getRequiredCatalogHandle;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class SetTableAuthorizationTask
         implements DataDefinitionTask<SetTableAuthorization>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public SetTableAuthorizationTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -46,27 +58,31 @@ public class SetTableAuthorizationTask
     }
 
     @Override
-    public ListenableFuture<?> execute(SetTableAuthorization statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            SetTableAuthorization statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getSource());
 
-        CatalogName catalogName = metadata.getCatalogHandle(session, tableName.getCatalogName())
-                .orElseThrow(() -> new TrinoException(NOT_FOUND, "Catalog does not exist: " + tableName.getCatalogName()));
-        metadata.getTableHandle(session, tableName)
-                .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, statement, "Table '%s' does not exist", tableName));
+        getRequiredCatalogHandle(metadata, session, statement, tableName.catalogName());
+        RedirectionAwareTableHandle redirection = metadata.getRedirectionAwareTableHandle(session, tableName);
+        if (redirection.tableHandle().isEmpty()) {
+            throw semanticException(TABLE_NOT_FOUND, statement, "Table '%s' does not exist", tableName);
+        }
+        if (redirection.redirectedTableName().isPresent()) {
+            throw semanticException(NOT_SUPPORTED, statement, "Table %s is redirected to %s and SET TABLE AUTHORIZATION is not supported with table redirections", tableName, redirection.redirectedTableName().get());
+        }
 
         TrinoPrincipal principal = createPrincipal(statement.getPrincipal());
-
-        if (principal.getType() == PrincipalType.ROLE
-                && !metadata.listRoles(session, catalogName.getCatalogName()).contains(principal.getName())) {
-            throw semanticException(ROLE_NOT_FOUND, statement, "Role '%s' does not exist", principal.getName());
-        }
+        checkRoleExists(session, statement, metadata, principal, Optional.of(tableName.catalogName()).filter(catalog -> metadata.isCatalogManagedSecurity(session, catalog)));
 
         accessControl.checkCanSetTableAuthorization(session.toSecurityContext(), tableName, principal);
 
         metadata.setTableAuthorization(session, tableName.asCatalogSchemaTableName(), principal);
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

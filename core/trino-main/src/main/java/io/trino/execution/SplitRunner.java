@@ -15,15 +15,20 @@ package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.Duration;
+import io.opentelemetry.api.trace.Span;
 
 import java.io.Closeable;
 
 public interface SplitRunner
         extends Closeable
 {
+    int getPipelineId();
+
+    Span getPipelineSpan();
+
     boolean isFinished();
 
-    ListenableFuture<?> processFor(Duration duration);
+    ListenableFuture<Void> processFor(Duration duration);
 
     String getInfo();
 

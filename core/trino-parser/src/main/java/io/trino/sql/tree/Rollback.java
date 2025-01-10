@@ -17,22 +17,11 @@ package io.trino.sql.tree;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
-import java.util.Optional;
 
 public final class Rollback
         extends Statement
 {
-    public Rollback()
-    {
-        this(Optional.empty());
-    }
-
     public Rollback(NodeLocation location)
-    {
-        this(Optional.of(location));
-    }
-
-    private Rollback(Optional<NodeLocation> location)
     {
         super(location);
     }
@@ -52,7 +41,7 @@ public final class Rollback
     @Override
     public int hashCode()
     {
-        return 0;
+        return getClass().hashCode();
     }
 
     @Override

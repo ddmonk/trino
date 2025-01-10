@@ -13,23 +13,23 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.spi.type.RowType;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.DereferenceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.Literal;
-import io.trino.sql.tree.SymbolReference;
-import io.trino.sql.tree.TryExpression;
-import io.trino.sql.util.AstUtils;
 
 import java.util.Map;
 import java.util.Optional;
@@ -75,6 +75,11 @@ public class InlineProjections
 
     static Optional<ProjectNode> inlineProjections(ProjectNode parent, ProjectNode child)
     {
+        // squash identity projections
+        if (parent.isIdentity() && child.isIdentity()) {
+            return Optional.of((ProjectNode) parent.replaceChildren(ImmutableList.of(child.getSource())));
+        }
+
         Set<Symbol> targets = extractInliningTargets(parent, child);
         if (targets.isEmpty()) {
             return Optional.empty();
@@ -82,11 +87,10 @@ public class InlineProjections
 
         // inline the expressions
         Assignments assignments = child.getAssignments().filter(targets::contains);
-        Map<Symbol, Expression> parentAssignments = parent.getAssignments()
-                .entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        entry -> inlineReferences(entry.getValue(), assignments)));
+        Assignments.Builder parentAssignments = Assignments.builder();
+        for (Map.Entry<Symbol, Expression> assignment : parent.getAssignments().entrySet()) {
+            parentAssignments.put(assignment.getKey(), inlineReferences(assignment.getValue(), assignments));
+        }
 
         // Synthesize identity assignments for the inputs of expressions that were inlined
         // to place in the child projection.
@@ -101,6 +105,10 @@ public class InlineProjections
         for (Map.Entry<Symbol, Expression> assignment : child.getAssignments().entrySet()) {
             if (!targets.contains(assignment.getKey())) {
                 newChildAssignmentsBuilder.put(assignment);
+                // If this is not an identity assignment, remove the symbol from inputs, as we don't want to reset the expression
+                if (!isSymbolReference(assignment.getKey(), assignment.getValue())) {
+                    inputs.remove(assignment.getKey());
+                }
             }
         }
         for (Symbol input : inputs) {
@@ -123,7 +131,7 @@ public class InlineProjections
                 new ProjectNode(
                         parent.getId(),
                         newChild,
-                        Assignments.copyOf(parentAssignments)));
+                        parentAssignments.build()));
     }
 
     private static Expression inlineReferences(Expression expression, Assignments assignments)
@@ -160,34 +168,33 @@ public class InlineProjections
 
         // find references to simple constants or symbol references
         Set<Symbol> basicReferences = dependencies.keySet().stream()
-                .filter(input -> child.getAssignments().get(input) instanceof Literal || child.getAssignments().get(input) instanceof SymbolReference)
+                .filter(input -> child.getAssignments().get(input) instanceof Constant || child.getAssignments().get(input) instanceof Reference)
                 .filter(input -> !child.getAssignments().isIdentity(input)) // skip identities, otherwise, this rule will keep firing forever
-                .collect(toSet());
-
-        // exclude any complex inputs to TRY expressions. Inlining them would potentially
-        // change the semantics of those expressions
-        Set<Symbol> tryArguments = parent.getAssignments()
-                .getExpressions().stream()
-                .flatMap(expression -> extractTryArguments(expression).stream())
                 .collect(toSet());
 
         Set<Symbol> singletons = dependencies.entrySet().stream()
                 .filter(entry -> entry.getValue() == 1) // reference appears just once across all expressions in parent project node
-                .filter(entry -> !tryArguments.contains(entry.getKey())) // they are not inputs to TRY. Otherwise, inlining might change semantics
                 .filter(entry -> !child.getAssignments().isIdentity(entry.getKey())) // skip identities, otherwise, this rule will keep firing forever
-                .filter(entry -> !(child.getAssignments().get(entry.getKey()) instanceof DereferenceExpression)) // skip dereferences, otherwise, inlining can cause conflicts with PushdownDereferences
+                .filter(entry -> {
+                    // skip dereferences, otherwise, inlining can cause conflicts with PushdownDereferences
+                    Expression assignment = child.getAssignments().get(entry.getKey());
+
+                    if (assignment instanceof FieldReference) {
+                        if (((FieldReference) assignment).base().type() instanceof RowType) {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                })
                 .map(Map.Entry::getKey)
                 .collect(toSet());
 
         return Sets.union(singletons, basicReferences);
     }
 
-    private static Set<Symbol> extractTryArguments(Expression expression)
+    private static boolean isSymbolReference(Symbol symbol, Expression expression)
     {
-        return AstUtils.preOrder(expression)
-                .filter(TryExpression.class::isInstance)
-                .map(TryExpression.class::cast)
-                .flatMap(tryExpression -> SymbolsExtractor.extractAll(tryExpression).stream())
-                .collect(toSet());
+        return expression instanceof Reference reference && reference.name().equals(symbol.name());
     }
 }

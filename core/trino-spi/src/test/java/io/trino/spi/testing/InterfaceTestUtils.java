@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableSet;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -25,8 +26,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Sets.difference;
 import static com.google.common.reflect.Reflection.newProxy;
 import static java.lang.String.format;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Fail.fail;
 
 public final class InterfaceTestUtils
 {
@@ -40,7 +41,8 @@ public final class InterfaceTestUtils
     public static <I, C extends I> void assertAllMethodsOverridden(Class<I> iface, Class<C> clazz, Set<Method> exclusions)
     {
         checkArgument(iface.isAssignableFrom(clazz), "%s is not supertype of %s", iface, clazz);
-        for (Method method : difference(ImmutableSet.copyOf(iface.getMethods()), exclusions)) {
+        exclusions = new HashSet<>(exclusions);
+        for (Method method : iface.getMethods()) {
             if (Modifier.isStatic(method.getModifiers())) {
                 continue;
             }
@@ -54,8 +56,17 @@ public final class InterfaceTestUtils
                 }
             }
             catch (NoSuchMethodException e) {
-                fail(format("%s does not override [%s]", clazz.getName(), method));
+                if (exclusions.remove(method)) {
+                    // ignored
+                }
+                else {
+                    fail(format("%s does not override [%s]", clazz.getName(), method));
+                }
             }
+        }
+
+        if (!exclusions.isEmpty()) {
+            fail("Following exclusions are redundant: " + exclusions);
         }
     }
 
@@ -66,7 +77,7 @@ public final class InterfaceTestUtils
 
     public static <I, C extends I> void assertProperForwardingMethodsAreCalled(Class<I> iface, Function<I, C> forwardingInstanceFactory, Set<Method> exclusions)
     {
-        for (Method actualMethod : difference(ImmutableSet.copyOf(iface.getDeclaredMethods()), exclusions)) {
+        for (Method actualMethod : difference(ImmutableSet.copyOf(iface.getMethods()), exclusions)) {
             Object[] actualArguments = new Object[actualMethod.getParameterCount()];
             for (int i = 0; i < actualArguments.length; i++) {
                 if (actualMethod.getParameterTypes()[i].isPrimitive()) {
@@ -75,7 +86,7 @@ public final class InterfaceTestUtils
             }
             C forwardingInstance = forwardingInstanceFactory.apply(
                     newProxy(iface, (proxy, expectedMethod, expectedArguments) -> {
-                        assertEquals(actualMethod.getName(), expectedMethod.getName());
+                        assertThat(actualMethod.getName()).isEqualTo(expectedMethod.getName());
                         // TODO assert arguments
 
                         if (actualMethod.getReturnType().isPrimitive()) {

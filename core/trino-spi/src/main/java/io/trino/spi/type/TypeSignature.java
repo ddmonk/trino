@@ -14,20 +14,20 @@
 package io.trino.spi.type;
 
 import com.fasterxml.jackson.annotation.JsonValue;
-
-import javax.annotation.concurrent.Immutable;
+import com.google.errorprone.annotations.FormatMethod;
+import com.google.errorprone.annotations.Immutable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 import static io.trino.spi.type.StandardTypes.TIME_WITH_TIME_ZONE;
 import static io.trino.spi.type.TypeSignatureParameter.typeParameter;
 import static java.lang.String.format;
 import static java.util.Arrays.asList;
+import static java.util.stream.Collectors.toUnmodifiableList;
 
 @Immutable
 public final class TypeSignature
@@ -74,7 +74,7 @@ public final class TypeSignature
         for (TypeSignatureParameter parameter : parameters) {
             if (parameter.getKind() != ParameterKind.TYPE) {
                 throw new IllegalStateException(
-                        format("Expected all parameters to be TypeSignatures but [%s] was found", parameter.toString()));
+                        format("Expected all parameters to be TypeSignatures but [%s] was found", parameter));
             }
             result.add(parameter.getTypeSignature());
         }
@@ -134,6 +134,7 @@ public final class TypeSignature
         return typeName.toString();
     }
 
+    @FormatMethod
     private static void checkArgument(boolean argument, String format, Object... args)
     {
         if (!argument) {
@@ -198,9 +199,9 @@ public final class TypeSignature
     {
         return new TypeSignature(
                 name,
-                Arrays.asList(parameters).stream()
+                Arrays.stream(parameters)
                         .map(TypeSignatureParameter::typeParameter)
-                        .collect(Collectors.toList()));
+                        .collect(toUnmodifiableList()));
     }
 
     public static TypeSignature functionType(TypeSignature first, TypeSignature... rest)
@@ -208,7 +209,7 @@ public final class TypeSignature
         List<TypeSignatureParameter> parameters = new ArrayList<>();
         parameters.add(typeParameter(first));
 
-        Arrays.asList(rest).stream()
+        Arrays.stream(rest)
                 .map(TypeSignatureParameter::typeParameter)
                 .forEach(parameters::add);
 

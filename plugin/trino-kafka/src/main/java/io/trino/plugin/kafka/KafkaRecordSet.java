@@ -20,9 +20,10 @@ import io.airlift.slice.Slice;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.decoder.FieldValueProvider;
 import io.trino.decoder.RowDecoder;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ArrayBlockBuilder;
+import io.trino.spi.block.SqlMap;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.MapType;
@@ -33,31 +34,25 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 
-import java.util.HashMap;
+import java.time.Duration;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.decoder.FieldValueProviders.booleanValueProvider;
 import static io.trino.decoder.FieldValueProviders.bytesValueProvider;
 import static io.trino.decoder.FieldValueProviders.longValueProvider;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.HEADERS_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.KEY_CORRUPT_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.KEY_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.KEY_LENGTH_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.MESSAGE_CORRUPT_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.MESSAGE_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.MESSAGE_LENGTH_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.OFFSET_TIMESTAMP_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.PARTITION_ID_FIELD;
-import static io.trino.plugin.kafka.KafkaInternalFieldManager.PARTITION_OFFSET_FIELD;
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.lang.Math.max;
 import static java.util.Collections.emptyIterator;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
 
 public class KafkaRecordSet
         implements RecordSet
@@ -68,8 +63,10 @@ public class KafkaRecordSet
     private final KafkaSplit split;
 
     private final KafkaConsumerFactory consumerFactory;
+    private final ConnectorSession connectorSession;
     private final RowDecoder keyDecoder;
     private final RowDecoder messageDecoder;
+    private final KafkaInternalFieldManager kafkaInternalFieldManager;
 
     private final List<KafkaColumnHandle> columnHandles;
     private final List<Type> columnTypes;
@@ -77,25 +74,25 @@ public class KafkaRecordSet
     KafkaRecordSet(
             KafkaSplit split,
             KafkaConsumerFactory consumerFactory,
+            ConnectorSession connectorSession,
             List<KafkaColumnHandle> columnHandles,
             RowDecoder keyDecoder,
-            RowDecoder messageDecoder)
+            RowDecoder messageDecoder,
+            KafkaInternalFieldManager kafkaInternalFieldManager)
     {
         this.split = requireNonNull(split, "split is null");
-        this.consumerFactory = requireNonNull(consumerFactory, "consumerManager is null");
+        this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
+        this.connectorSession = requireNonNull(connectorSession, "connectorSession is null");
 
-        this.keyDecoder = requireNonNull(keyDecoder, "rowDecoder is null");
-        this.messageDecoder = requireNonNull(messageDecoder, "rowDecoder is null");
+        this.keyDecoder = requireNonNull(keyDecoder, "keyDecoder is null");
+        this.messageDecoder = requireNonNull(messageDecoder, "messageDecoder is null");
 
         this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
+        this.kafkaInternalFieldManager = requireNonNull(kafkaInternalFieldManager, "kafkaInternalFieldManager is null");
 
-        ImmutableList.Builder<Type> typeBuilder = ImmutableList.builder();
-
-        for (DecoderColumnHandle handle : columnHandles) {
-            typeBuilder.add(handle.getType());
-        }
-
-        this.columnTypes = typeBuilder.build();
+        this.columnTypes = columnHandles.stream()
+                .map(KafkaColumnHandle::getType)
+                .collect(toImmutableList());
     }
 
     @Override
@@ -123,9 +120,9 @@ public class KafkaRecordSet
         private KafkaRecordCursor()
         {
             topicPartition = new TopicPartition(split.getTopicName(), split.getPartitionId());
-            kafkaConsumer = consumerFactory.create();
+            kafkaConsumer = consumerFactory.create(connectorSession);
             kafkaConsumer.assign(ImmutableList.of(topicPartition));
-            kafkaConsumer.seek(topicPartition, split.getMessagesRange().getBegin());
+            kafkaConsumer.seek(topicPartition, split.getMessagesRange().begin());
         }
 
         @Override
@@ -150,82 +147,48 @@ public class KafkaRecordSet
         @Override
         public boolean advanceNextPosition()
         {
-            if (!records.hasNext()) {
-                if (kafkaConsumer.position(topicPartition) >= split.getMessagesRange().getEnd()) {
-                    return false;
-                }
-                records = kafkaConsumer.poll(CONSUMER_POLL_TIMEOUT).iterator();
-                return advanceNextPosition();
+            if (records.hasNext()) {
+                return nextRow(records.next());
             }
-
-            return nextRow(records.next());
+            if (kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end()) {
+                return false;
+            }
+            records = kafkaConsumer.poll(Duration.ofMillis(CONSUMER_POLL_TIMEOUT)).iterator();
+            return advanceNextPosition();
         }
 
         private boolean nextRow(ConsumerRecord<byte[], byte[]> message)
         {
             requireNonNull(message, "message is null");
 
-            if (message.offset() >= split.getMessagesRange().getEnd()) {
+            if (message.offset() >= split.getMessagesRange().end()) {
                 return false;
             }
 
             completedBytes += max(message.serializedKeySize(), 0) + max(message.serializedValueSize(), 0);
 
-            byte[] keyData = EMPTY_BYTE_ARRAY;
-            if (message.key() != null) {
-                keyData = message.key();
-            }
-
-            byte[] messageData = EMPTY_BYTE_ARRAY;
-            if (message.value() != null) {
-                messageData = message.value();
-            }
-            long timeStamp = message.timestamp();
-
-            Map<ColumnHandle, FieldValueProvider> currentRowValuesMap = new HashMap<>();
+            byte[] keyData = message.key() == null ? EMPTY_BYTE_ARRAY : message.key();
+            byte[] messageData = message.value() == null ? EMPTY_BYTE_ARRAY : message.value();
+            long timeStamp = message.timestamp() * MICROSECONDS_PER_MILLISECOND;
 
             Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedKey = keyDecoder.decodeRow(keyData);
-            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedValue = messageDecoder.decodeRow(messageData);
+            // tombstone message has null value body
+            Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodedValue = message.value() == null ? Optional.empty() : messageDecoder.decodeRow(messageData);
 
-            for (DecoderColumnHandle columnHandle : columnHandles) {
-                if (columnHandle.isInternal()) {
-                    switch (columnHandle.getName()) {
-                        case PARTITION_OFFSET_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(message.offset()));
-                            break;
-                        case MESSAGE_FIELD:
-                            currentRowValuesMap.put(columnHandle, bytesValueProvider(messageData));
-                            break;
-                        case MESSAGE_LENGTH_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(messageData.length));
-                            break;
-                        case KEY_FIELD:
-                            currentRowValuesMap.put(columnHandle, bytesValueProvider(keyData));
-                            break;
-                        case KEY_LENGTH_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(keyData.length));
-                            break;
-                        case OFFSET_TIMESTAMP_FIELD:
-                            timeStamp *= MICROSECONDS_PER_MILLISECOND;
-                            currentRowValuesMap.put(columnHandle, longValueProvider(timeStamp));
-                            break;
-                        case KEY_CORRUPT_FIELD:
-                            currentRowValuesMap.put(columnHandle, booleanValueProvider(decodedKey.isEmpty()));
-                            break;
-                        case HEADERS_FIELD:
-                            currentRowValuesMap.put(columnHandle, headerMapValueProvider((MapType) columnHandle.getType(), message.headers()));
-                            break;
-                        case MESSAGE_CORRUPT_FIELD:
-                            currentRowValuesMap.put(columnHandle, booleanValueProvider(decodedValue.isEmpty()));
-                            break;
-                        case PARTITION_ID_FIELD:
-                            currentRowValuesMap.put(columnHandle, longValueProvider(message.partition()));
-                            break;
-                        default:
-                            throw new IllegalArgumentException("unknown internal field " + columnHandle.getName());
-                    }
-                }
-            }
+            Map<ColumnHandle, FieldValueProvider> currentRowValuesMap = columnHandles.stream()
+                    .filter(KafkaColumnHandle::isInternal)
+                    .collect(toMap(identity(), columnHandle -> switch (getInternalFieldId(columnHandle)) {
+                        case PARTITION_OFFSET_FIELD -> longValueProvider(message.offset());
+                        case MESSAGE_FIELD -> bytesValueProvider(messageData);
+                        case MESSAGE_LENGTH_FIELD -> longValueProvider(messageData.length);
+                        case KEY_FIELD -> bytesValueProvider(keyData);
+                        case KEY_LENGTH_FIELD -> longValueProvider(keyData.length);
+                        case OFFSET_TIMESTAMP_FIELD -> longValueProvider(timeStamp);
+                        case KEY_CORRUPT_FIELD -> booleanValueProvider(decodedKey.isEmpty());
+                        case HEADERS_FIELD -> headerMapValueProvider((MapType) columnHandle.getType(), message.headers());
+                        case MESSAGE_CORRUPT_FIELD -> booleanValueProvider(decodedValue.isEmpty());
+                        case PARTITION_ID_FIELD -> longValueProvider(message.partition());
+                    }));
 
             decodedKey.ifPresent(currentRowValuesMap::putAll);
             decodedValue.ifPresent(currentRowValuesMap::putAll);
@@ -236,6 +199,11 @@ public class KafkaRecordSet
             }
 
             return true; // Advanced successfully.
+        }
+
+        private KafkaInternalFieldManager.InternalFieldId getInternalFieldId(KafkaColumnHandle columnHandle)
+        {
+            return kafkaInternalFieldManager.getFieldByName(columnHandle.getName()).getInternalFieldId();
         }
 
         @Override
@@ -265,7 +233,7 @@ public class KafkaRecordSet
         @Override
         public Object getObject(int field)
         {
-            return getFieldValueProvider(field, Block.class).getBlock();
+            return getFieldValueProvider(field, Object.class).getObject();
         }
 
         @Override
@@ -285,7 +253,7 @@ public class KafkaRecordSet
         private void checkFieldType(int field, Class<?> expected)
         {
             Class<?> actual = getType(field).getJavaType();
-            checkArgument(actual == expected, "Expected field %s to be type %s but is %s", field, expected, actual);
+            checkArgument(expected.isAssignableFrom(actual), "Expected field %s to be type %s but is %s", field, expected, actual);
         }
 
         @Override
@@ -301,25 +269,25 @@ public class KafkaRecordSet
         Type valueArrayType = varcharMapType.getTypeParameters().get(1);
         Type valueType = valueArrayType.getTypeParameters().get(0);
 
-        BlockBuilder mapBlockBuilder = varcharMapType.createBlockBuilder(null, 1);
-        BlockBuilder builder = mapBlockBuilder.beginBlockEntry();
-
         // Group by keys and collect values as array.
         Multimap<String, byte[]> headerMap = ArrayListMultimap.create();
         for (Header header : headers) {
             headerMap.put(header.key(), header.value());
         }
 
-        for (String headerKey : headerMap.keySet()) {
-            writeNativeValue(keyType, builder, headerKey);
-            BlockBuilder arrayBuilder = builder.beginBlockEntry();
-            for (byte[] value : headerMap.get(headerKey)) {
-                writeNativeValue(valueType, arrayBuilder, value);
-            }
-            builder.closeEntry();
-        }
-
-        mapBlockBuilder.closeEntry();
+        SqlMap map = buildMapValue(
+                varcharMapType,
+                headerMap.size(),
+                (keyBuilder, valueBuilder) -> {
+                    for (String headerKey : headerMap.keySet()) {
+                        writeNativeValue(keyType, keyBuilder, headerKey);
+                        ((ArrayBlockBuilder) valueBuilder).buildEntry(elementBuilder -> {
+                            for (byte[] value : headerMap.get(headerKey)) {
+                                writeNativeValue(valueType, elementBuilder, value);
+                            }
+                        });
+                    }
+                });
 
         return new FieldValueProvider()
         {
@@ -330,9 +298,9 @@ public class KafkaRecordSet
             }
 
             @Override
-            public Block getBlock()
+            public SqlMap getObject()
             {
-                return varcharMapType.getObject(mapBlockBuilder, 0);
+                return map;
             }
         };
     }

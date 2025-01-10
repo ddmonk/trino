@@ -13,18 +13,18 @@
  */
 package io.trino.sql.rewrite;
 
+import com.google.inject.Inject;
 import io.trino.Session;
-import io.trino.cost.StatsCalculator;
 import io.trino.execution.QueryPreparer;
 import io.trino.execution.QueryPreparer.PreparedQuery;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
-import io.trino.spi.security.GroupProvider;
+import io.trino.sql.analyzer.AnalyzerFactory;
 import io.trino.sql.analyzer.QueryExplainer;
-import io.trino.sql.parser.SqlParser;
+import io.trino.sql.analyzer.QueryExplainerFactory;
 import io.trino.sql.tree.AstVisitor;
 import io.trino.sql.tree.Explain;
+import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.ExplainFormat;
 import io.trino.sql.tree.ExplainOption;
 import io.trino.sql.tree.ExplainType;
@@ -36,7 +36,6 @@ import io.trino.sql.tree.Statement;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static io.trino.sql.QueryUtil.singleValueQuery;
 import static io.trino.sql.tree.ExplainFormat.Type.JSON;
@@ -46,24 +45,30 @@ import static io.trino.sql.tree.ExplainType.Type.IO;
 import static io.trino.sql.tree.ExplainType.Type.VALIDATE;
 import static java.util.Objects.requireNonNull;
 
-final class ExplainRewrite
+public final class ExplainRewrite
         implements StatementRewrite.Rewrite
 {
+    private final QueryExplainerFactory queryExplainerFactory;
+    private final QueryPreparer queryPreparer;
+
+    @Inject
+    public ExplainRewrite(QueryExplainerFactory queryExplainerFactory, QueryPreparer queryPreparer)
+    {
+        this.queryExplainerFactory = requireNonNull(queryExplainerFactory, "queryExplainerFactory is null");
+        this.queryPreparer = requireNonNull(queryPreparer, "queryPreparer is null");
+    }
+
     @Override
     public Statement rewrite(
+            AnalyzerFactory analyzerFactory,
             Session session,
-            Metadata metadata,
-            SqlParser parser,
-            Optional<QueryExplainer> queryExplainer,
             Statement node,
             List<Expression> parameter,
             Map<NodeRef<Parameter>, Expression> parameterLookup,
-            GroupProvider groupProvider,
-            AccessControl accessControl,
             WarningCollector warningCollector,
-            StatsCalculator statsCalculator)
+            PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return (Statement) new Visitor(session, parser, queryExplainer, warningCollector).process(node, null);
+        return (Statement) new Visitor(session, queryPreparer, queryExplainerFactory.createQueryExplainer(analyzerFactory), warningCollector, planOptimizersStatsCollector).process(node, null);
     }
 
     private static final class Visitor
@@ -71,29 +76,34 @@ final class ExplainRewrite
     {
         private final Session session;
         private final QueryPreparer queryPreparer;
-        private final Optional<QueryExplainer> queryExplainer;
+        private final QueryExplainer queryExplainer;
         private final WarningCollector warningCollector;
+        private final PlanOptimizersStatsCollector planOptimizersStatsCollector;
 
         public Visitor(
                 Session session,
-                SqlParser parser,
-                Optional<QueryExplainer> queryExplainer,
-                WarningCollector warningCollector)
+                QueryPreparer queryPreparer,
+                QueryExplainer queryExplainer,
+                WarningCollector warningCollector,
+                PlanOptimizersStatsCollector planOptimizersStatsCollector)
         {
             this.session = requireNonNull(session, "session is null");
-            this.queryPreparer = new QueryPreparer(requireNonNull(parser, "queryPreparer is null"));
+            this.queryPreparer = requireNonNull(queryPreparer, "queryPreparer is null");
             this.queryExplainer = requireNonNull(queryExplainer, "queryExplainer is null");
             this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
+            this.planOptimizersStatsCollector = planOptimizersStatsCollector;
+        }
+
+        @Override
+        protected Node visitExplainAnalyze(ExplainAnalyze node, Void context)
+        {
+            Statement statement = (Statement) process(node.getStatement(), context);
+            return new ExplainAnalyze(node.getLocation().orElseThrow(), statement, node.isVerbose());
         }
 
         @Override
         protected Node visitExplain(Explain node, Void context)
         {
-            if (node.isAnalyze()) {
-                Statement statement = (Statement) process(node.getStatement(), context);
-                return new Explain(statement, node.isAnalyze(), node.isVerbose(), node.getOptions());
-            }
-
             ExplainType.Type planType = DISTRIBUTED;
             ExplainFormat.Type planFormat = TEXT;
             List<ExplainOption> options = node.getOptions();
@@ -125,24 +135,15 @@ final class ExplainRewrite
             PreparedQuery preparedQuery = queryPreparer.prepareQuery(session, node.getStatement());
 
             if (planType == VALIDATE) {
-                queryExplainer.get().analyze(session, preparedQuery.getStatement(), preparedQuery.getParameters(), warningCollector);
+                queryExplainer.validate(session, preparedQuery.getStatement(), preparedQuery.getParameters(), warningCollector, planOptimizersStatsCollector);
                 return singleValueQuery("Valid", true);
             }
 
-            String plan;
-            switch (planFormat) {
-                case GRAPHVIZ:
-                    plan = queryExplainer.get().getGraphvizPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector);
-                    break;
-                case JSON:
-                    plan = queryExplainer.get().getJsonPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector);
-                    break;
-                case TEXT:
-                    plan = queryExplainer.get().getPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector);
-                    break;
-                default:
-                    throw new IllegalArgumentException("Invalid Explain Format: " + planFormat.toString());
-            }
+            String plan = switch (planFormat) {
+                case GRAPHVIZ -> queryExplainer.getGraphvizPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector, planOptimizersStatsCollector);
+                case JSON -> queryExplainer.getJsonPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector, planOptimizersStatsCollector);
+                case TEXT -> queryExplainer.getPlan(session, preparedQuery.getStatement(), planType, preparedQuery.getParameters(), warningCollector, planOptimizersStatsCollector);
+            };
             return singleValueQuery("Query Plan", plan);
         }
 

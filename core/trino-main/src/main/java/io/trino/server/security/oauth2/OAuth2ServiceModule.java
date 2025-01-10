@@ -14,24 +14,24 @@
 package io.trino.server.security.oauth2;
 
 import com.google.inject.Binder;
+import com.google.inject.Inject;
+import com.google.inject.Key;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
-import io.airlift.http.client.HttpClient;
-import io.airlift.units.Duration;
-import io.jsonwebtoken.SigningKeyResolver;
-import io.trino.server.security.jwt.JwkService;
-import io.trino.server.security.jwt.JwkSigningKeyResolver;
+import io.airlift.units.DataSize;
 import io.trino.server.ui.OAuth2WebUiInstalled;
 
-import java.net.URI;
-import java.util.concurrent.TimeUnit;
+import java.time.Duration;
 
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.trino.server.security.oauth2.TokenPairSerializer.ACCESS_TOKEN_ONLY_SERIALIZER;
 
 public class OAuth2ServiceModule
         extends AbstractConfigurationAwareModule
@@ -41,25 +41,53 @@ public class OAuth2ServiceModule
     {
         jaxrsBinder(binder).bind(OAuth2CallbackResource.class);
         newOptionalBinder(binder, OAuth2WebUiInstalled.class);
-        newOptionalBinder(binder, OAuth2TokenExchange.class);
 
         configBinder(binder).bindConfig(OAuth2Config.class);
         binder.bind(OAuth2Service.class).in(Scopes.SINGLETON);
+        binder.bind(OAuth2TokenHandler.class).to(OAuth2TokenExchange.class).in(Scopes.SINGLETON);
+        binder.bind(NimbusHttpClient.class).to(NimbusAirliftHttpClient.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, OAuth2Client.class)
                 .setDefault()
-                .to(ScribeJavaOAuth2Client.class)
+                .to(NimbusOAuth2Client.class)
                 .in(Scopes.SINGLETON);
-        httpClientBinder(binder).bindHttpClient("oauth2-jwk", ForOAuth2.class);
+        install(conditionalModule(OAuth2Config.class, OAuth2Config::isEnableDiscovery, this::bindOidcDiscovery, this::bindStaticConfiguration));
+        install(conditionalModule(OAuth2Config.class, OAuth2Config::isEnableRefreshTokens, this::enableRefreshTokens, this::disableRefreshTokens));
+        httpClientBinder(binder)
+                .bindHttpClient("oauth2-jwk", ForOAuth2.class)
+                .withConfigDefaults(clientConfig -> clientConfig
+                        .setRequestBufferSize(DataSize.of(32, KILOBYTE))
+                        .setResponseBufferSize(DataSize.of(32, KILOBYTE)));
     }
 
-    @Provides
-    @Singleton
-    @ForOAuth2
-    public static SigningKeyResolver createSigningKeyResolver(OAuth2Config oauth2Config, @ForOAuth2 HttpClient httpClient)
+    private void enableRefreshTokens(Binder binder)
     {
-        JwkService jwkService = new JwkService(URI.create(oauth2Config.getJwksUrl()), httpClient, new Duration(15, TimeUnit.MINUTES));
-        jwkService.start();
-        return new JwkSigningKeyResolver(jwkService);
+        install(new JweTokenSerializerModule());
+    }
+
+    private void disableRefreshTokens(Binder binder)
+    {
+        binder.bind(TokenPairSerializer.class).toInstance(ACCESS_TOKEN_ONLY_SERIALIZER);
+        newOptionalBinder(binder, Key.get(Duration.class, ForRefreshTokens.class));
+    }
+
+    @Singleton
+    @Provides
+    @Inject
+    public TokenRefresher getTokenRefresher(TokenPairSerializer tokenAssembler, OAuth2TokenHandler tokenHandler, OAuth2Client oAuth2Client)
+    {
+        return new TokenRefresher(tokenAssembler, tokenHandler, oAuth2Client);
+    }
+
+    private void bindStaticConfiguration(Binder binder)
+    {
+        configBinder(binder).bindConfig(StaticOAuth2ServerConfig.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(StaticConfigurationProvider.class).in(Scopes.SINGLETON);
+    }
+
+    private void bindOidcDiscovery(Binder binder)
+    {
+        configBinder(binder).bindConfig(OidcDiscoveryConfig.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(OidcDiscovery.class).in(Scopes.SINGLETON);
     }
 
     @Override

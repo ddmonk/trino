@@ -14,16 +14,23 @@
 package io.trino.plugin.iceberg;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.SizeOf;
 import org.apache.iceberg.types.Types;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.plugin.iceberg.ColumnIdentity.TypeCategory.ARRAY;
 import static io.trino.plugin.iceberg.ColumnIdentity.TypeCategory.MAP;
 import static io.trino.plugin.iceberg.ColumnIdentity.TypeCategory.PRIMITIVE;
@@ -33,10 +40,14 @@ import static java.util.Objects.requireNonNull;
 
 public class ColumnIdentity
 {
+    private static final int INSTANCE_SIZE = instanceSize(ColumnIdentity.class);
+
     private final int id;
     private final String name;
     private final TypeCategory typeCategory;
-    private final List<ColumnIdentity> children;
+    // Underlying ImmutableMap is used to maintain the column ordering
+    private final Map<Integer, ColumnIdentity> children;
+    private final Map<Integer, Integer> childFieldIdToIndex;
 
     @JsonCreator
     public ColumnIdentity(
@@ -48,10 +59,19 @@ public class ColumnIdentity
         this.id = id;
         this.name = requireNonNull(name, "name is null");
         this.typeCategory = requireNonNull(typeCategory, "typeCategory is null");
-        this.children = requireNonNull(children, "children is null");
+        requireNonNull(children, "children is null");
         checkArgument(
                 children.isEmpty() == (typeCategory == PRIMITIVE),
                 "Children should be empty if and only if column type is primitive");
+        ImmutableMap.Builder<Integer, ColumnIdentity> childrenBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<Integer, Integer> childFieldIdToIndex = ImmutableMap.builder();
+        for (int i = 0; i < children.size(); i++) {
+            ColumnIdentity child = children.get(i);
+            childrenBuilder.put(child.getId(), child);
+            childFieldIdToIndex.put(child.getId(), i);
+        }
+        this.children = childrenBuilder.buildOrThrow();
+        this.childFieldIdToIndex = childFieldIdToIndex.buildOrThrow();
     }
 
     @JsonProperty
@@ -75,7 +95,21 @@ public class ColumnIdentity
     @JsonProperty
     public List<ColumnIdentity> getChildren()
     {
-        return children;
+        return ImmutableList.copyOf(children.values());
+    }
+
+    @JsonIgnore
+    public ColumnIdentity getChildByFieldId(int fieldId)
+    {
+        checkArgument(children.containsKey(fieldId), "ColumnIdentity %s does not contain child with field id %s", this, fieldId);
+        return children.get(fieldId);
+    }
+
+    @JsonIgnore
+    public int getChildIndexByFieldId(int fieldId)
+    {
+        checkArgument(childFieldIdToIndex.containsKey(fieldId), "ColumnIdentity %s does not contain child with field id %s", this, fieldId);
+        return childFieldIdToIndex.get(fieldId);
     }
 
     @Override
@@ -104,6 +138,16 @@ public class ColumnIdentity
     public String toString()
     {
         return id + ":" + name;
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        // type is not accounted for as the instances are cached (by TypeRegistry) and shared
+        return INSTANCE_SIZE
+                + sizeOf(id)
+                + estimatedSizeOf(name)
+                + estimatedSizeOf(children, SizeOf::sizeOf, ColumnIdentity::getRetainedSizeInBytes)
+                + estimatedSizeOf(childFieldIdToIndex, SizeOf::sizeOf, SizeOf::sizeOf);
     }
 
     public enum TypeCategory

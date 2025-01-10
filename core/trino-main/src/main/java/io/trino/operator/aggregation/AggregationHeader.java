@@ -13,49 +13,29 @@
  */
 package io.trino.operator.aggregation;
 
+import com.google.common.collect.ImmutableSet;
+import io.trino.spi.function.WindowAccumulator;
+
 import java.util.Optional;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
-public class AggregationHeader
+public record AggregationHeader(
+        String name,
+        Set<String> aliases,
+        Optional<String> description,
+        boolean decomposable,
+        boolean orderSensitive,
+        boolean hidden,
+        boolean deprecated,
+        Optional<Class<? extends WindowAccumulator>> windowAccumulator)
 {
-    private final String name;
-    private final Optional<String> description;
-    private final boolean decomposable;
-    private final boolean orderSensitive;
-    private final boolean hidden;
-
-    public AggregationHeader(String name, Optional<String> description, boolean decomposable, boolean orderSensitive, boolean hidden)
+    public AggregationHeader
     {
-        this.name = requireNonNull(name, "name cannot be null");
-        this.description = requireNonNull(description, "description cannot be null");
-        this.decomposable = decomposable;
-        this.orderSensitive = orderSensitive;
-        this.hidden = hidden;
-    }
-
-    public String getName()
-    {
-        return name;
-    }
-
-    public Optional<String> getDescription()
-    {
-        return description;
-    }
-
-    public boolean isDecomposable()
-    {
-        return decomposable;
-    }
-
-    public boolean isOrderSensitive()
-    {
-        return orderSensitive;
-    }
-
-    public boolean isHidden()
-    {
-        return hidden;
+        requireNonNull(name, "name cannot be null");
+        aliases = ImmutableSet.copyOf(aliases);
+        requireNonNull(description, "description cannot be null");
+        requireNonNull(windowAccumulator, "windowAccumulator is null");
     }
 }

@@ -18,7 +18,7 @@ import io.trino.Session;
 import io.trino.spi.type.Type;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.sql.TestTable;
+import io.trino.testing.sql.TemporaryRelation;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,7 +31,6 @@ import static java.lang.String.join;
 import static java.util.Collections.unmodifiableList;
 import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertEquals;
 
 public class DataTypeTest
 {
@@ -39,7 +38,7 @@ public class DataTypeTest
 
     private final List<Input<?>> inputs = new ArrayList<>();
 
-    private boolean runSelectWithWhere;
+    private final boolean runSelectWithWhere;
 
     private DataTypeTest(boolean runSelectWithWhere)
     {
@@ -47,7 +46,7 @@ public class DataTypeTest
     }
 
     /**
-     * @deprecated Use {@link SqlDataTypeTest#create()} imstead. You can find
+     * @deprecated Use {@link SqlDataTypeTest#create()} instead. You can find
      * {@link DataTypeTestToSqlDataTypeTestConverter#create()} helpful for converting the code.
      */
     @Deprecated
@@ -57,7 +56,7 @@ public class DataTypeTest
     }
 
     /**
-     * @deprecated Use {@link SqlDataTypeTest#create()} imstead. You can find
+     * @deprecated Use {@link SqlDataTypeTest#create()} instead. You can find
      * {@link DataTypeTestToSqlDataTypeTestConverter#create()} helpful for converting the code.
      */
     @Deprecated
@@ -77,43 +76,44 @@ public class DataTypeTest
         return this;
     }
 
-    public void execute(QueryRunner trinoExecutor, DataSetup dataSetup)
+    public DataTypeTest execute(QueryRunner trinoExecutor, DataSetup dataSetup)
     {
-        execute(trinoExecutor, trinoExecutor.getDefaultSession(), dataSetup);
+        return execute(trinoExecutor, trinoExecutor.getDefaultSession(), dataSetup);
     }
 
-    public void execute(QueryRunner trinoExecutor, Session session, DataSetup dataSetup)
+    public DataTypeTest execute(QueryRunner trinoExecutor, Session session, DataSetup dataSetup)
     {
         List<Type> expectedTypes = inputs.stream().map(Input::getTrinoResultType).collect(toList());
         List<Object> expectedResults = inputs.stream().map(Input::toTrinoQueryResult).collect(toList());
-        try (TestTable testTable = dataSetup.setupTestTable(unmodifiableList(inputs))) {
-            MaterializedResult materializedRows = trinoExecutor.execute(session, "SELECT * from " + testTable.getName());
+        try (TemporaryRelation temporaryRelation = dataSetup.setupTemporaryRelation(unmodifiableList(inputs))) {
+            MaterializedResult materializedRows = trinoExecutor.execute(session, "SELECT * from " + temporaryRelation.getName());
             checkResults(expectedTypes, expectedResults, materializedRows);
             if (runSelectWithWhere) {
-                queryWithWhere(trinoExecutor, session, expectedTypes, expectedResults, testTable);
+                queryWithWhere(trinoExecutor, session, expectedTypes, expectedResults, temporaryRelation);
             }
         }
+        return this;
     }
 
-    private void queryWithWhere(QueryRunner trinoExecutor, Session session, List<Type> expectedTypes, List<Object> expectedResults, TestTable testTable)
+    private void queryWithWhere(QueryRunner trinoExecutor, Session session, List<Type> expectedTypes, List<Object> expectedResults, TemporaryRelation temporaryRelation)
     {
-        String trinoQuery = buildTrinoQueryWithWhereClauses(testTable);
+        String trinoQuery = buildTrinoQueryWithWhereClauses(temporaryRelation);
         try {
             MaterializedResult filteredRows = trinoExecutor.execute(session, trinoQuery);
             checkResults(expectedTypes, expectedResults, filteredRows);
         }
         catch (RuntimeException e) {
-            log.error("Exception caught during query with merged WHERE clause, querying one column at a time", e);
-            debugTypes(trinoExecutor, session, expectedTypes, expectedResults, testTable);
+            log.error(e, "Exception caught during query with merged WHERE clause, querying one column at a time");
+            debugTypes(trinoExecutor, session, expectedTypes, expectedResults, temporaryRelation);
         }
     }
 
-    private void debugTypes(QueryRunner trinoExecutor, Session session, List<Type> expectedTypes, List<Object> expectedResults, TestTable testTable)
+    private void debugTypes(QueryRunner trinoExecutor, Session session, List<Type> expectedTypes, List<Object> expectedResults, TemporaryRelation temporaryRelation)
     {
         for (int i = 0; i < inputs.size(); i++) {
             Input<?> input = inputs.get(i);
             if (input.isUseInWhereClause()) {
-                String debugQuery = format("SELECT col_%d FROM %s WHERE col_%d IS NOT DISTINCT FROM %s", i, testTable.getName(), i, input.toTrinoLiteral());
+                String debugQuery = format("SELECT col_%d FROM %s WHERE col_%d IS NOT DISTINCT FROM %s", i, temporaryRelation.getName(), i, input.toTrinoLiteral());
                 log.info("Querying input: %d (expected type: %s, expectedResult: %s) using: %s", i, expectedTypes.get(i), expectedResults.get(i), debugQuery);
                 MaterializedResult debugRows = trinoExecutor.execute(session, debugQuery);
                 checkResults(expectedTypes.subList(i, i + 1), expectedResults.subList(i, i + 1), debugRows);
@@ -121,7 +121,7 @@ public class DataTypeTest
         }
     }
 
-    private String buildTrinoQueryWithWhereClauses(TestTable testTable)
+    private String buildTrinoQueryWithWhereClauses(TemporaryRelation temporaryRelation)
     {
         List<String> predicates = new ArrayList<>();
         for (int i = 0; i < inputs.size(); i++) {
@@ -130,7 +130,7 @@ public class DataTypeTest
                 predicates.add(format("col_%d IS NOT DISTINCT FROM %s", i, input.toTrinoLiteral()));
             }
         }
-        return "SELECT * FROM " + testTable.getName() + " WHERE " + join(" AND ", predicates);
+        return "SELECT * FROM " + temporaryRelation.getName() + " WHERE " + join(" AND ", predicates);
     }
 
     private void checkResults(List<Type> expectedTypes, List<Object> expectedResults, MaterializedResult materializedRows)
@@ -139,7 +139,9 @@ public class DataTypeTest
         List<Object> actualResults = getOnlyElement(materializedRows).getFields();
         verify(actualResults.size() == expectedResults.size(), "lists don't have the same size");
         for (int i = 0; i < expectedResults.size(); i++) {
-            assertEquals(actualResults.get(i), expectedResults.get(i), "Element " + i);
+            assertThat(actualResults.get(i))
+                    .describedAs("Element " + i)
+                    .isEqualTo(expectedResults.get(i));
         }
     }
 

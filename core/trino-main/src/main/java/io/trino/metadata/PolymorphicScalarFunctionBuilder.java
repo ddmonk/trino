@@ -14,10 +14,13 @@
 package io.trino.metadata;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.Booleans;
 import io.trino.metadata.PolymorphicScalarFunction.PolymorphicScalarFunctionChoice;
+import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.InvocationConvention.InvocationArgumentConvention;
 import io.trino.spi.function.InvocationConvention.InvocationReturnConvention;
 import io.trino.spi.function.OperatorType;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.Type;
 
 import java.lang.reflect.Method;
@@ -31,9 +34,10 @@ import java.util.function.Function;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.mangleOperatorName;
+import static io.trino.metadata.OperatorNameUtil.isOperatorName;
+import static io.trino.metadata.OperatorNameUtil.mangleOperatorName;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static java.util.Arrays.asList;
@@ -42,24 +46,33 @@ import static java.util.Objects.requireNonNull;
 
 public final class PolymorphicScalarFunctionBuilder
 {
+    private final String name;
     private final Class<?> clazz;
     private Signature signature;
     private boolean nullableResult;
-    private List<FunctionArgumentDefinition> argumentDefinitions;
-    private String description = "";
-    private Optional<Boolean> hidden = Optional.empty();
+    private List<Boolean> argumentNullability;
+    private String description;
+    private boolean hidden;
     private Boolean deterministic;
     private final List<PolymorphicScalarFunctionChoice> choices = new ArrayList<>();
 
-    public PolymorphicScalarFunctionBuilder(Class<?> clazz)
+    public PolymorphicScalarFunctionBuilder(String name, Class<?> clazz)
     {
+        this.name = requireNonNull(name, "name is null");
+        checkArgument(!isOperatorName(name), "use the OperatorType constructor instead of the String name constructor");
         this.clazz = requireNonNull(clazz, "clazz is null");
+    }
+
+    public PolymorphicScalarFunctionBuilder(OperatorType operatorType, Class<?> clazz)
+    {
+        this.name = mangleOperatorName(operatorType);
+        this.clazz = requireNonNull(clazz, "clazz is null");
+        hidden = true;
     }
 
     public PolymorphicScalarFunctionBuilder signature(Signature signature)
     {
         this.signature = requireNonNull(signature, "signature is null");
-        this.hidden = Optional.of(hidden.orElse(isOperator(signature)));
         return this;
     }
 
@@ -69,11 +82,11 @@ public final class PolymorphicScalarFunctionBuilder
         return this;
     }
 
-    public PolymorphicScalarFunctionBuilder argumentDefinitions(FunctionArgumentDefinition... argumentDefinitions)
+    public PolymorphicScalarFunctionBuilder argumentNullability(boolean... argumentNullability)
     {
-        requireNonNull(argumentDefinitions, "argumentDefinitions is null");
-        checkState(this.argumentDefinitions == null, "The argumentDefinitions method must be invoked only once, and must be invoked before the choice method");
-        this.argumentDefinitions = ImmutableList.copyOf(argumentDefinitions);
+        requireNonNull(argumentNullability, "argumentNullability is null");
+        checkState(this.argumentNullability == null, "The argumentNullability method must be invoked only once, and must be invoked before the choice method");
+        this.argumentNullability = ImmutableList.copyOf(Booleans.asList(argumentNullability));
         return this;
     }
 
@@ -83,9 +96,9 @@ public final class PolymorphicScalarFunctionBuilder
         return this;
     }
 
-    public PolymorphicScalarFunctionBuilder hidden(boolean hidden)
+    public PolymorphicScalarFunctionBuilder hidden()
     {
-        this.hidden = Optional.of(hidden);
+        this.hidden = true;
         return this;
     }
 
@@ -98,8 +111,8 @@ public final class PolymorphicScalarFunctionBuilder
     public PolymorphicScalarFunctionBuilder choice(Function<ChoiceBuilder, ChoiceBuilder> choiceSpecification)
     {
         // if the argumentProperties is not set yet. We assume it is set to the default value.
-        if (argumentDefinitions == null) {
-            argumentDefinitions = nCopies(signature.getArgumentTypes().size(), new FunctionArgumentDefinition(false));
+        if (argumentNullability == null) {
+            argumentNullability = nCopies(signature.getArgumentTypes().size(), false);
         }
         ChoiceBuilder choiceBuilder = new ChoiceBuilder(clazz, signature);
         choiceBuilder = choiceSpecification.apply(choiceBuilder);
@@ -111,16 +124,31 @@ public final class PolymorphicScalarFunctionBuilder
     {
         checkState(signature != null, "signature is null");
         checkState(deterministic != null, "deterministic is null");
+        checkState(argumentNullability != null, "argumentNullability is null");
+
+        FunctionMetadata.Builder functionMetadata = FunctionMetadata.scalarBuilder(name)
+                .signature(signature);
+
+        if (description != null) {
+            functionMetadata.description(description);
+        }
+        else {
+            functionMetadata.noDescription();
+        }
+
+        if (hidden) {
+            functionMetadata.hidden();
+        }
+        if (!deterministic) {
+            functionMetadata.nondeterministic();
+        }
+        if (nullableResult) {
+            functionMetadata.nullable();
+        }
+        functionMetadata.argumentNullability(argumentNullability);
 
         return new PolymorphicScalarFunction(
-                new FunctionMetadata(
-                        signature,
-                        nullableResult,
-                        argumentDefinitions,
-                        hidden.orElse(false),
-                        deterministic,
-                        description,
-                        SCALAR),
+                functionMetadata.build(),
                 choices);
     }
 
@@ -141,28 +169,13 @@ public final class PolymorphicScalarFunctionBuilder
         return context -> ImmutableList.of(value);
     }
 
-    private static boolean isOperator(Signature signature)
-    {
-        for (OperatorType operator : OperatorType.values()) {
-            if (signature.getName().equals(mangleOperatorName(operator))) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     public static final class SpecializeContext
     {
         private final FunctionBinding functionBinding;
-        private final List<Type> parameterTypes;
-        private final Type returnType;
 
-        SpecializeContext(FunctionBinding functionBinding, List<Type> parameterTypes, Type returnType)
+        SpecializeContext(FunctionBinding functionBinding)
         {
             this.functionBinding = requireNonNull(functionBinding, "functionBinding is null");
-            this.parameterTypes = requireNonNull(parameterTypes, "parameterTypes is null");
-            this.returnType = requireNonNull(returnType, "returnType is null");
         }
 
         public Type getType(String name)
@@ -177,12 +190,12 @@ public final class PolymorphicScalarFunctionBuilder
 
         public List<Type> getParameterTypes()
         {
-            return parameterTypes;
+            return functionBinding.getBoundSignature().getArgumentTypes();
         }
 
         public Type getReturnType()
         {
-            return returnType;
+            return functionBinding.getBoundSignature().getReturnType();
         }
     }
 
@@ -243,9 +256,9 @@ public final class PolymorphicScalarFunctionBuilder
             Iterator<Optional<Class<?>>> typesIterator = types.iterator();
             while (argumentConventionIterator.hasNext() && typesIterator.hasNext()) {
                 Optional<Class<?>> classOptional = typesIterator.next();
-                InvocationArgumentConvention argumentProperty = argumentConventionIterator.next();
-                checkState((argumentProperty == BLOCK_POSITION) == classOptional.isPresent(),
-                        "Explicit type is not set when null convention is BLOCK_AND_POSITION");
+                InvocationArgumentConvention argumentConvention = argumentConventionIterator.next();
+                checkState((argumentConvention == BLOCK_POSITION || argumentConvention == BLOCK_POSITION_NOT_NULL) == classOptional.isPresent(),
+                        "Explicit type is not set when argument convention is block and position");
             }
             methodAndNativeContainerTypesList.add(methodAndNativeContainerTypes);
             return this;
@@ -328,25 +341,5 @@ public final class PolymorphicScalarFunctionBuilder
         }
     }
 
-    static class MethodAndNativeContainerTypes
-    {
-        private final Method method;
-        private final List<Optional<Class<?>>> explicitNativeContainerTypes;
-
-        MethodAndNativeContainerTypes(Method method, List<Optional<Class<?>>> explicitNativeContainerTypes)
-        {
-            this.method = method;
-            this.explicitNativeContainerTypes = explicitNativeContainerTypes;
-        }
-
-        public Method getMethod()
-        {
-            return method;
-        }
-
-        List<Optional<Class<?>>> getExplicitNativeContainerTypes()
-        {
-            return explicitNativeContainerTypes;
-        }
-    }
+    record MethodAndNativeContainerTypes(Method method, List<Optional<Class<?>>> explicitNativeContainerTypes) {}
 }

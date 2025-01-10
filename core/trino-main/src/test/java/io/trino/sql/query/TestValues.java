@@ -13,27 +13,26 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
+import static io.trino.spi.StandardErrorCode.DIVISION_BY_ZERO;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestValues
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -103,5 +102,18 @@ public class TestValues
                 .matches("VALUES " +
                         "ROW(null, null), " +
                         "ROW(REAL '1', DOUBLE '1')");
+    }
+
+    @Test
+    public void testFailingExpression()
+    {
+        assertThat(assertions.query("VALUES 0 / 0"))
+                .failure().hasErrorCode(DIVISION_BY_ZERO);
+
+        assertThat(assertions.query("VALUES CASE 1 WHEN 0 THEN true WHEN 0 / 0 THEN false END"))
+                .failure().hasErrorCode(DIVISION_BY_ZERO);
+
+        assertThat(assertions.query("VALUES IF(0 / 0 > 0, true, false)"))
+                .failure().hasErrorCode(DIVISION_BY_ZERO);
     }
 }

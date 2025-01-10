@@ -14,54 +14,133 @@
 package io.trino.execution.scheduler;
 
 import io.trino.execution.NodeTaskMap;
+import io.trino.execution.PartitionedSplitsInfo;
 import io.trino.execution.RemoteTask;
 import io.trino.metadata.InternalNode;
+import io.trino.spi.SplitWeight;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.lang.Math.addExact;
 import static java.util.Objects.requireNonNull;
 
 public final class NodeAssignmentStats
 {
     private final NodeTaskMap nodeTaskMap;
-    private final Map<InternalNode, Integer> assignmentCount = new HashMap<>();
-    private final Map<InternalNode, Integer> splitCountByNode = new HashMap<>();
-    private final Map<String, Integer> queuedSplitCountByNode = new HashMap<>();
+    private final Map<InternalNode, PartitionedSplitsInfo> nodeTotalSplitsInfo;
+    private final Map<String, PendingSplitInfo> stageQueuedSplitInfo;
 
     public NodeAssignmentStats(NodeTaskMap nodeTaskMap, NodeMap nodeMap, List<RemoteTask> existingTasks)
     {
         this.nodeTaskMap = requireNonNull(nodeTaskMap, "nodeTaskMap is null");
-
-        // pre-populate the assignment counts with zeros. This makes getOrDefault() faster
-        for (InternalNode node : nodeMap.getNodesByHostAndPort().values()) {
-            assignmentCount.put(node, 0);
-        }
+        int nodeMapSize = nodeMap.getNodesByHostAndPort().size();
+        this.nodeTotalSplitsInfo = new HashMap<>(nodeMapSize);
+        this.stageQueuedSplitInfo = new HashMap<>(nodeMapSize);
 
         for (RemoteTask task : existingTasks) {
-            checkArgument(queuedSplitCountByNode.put(task.getNodeId(), task.getQueuedPartitionedSplitCount()) == null, "A single stage may not have multiple tasks running on the same node");
+            checkArgument(stageQueuedSplitInfo.put(task.getNodeId(), new PendingSplitInfo(task.getQueuedPartitionedSplitsInfo(), task.getUnacknowledgedPartitionedSplitCount())) == null, "A single stage may not have multiple tasks running on the same node");
+        }
+
+        // pre-populate the assignment counts with zeros
+        if (existingTasks.size() < nodeMapSize) {
+            Function<String, PendingSplitInfo> createEmptySplitInfo = _ -> new PendingSplitInfo(PartitionedSplitsInfo.forZeroSplits(), 0);
+            for (InternalNode node : nodeMap.getNodesByHostAndPort().values()) {
+                stageQueuedSplitInfo.computeIfAbsent(node.getNodeIdentifier(), createEmptySplitInfo);
+            }
         }
     }
 
-    public int getTotalSplitCount(InternalNode node)
+    public long getTotalSplitsWeight(InternalNode node)
     {
-        return assignmentCount.getOrDefault(node, 0) + splitCountByNode.computeIfAbsent(node, nodeTaskMap::getPartitionedSplitsOnNode);
+        PartitionedSplitsInfo nodeTotalSplits = nodeTotalSplitsInfo.computeIfAbsent(node, nodeTaskMap::getPartitionedSplitsOnNode);
+        PendingSplitInfo stageInfo = stageQueuedSplitInfo.get(node.getNodeIdentifier());
+        if (stageInfo == null) {
+            return nodeTotalSplits.getWeightSum();
+        }
+        return addExact(nodeTotalSplits.getWeightSum(), stageInfo.getAssignedSplitsWeight());
     }
 
-    public int getQueuedSplitCountForStage(InternalNode node)
+    public long getQueuedSplitsWeightForStage(InternalNode node)
     {
-        return queuedSplitCountByNode.getOrDefault(node.getNodeIdentifier(), 0) + assignmentCount.getOrDefault(node, 0);
+        return getQueuedSplitsWeightForStage(node.getNodeIdentifier());
     }
 
-    public void addAssignedSplit(InternalNode node)
+    public long getQueuedSplitsWeightForStage(String nodeId)
     {
-        assignmentCount.merge(node, 1, Integer::sum);
+        PendingSplitInfo stageInfo = stageQueuedSplitInfo.get(nodeId);
+        return stageInfo == null ? 0 : stageInfo.getQueuedSplitsWeight();
     }
 
-    public void removeAssignedSplit(InternalNode node)
+    public int getUnacknowledgedSplitCountForStage(InternalNode node)
     {
-        assignmentCount.merge(node, 1, (x, y) -> x - y);
+        PendingSplitInfo stageInfo = stageQueuedSplitInfo.get(node.getNodeIdentifier());
+        return stageInfo == null ? 0 : stageInfo.getUnacknowledgedSplitCount();
+    }
+
+    public void addAssignedSplit(InternalNode node, SplitWeight splitWeight)
+    {
+        getOrCreateStageSplitInfo(node).addAssignedSplit(splitWeight);
+    }
+
+    public void removeAssignedSplit(InternalNode node, SplitWeight splitWeight)
+    {
+        getOrCreateStageSplitInfo(node).removeAssignedSplit(splitWeight);
+    }
+
+    private PendingSplitInfo getOrCreateStageSplitInfo(InternalNode node)
+    {
+        String nodeId = node.getNodeIdentifier();
+        // Avoids the extra per-invocation lambda allocation of computeIfAbsent since assigning a split to an existing task more common than creating a new task
+        PendingSplitInfo stageInfo = stageQueuedSplitInfo.get(nodeId);
+        if (stageInfo == null) {
+            stageInfo = new PendingSplitInfo(PartitionedSplitsInfo.forZeroSplits(), 0);
+            stageQueuedSplitInfo.put(nodeId, stageInfo);
+        }
+        return stageInfo;
+    }
+
+    private static final class PendingSplitInfo
+    {
+        private final long queuedSplitsWeight;
+        private final int unacknowledgedSplitCount;
+        private int assignedSplits;
+        private long assignedSplitsWeight;
+
+        private PendingSplitInfo(PartitionedSplitsInfo queuedSplitsInfo, int unacknowledgedSplitCount)
+        {
+            this.queuedSplitsWeight = queuedSplitsInfo.getWeightSum();
+            this.unacknowledgedSplitCount = unacknowledgedSplitCount;
+        }
+
+        public long getAssignedSplitsWeight()
+        {
+            return assignedSplitsWeight;
+        }
+
+        public long getQueuedSplitsWeight()
+        {
+            return addExact(queuedSplitsWeight, assignedSplitsWeight);
+        }
+
+        public int getUnacknowledgedSplitCount()
+        {
+            return unacknowledgedSplitCount + assignedSplits;
+        }
+
+        public void addAssignedSplit(SplitWeight splitWeight)
+        {
+            assignedSplits++;
+            assignedSplitsWeight = addExact(assignedSplitsWeight, splitWeight.getRawValue());
+        }
+
+        public void removeAssignedSplit(SplitWeight splitWeight)
+        {
+            assignedSplits--;
+            assignedSplitsWeight -= splitWeight.getRawValue();
+        }
     }
 }

@@ -14,9 +14,9 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
-import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.transaction.IsolationLevel;
@@ -30,13 +30,22 @@ import io.trino.transaction.TransactionManager;
 import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.spi.StandardErrorCode.SYNTAX_ERROR;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class StartTransactionTask
         implements DataDefinitionTask<StartTransaction>
 {
+    private final TransactionManager transactionManager;
+
+    @Inject
+    public StartTransactionTask(TransactionManager transactionManager)
+    {
+        this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
+    }
+
     @Override
     public String getName()
     {
@@ -44,7 +53,11 @@ public class StartTransactionTask
     }
 
     @Override
-    public ListenableFuture<?> execute(StartTransaction statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            StartTransaction statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         if (!session.isClientTransactionSupport()) {
@@ -68,7 +81,7 @@ public class StartTransactionTask
         // when this statement completes.
         transactionManager.trySetInactive(transactionId);
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 
     private static Optional<IsolationLevel> extractIsolationLevel(StartTransaction startTransaction)
@@ -104,16 +117,11 @@ public class StartTransactionTask
 
     private static IsolationLevel convertLevel(Isolation.Level level)
     {
-        switch (level) {
-            case SERIALIZABLE:
-                return IsolationLevel.SERIALIZABLE;
-            case REPEATABLE_READ:
-                return IsolationLevel.REPEATABLE_READ;
-            case READ_COMMITTED:
-                return IsolationLevel.READ_COMMITTED;
-            case READ_UNCOMMITTED:
-                return IsolationLevel.READ_UNCOMMITTED;
-        }
-        throw new AssertionError("Unhandled isolation level: " + level);
+        return switch (level) {
+            case SERIALIZABLE -> IsolationLevel.SERIALIZABLE;
+            case REPEATABLE_READ -> IsolationLevel.REPEATABLE_READ;
+            case READ_COMMITTED -> IsolationLevel.READ_COMMITTED;
+            case READ_UNCOMMITTED -> IsolationLevel.READ_UNCOMMITTED;
+        };
     }
 }

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -25,17 +24,22 @@ import static java.util.Objects.requireNonNull;
 public final class RefreshMaterializedView
         extends Statement
 {
-    private final QualifiedName name;
+    private final Table table;
 
-    public RefreshMaterializedView(Optional<NodeLocation> location, QualifiedName name)
+    public RefreshMaterializedView(NodeLocation location, Table table)
     {
         super(location);
-        this.name = requireNonNull(name, "name is null");
+        this.table = requireNonNull(table, "name is null");
+    }
+
+    public Table getTable()
+    {
+        return table;
     }
 
     public QualifiedName getName()
     {
-        return name;
+        return table.getName();
     }
 
     @Override
@@ -53,7 +57,7 @@ public final class RefreshMaterializedView
     @Override
     public int hashCode()
     {
-        return Objects.hash(name);
+        return Objects.hash(table);
     }
 
     @Override
@@ -66,14 +70,14 @@ public final class RefreshMaterializedView
             return false;
         }
         RefreshMaterializedView o = (RefreshMaterializedView) obj;
-        return Objects.equals(name, o.name);
+        return Objects.equals(table, o.table);
     }
 
     @Override
     public String toString()
     {
         return toStringHelper(this)
-                .add("name", name)
+                .add("table", table)
                 .toString();
     }
 }

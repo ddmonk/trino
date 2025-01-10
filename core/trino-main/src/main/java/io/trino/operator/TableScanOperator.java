@@ -13,12 +13,12 @@
  */
 package io.trino.operator;
 
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.trino.Session;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.Page;
@@ -26,21 +26,20 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
-import io.trino.spi.connector.UpdatablePageSource;
 import io.trino.split.EmptySplit;
 import io.trino.split.PageSourceProvider;
+import io.trino.split.PageSourceProviderFactory;
 import io.trino.sql.planner.plan.PlanNodeId;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.toListenableFuture;
 import static java.util.Objects.requireNonNull;
 
@@ -48,9 +47,10 @@ public class TableScanOperator
         implements SourceOperator
 {
     public static class TableScanOperatorFactory
-            implements SourceOperatorFactory, WorkProcessorSourceOperatorFactory
+            implements SourceOperatorFactory
     {
         private final int operatorId;
+        private final PlanNodeId planNodeId;
         private final PlanNodeId sourceId;
         private final PageSourceProvider pageSourceProvider;
         private final TableHandle table;
@@ -60,24 +60,20 @@ public class TableScanOperator
 
         public TableScanOperatorFactory(
                 int operatorId,
+                PlanNodeId planNodeId,
                 PlanNodeId sourceId,
-                PageSourceProvider pageSourceProvider,
+                PageSourceProviderFactory pageSourceProvider,
                 TableHandle table,
                 Iterable<ColumnHandle> columns,
                 DynamicFilter dynamicFilter)
         {
             this.operatorId = operatorId;
+            this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
             this.sourceId = requireNonNull(sourceId, "sourceId is null");
-            this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
             this.table = requireNonNull(table, "table is null");
             this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
             this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
-        }
-
-        @Override
-        public int getOperatorId()
-        {
-            return operatorId;
+            this.pageSourceProvider = pageSourceProvider.createPageSourceProvider(table.catalogHandle());
         }
 
         @Override
@@ -87,42 +83,13 @@ public class TableScanOperator
         }
 
         @Override
-        public PlanNodeId getPlanNodeId()
-        {
-            return sourceId;
-        }
-
-        @Override
-        public String getOperatorType()
-        {
-            return TableScanOperator.class.getSimpleName();
-        }
-
-        @Override
         public SourceOperator createOperator(DriverContext driverContext)
         {
             checkState(!closed, "Factory is already closed");
-            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, sourceId, getOperatorType());
+            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, TableScanOperator.class.getSimpleName());
             return new TableScanOperator(
                     operatorContext,
                     sourceId,
-                    pageSourceProvider,
-                    table,
-                    columns,
-                    dynamicFilter);
-        }
-
-        @Override
-        public WorkProcessorSourceOperator create(
-                Session session,
-                MemoryTrackingContext memoryTrackingContext,
-                DriverYieldSignal yieldSignal,
-                WorkProcessor<Split> splits)
-        {
-            return new TableScanWorkProcessorOperator(
-                    session,
-                    memoryTrackingContext,
-                    splits,
                     pageSourceProvider,
                     table,
                     columns,
@@ -137,13 +104,13 @@ public class TableScanOperator
     }
 
     private final OperatorContext operatorContext;
-    private final PlanNodeId planNodeId;
+    private final PlanNodeId sourceId;
     private final PageSourceProvider pageSourceProvider;
     private final TableHandle table;
     private final List<ColumnHandle> columns;
     private final DynamicFilter dynamicFilter;
-    private final LocalMemoryContext systemMemoryContext;
-    private final SettableFuture<?> blocked = SettableFuture.create();
+    private final LocalMemoryContext memoryContext;
+    private final SettableFuture<Void> blocked = SettableFuture.create();
 
     @Nullable
     private Split split;
@@ -153,23 +120,24 @@ public class TableScanOperator
     private boolean finished;
 
     private long completedBytes;
+    private long completedPositions;
     private long readTimeNanos;
 
     public TableScanOperator(
             OperatorContext operatorContext,
-            PlanNodeId planNodeId,
+            PlanNodeId sourceId,
             PageSourceProvider pageSourceProvider,
             TableHandle table,
             Iterable<ColumnHandle> columns,
             DynamicFilter dynamicFilter)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
-        this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
+        this.sourceId = requireNonNull(sourceId, "planNodeId is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
         this.table = requireNonNull(table, "table is null");
         this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
         this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
-        this.systemMemoryContext = operatorContext.newLocalSystemMemoryContext(TableScanOperator.class.getSimpleName());
+        this.memoryContext = operatorContext.newLocalUserMemoryContext(TableScanOperator.class.getSimpleName());
     }
 
     @Override
@@ -181,24 +149,24 @@ public class TableScanOperator
     @Override
     public PlanNodeId getSourceId()
     {
-        return planNodeId;
+        return sourceId;
     }
 
     @Override
-    public Supplier<Optional<UpdatablePageSource>> addSplit(Split split)
+    public void addSplit(Split split)
     {
         requireNonNull(split, "split is null");
         checkState(this.split == null, "Table scan split already set");
 
         if (finished) {
-            return Optional::empty;
+            return;
         }
 
         this.split = split;
 
-        Object splitInfo = split.getInfo();
-        if (splitInfo != null) {
-            operatorContext.setInfoSupplier(() -> new SplitOperatorInfo(split.getCatalogName(), splitInfo));
+        Map<String, String> splitInfo = split.getInfo();
+        if (!splitInfo.isEmpty()) {
+            operatorContext.setInfoSupplier(Suppliers.ofInstance(new SplitOperatorInfo(split.getCatalogHandle(), splitInfo)));
         }
 
         blocked.set(null);
@@ -206,13 +174,6 @@ public class TableScanOperator
         if (split.getConnectorSplit() instanceof EmptySplit) {
             source = new EmptyPageSource();
         }
-
-        return () -> {
-            if (source instanceof UpdatablePageSource) {
-                return Optional.of((UpdatablePageSource) source);
-            }
-            return Optional.empty();
-        };
     }
 
     @Override
@@ -243,7 +204,8 @@ public class TableScanOperator
             catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
-            systemMemoryContext.setBytes(source.getSystemMemoryUsage());
+            memoryContext.setBytes(source.getMemoryUsage());
+            operatorContext.setLatestConnectorMetrics(source.getMetrics());
         }
     }
 
@@ -253,7 +215,7 @@ public class TableScanOperator
         if (!finished) {
             finished = (source != null) && source.isFinished();
             if (source != null) {
-                systemMemoryContext.setBytes(source.getSystemMemoryUsage());
+                memoryContext.setBytes(source.getMemoryUsage());
             }
         }
 
@@ -261,16 +223,21 @@ public class TableScanOperator
     }
 
     @Override
-    public ListenableFuture<?> isBlocked()
+    public ListenableFuture<Void> isBlocked()
     {
         if (!blocked.isDone()) {
             return blocked;
         }
         if (source != null) {
             CompletableFuture<?> pageSourceBlocked = source.isBlocked();
-            return pageSourceBlocked.isDone() ? NOT_BLOCKED : toListenableFuture(pageSourceBlocked);
+            return pageSourceBlocked.isDone() ? NOT_BLOCKED : asVoid(toListenableFuture(pageSourceBlocked));
         }
         return NOT_BLOCKED;
+    }
+
+    private static <T> ListenableFuture<Void> asVoid(ListenableFuture<T> future)
+    {
+        return Futures.transform(future, v -> null, directExecutor());
     }
 
     @Override
@@ -306,15 +273,21 @@ public class TableScanOperator
             // update operator stats
             long endCompletedBytes = source.getCompletedBytes();
             long endReadTimeNanos = source.getReadTimeNanos();
-            operatorContext.recordPhysicalInputWithTiming(endCompletedBytes - completedBytes, page.getPositionCount(), endReadTimeNanos - readTimeNanos);
-            operatorContext.recordProcessedInput(page.getSizeInBytes(), page.getPositionCount());
+            long positionCount = page.getPositionCount();
+            long endCompletedPositions = source.getCompletedPositions().orElse(completedPositions + positionCount);
+            operatorContext.recordPhysicalInputWithTiming(
+                    endCompletedBytes - completedBytes,
+                    endCompletedPositions - completedPositions,
+                    endReadTimeNanos - readTimeNanos);
+            operatorContext.recordProcessedInput(page.getSizeInBytes(), positionCount);
             completedBytes = endCompletedBytes;
+            completedPositions = endCompletedPositions;
             readTimeNanos = endReadTimeNanos;
         }
 
-        // updating system memory usage should happen after page is loaded.
-        systemMemoryContext.setBytes(source.getSystemMemoryUsage());
-
+        // updating memory usage should happen after page is loaded.
+        memoryContext.setBytes(source.getMemoryUsage());
+        operatorContext.setLatestConnectorMetrics(source.getMetrics());
         return page;
     }
 }

@@ -14,18 +14,22 @@
 package io.trino.client;
 
 import com.google.common.base.CharMatcher;
-import com.google.common.base.Splitter;
 import com.google.common.base.StandardSystemProperty;
-import com.google.common.collect.ImmutableList;
 import com.google.common.net.HostAndPort;
-import io.airlift.security.pem.PemReader;
+import io.trino.client.auth.kerberos.DelegatedConstrainedContextProvider;
+import io.trino.client.auth.kerberos.DelegatedUnconstrainedContextProvider;
+import io.trino.client.auth.kerberos.GSSContextProvider;
+import io.trino.client.auth.kerberos.LoginBasedUnconstrainedContextProvider;
+import io.trino.client.auth.kerberos.SpnegoHandler;
+import io.trino.client.uri.LoggingLevel;
 import okhttp3.Credentials;
 import okhttp3.Interceptor;
 import okhttp3.JavaNetCookieJar;
 import okhttp3.OkHttpClient;
-import okhttp3.Protocol;
-import okhttp3.Request;
 import okhttp3.internal.tls.LegacyHostnameVerifier;
+import okhttp3.logging.HttpLoggingInterceptor;
+import okhttp3.logging.HttpLoggingInterceptor.Level;
+import org.ietf.jgss.GSSCredential;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -53,7 +57,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.net.HttpHeaders.AUTHORIZATION;
@@ -65,6 +68,13 @@ import static java.util.Objects.requireNonNull;
 
 public final class OkHttpUtil
 {
+    // Mac KeyStore. See JDK documentation for Apple Provider.
+    private static final String KEYSTORE_MACOS = "KeychainStore";
+
+    // Windows KeyStores. See JDK documentation for MSCAPI Provider.
+    private static final String KEYSTORE_WINDOWS_MY = "Windows-MY-CURRENTUSER";
+    private static final String KEYSTORE_WINDOWS_ROOT = "Windows-ROOT-CURRENTUSER";
+
     private OkHttpUtil() {}
 
     public static Interceptor userAgent(String userAgent)
@@ -98,16 +108,6 @@ public final class OkHttpUtil
                 .build());
     }
 
-    public static Interceptor interceptRequest(Consumer<Request> consumer)
-    {
-        requireNonNull(consumer, "consumer is null");
-
-        return chain -> {
-            consumer.accept(chain.request());
-            return chain.proceed(chain.request());
-        };
-    }
-
     public static void setupTimeouts(OkHttpClient.Builder clientBuilder, int timeout, TimeUnit unit)
     {
         clientBuilder
@@ -136,6 +136,30 @@ public final class OkHttpUtil
         proxy.map(OkHttpUtil::toUnresolvedAddress)
                 .map(address -> new Proxy(type, address))
                 .ifPresent(clientBuilder::proxy);
+    }
+
+    public static void setupHttpLogging(OkHttpClient.Builder clientBuilder, LoggingLevel level)
+    {
+        switch (level) {
+            case NONE:
+                return;
+
+            case BODY:
+                clientBuilder.addNetworkInterceptor(
+                        new HttpLoggingInterceptor(System.err::println)
+                                .setLevel(Level.BODY));
+                break;
+            case BASIC:
+                clientBuilder.addNetworkInterceptor(
+                        new HttpLoggingInterceptor(System.err::println)
+                                .setLevel(Level.BASIC));
+                break;
+            case HEADERS:
+                clientBuilder.addNetworkInterceptor(
+                        new HttpLoggingInterceptor(System.err::println)
+                                .setLevel(Level.HEADERS));
+                break;
+        }
     }
 
     private static InetSocketAddress toUnresolvedAddress(HostAndPort address)
@@ -183,11 +207,13 @@ public final class OkHttpUtil
             Optional<String> keyStorePath,
             Optional<String> keyStorePassword,
             Optional<String> keyStoreType,
+            boolean useSystemKeyStore,
             Optional<String> trustStorePath,
             Optional<String> trustStorePassword,
-            Optional<String> trustStoreType)
+            Optional<String> trustStoreType,
+            boolean useSystemTrustStore)
     {
-        if (!keyStorePath.isPresent() && !trustStorePath.isPresent()) {
+        if (!keyStorePath.isPresent() && !useSystemKeyStore && !trustStorePath.isPresent() && !useSystemTrustStore) {
             return;
         }
 
@@ -195,8 +221,12 @@ public final class OkHttpUtil
             // load KeyStore if configured and get KeyManagers
             KeyStore keyStore = null;
             KeyManager[] keyManagers = null;
-            if (keyStorePath.isPresent()) {
-                char[] keyManagerPassword;
+            char[] keyManagerPassword = null;
+
+            if (useSystemKeyStore) {
+                keyStore = loadSystemKeyStore(keyStoreType);
+            }
+            else if (keyStorePath.isPresent()) {
                 try {
                     // attempt to read the key store as a PEM file
                     keyStore = PemReader.loadKeyStore(new File(keyStorePath.get()), new File(keyStorePath.get()), keyStorePassword);
@@ -206,12 +236,15 @@ public final class OkHttpUtil
                 catch (IOException | GeneralSecurityException ignored) {
                     keyManagerPassword = keyStorePassword.map(String::toCharArray).orElse(null);
 
-                    keyStore = KeyStore.getInstance(keyStoreType.orElse(KeyStore.getDefaultType()));
+                    keyStore = KeyStore.getInstance(keyStoreType.orElseGet(KeyStore::getDefaultType));
                     try (InputStream in = new FileInputStream(keyStorePath.get())) {
                         keyStore.load(in, keyManagerPassword);
                     }
                 }
                 validateCertificates(keyStore);
+            }
+
+            if (keyStore != null) {
                 KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
                 keyManagerFactory.init(keyStore, keyManagerPassword);
                 keyManagers = keyManagerFactory.getKeyManagers();
@@ -219,7 +252,10 @@ public final class OkHttpUtil
 
             // load TrustStore if configured, otherwise use KeyStore
             KeyStore trustStore = keyStore;
-            if (trustStorePath.isPresent()) {
+            if (useSystemTrustStore) {
+                trustStore = loadSystemTrustStore(trustStoreType);
+            }
+            else if (trustStorePath.isPresent()) {
                 trustStore = loadTrustStore(new File(trustStorePath.get()), trustStorePassword, trustStoreType);
             }
 
@@ -243,26 +279,6 @@ public final class OkHttpUtil
         }
         catch (GeneralSecurityException | IOException e) {
             throw new ClientException("Error setting up SSL: " + e.getMessage(), e);
-        }
-    }
-
-    public static void setupChannelSocket(OkHttpClient.Builder clientBuilder)
-    {
-        // Enable socket factory only for pre JDK 11
-        if (!isAtLeastJava11()) {
-            clientBuilder.socketFactory(new SocketChannelSocketFactory());
-            clientBuilder.protocols(ImmutableList.of(Protocol.HTTP_1_1));
-        }
-    }
-
-    private static boolean isAtLeastJava11()
-    {
-        String feature = Splitter.on(".").split(StandardSystemProperty.JAVA_VERSION.value()).iterator().next();
-        try {
-            return Integer.parseInt(feature) >= 11;
-        }
-        catch (NumberFormatException e) {
-            return false;
         }
     }
 
@@ -293,7 +309,7 @@ public final class OkHttpUtil
     private static KeyStore loadTrustStore(File trustStorePath, Optional<String> trustStorePassword, Optional<String> trustStoreType)
             throws IOException, GeneralSecurityException
     {
-        KeyStore trustStore = KeyStore.getInstance(trustStoreType.orElse(KeyStore.getDefaultType()));
+        KeyStore trustStore = KeyStore.getInstance(trustStoreType.orElseGet(KeyStore::getDefaultType));
         try {
             // attempt to read the trust store as a PEM file
             List<X509Certificate> certificateChain = PemReader.readCertificateChain(trustStorePath);
@@ -315,6 +331,37 @@ public final class OkHttpUtil
         return trustStore;
     }
 
+    private static KeyStore loadSystemKeyStore(Optional<String> keyStoreType)
+            throws IOException, GeneralSecurityException
+    {
+        return loadSystemStore(keyStoreType, KEYSTORE_MACOS, KEYSTORE_WINDOWS_MY);
+    }
+
+    private static KeyStore loadSystemTrustStore(Optional<String> trustStoreType)
+            throws IOException, GeneralSecurityException
+    {
+        return loadSystemStore(trustStoreType, KEYSTORE_MACOS, KEYSTORE_WINDOWS_ROOT);
+    }
+
+    private static KeyStore loadSystemStore(Optional<String> storeType, String mac, String windows)
+            throws IOException, GeneralSecurityException
+    {
+        String osName = Optional.ofNullable(StandardSystemProperty.OS_NAME.value()).orElse("");
+        Optional<String> systemStoreType = storeType;
+        if (!systemStoreType.isPresent()) {
+            if (osName.contains("Windows")) {
+                systemStoreType = Optional.of(windows);
+            }
+            else if (osName.contains("Mac")) {
+                systemStoreType = Optional.of(mac);
+            }
+        }
+
+        KeyStore store = KeyStore.getInstance(systemStoreType.orElseGet(KeyStore::getDefaultType));
+        store.load(null, null);
+        return store;
+    }
+
     public static void setupKerberos(
             OkHttpClient.Builder clientBuilder,
             String servicePrincipalPattern,
@@ -323,10 +370,31 @@ public final class OkHttpUtil
             Optional<String> principal,
             Optional<File> kerberosConfig,
             Optional<File> keytab,
-            Optional<File> credentialCache)
+            Optional<File> credentialCache,
+            boolean delegatedKerberos,
+            Optional<GSSCredential> gssCredential)
     {
-        SpnegoHandler handler = new SpnegoHandler(servicePrincipalPattern, remoteServiceName, useCanonicalHostname, principal, kerberosConfig, keytab, credentialCache);
+        GSSContextProvider contextProvider;
+        if (delegatedKerberos) {
+            contextProvider = getDelegatedGSSContextProvider(gssCredential);
+        }
+        else {
+            contextProvider = new LoginBasedUnconstrainedContextProvider(principal, kerberosConfig, keytab, credentialCache);
+        }
+        SpnegoHandler handler = new SpnegoHandler(servicePrincipalPattern, remoteServiceName, useCanonicalHostname, contextProvider);
         clientBuilder.addInterceptor(handler);
         clientBuilder.authenticator(handler);
+    }
+
+    public static void setupAlternateHostnameVerification(OkHttpClient.Builder clientBuilder, String alternativeHostname)
+    {
+        clientBuilder.hostnameVerifier((hostname, session) -> LegacyHostnameVerifier.INSTANCE.verify(alternativeHostname, session));
+    }
+
+    private static GSSContextProvider getDelegatedGSSContextProvider(Optional<GSSCredential> gssCredential)
+    {
+        return gssCredential.map(DelegatedConstrainedContextProvider::new)
+                .map(gssCred -> (GSSContextProvider) gssCred)
+                .orElse(new DelegatedUnconstrainedContextProvider());
     }
 }

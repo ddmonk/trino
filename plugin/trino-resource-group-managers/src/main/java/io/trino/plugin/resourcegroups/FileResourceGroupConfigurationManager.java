@@ -17,6 +17,8 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.ObjectMapperProvider;
@@ -25,8 +27,6 @@ import io.trino.spi.memory.ClusterMemoryPoolManager;
 import io.trino.spi.resourcegroups.ResourceGroup;
 import io.trino.spi.resourcegroups.SelectionContext;
 import io.trino.spi.resourcegroups.SelectionCriteria;
-
-import javax.inject.Inject;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -46,22 +46,35 @@ public class FileResourceGroupConfigurationManager
             () -> new ObjectMapperProvider().get().enable(FAIL_ON_UNKNOWN_PROPERTIES))
             .jsonCodec(ManagerSpec.class);
 
+    private final Optional<LifeCycleManager> lifeCycleManager;
     private final List<ResourceGroupSpec> rootGroups;
     private final List<ResourceGroupSelector> selectors;
     private final Optional<Duration> cpuQuotaPeriod;
 
     @Inject
-    public FileResourceGroupConfigurationManager(ClusterMemoryPoolManager memoryPoolManager, FileResourceGroupConfig config)
+    public FileResourceGroupConfigurationManager(LifeCycleManager lifeCycleManager, ClusterMemoryPoolManager memoryPoolManager, FileResourceGroupConfig config)
     {
-        this(memoryPoolManager, parseManagerSpec(config));
+        this(Optional.of(lifeCycleManager), memoryPoolManager, parseManagerSpec(config));
+    }
+
+    @VisibleForTesting
+    FileResourceGroupConfigurationManager(ClusterMemoryPoolManager memoryPoolManager, FileResourceGroupConfig config)
+    {
+        this(Optional.empty(), memoryPoolManager, parseManagerSpec(config));
     }
 
     @VisibleForTesting
     FileResourceGroupConfigurationManager(ClusterMemoryPoolManager memoryPoolManager, ManagerSpec managerSpec)
     {
+        this(Optional.empty(), memoryPoolManager, managerSpec);
+    }
+
+    private FileResourceGroupConfigurationManager(Optional<LifeCycleManager> lifeCycleManager, ClusterMemoryPoolManager memoryPoolManager, ManagerSpec managerSpec)
+    {
         super(memoryPoolManager);
         requireNonNull(managerSpec, "managerSpec is null");
 
+        this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.rootGroups = ImmutableList.copyOf(managerSpec.getRootGroups());
         this.cpuQuotaPeriod = managerSpec.getCpuQuotaPeriod();
         validateRootGroups(managerSpec);
@@ -71,8 +84,6 @@ public class FileResourceGroupConfigurationManager
     @VisibleForTesting
     static ManagerSpec parseManagerSpec(FileResourceGroupConfig config)
     {
-        requireNonNull(config, "config is null");
-
         ManagerSpec managerSpec;
         try {
             managerSpec = CODEC.fromJson(Files.readAllBytes(Paths.get(config.getConfigFile())));
@@ -82,8 +93,7 @@ public class FileResourceGroupConfigurationManager
         }
         catch (IllegalArgumentException e) {
             Throwable cause = e.getCause();
-            if (cause instanceof UnrecognizedPropertyException) {
-                UnrecognizedPropertyException ex = (UnrecognizedPropertyException) cause;
+            if (cause instanceof UnrecognizedPropertyException ex) {
                 String message = format("Unknown property at line %s:%s: %s",
                         ex.getLocation().getLineNr(),
                         ex.getLocation().getColumnNr(),
@@ -128,5 +138,11 @@ public class FileResourceGroupConfigurationManager
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .findFirst();
+    }
+
+    @Override
+    public void shutdown()
+    {
+        lifeCycleManager.ifPresent(LifeCycleManager::stop);
     }
 }

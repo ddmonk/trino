@@ -15,10 +15,9 @@ package io.trino.sql.planner.plan;
 
 import io.trino.matching.Pattern;
 import io.trino.matching.Property;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Lookup;
-import io.trino.sql.planner.plan.CorrelatedJoinNode.Type;
-import io.trino.sql.tree.Expression;
 
 import java.util.List;
 import java.util.Optional;
@@ -28,6 +27,7 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.matching.Pattern.typeOf;
 import static io.trino.matching.Property.optionalProperty;
 import static io.trino.matching.Property.property;
+import static io.trino.sql.planner.plan.Patterns.Values.rowCount;
 
 public final class Patterns
 {
@@ -53,14 +53,19 @@ public final class Patterns
         return typeOf(ApplyNode.class);
     }
 
-    public static Pattern<DeleteNode> delete()
+    public static Pattern<TableExecuteNode> tableExecute()
     {
-        return typeOf(DeleteNode.class);
+        return typeOf(TableExecuteNode.class);
     }
 
-    public static Pattern<UpdateNode> update()
+    public static Pattern<MergeWriterNode> mergeWriter()
     {
-        return typeOf(UpdateNode.class);
+        return typeOf(MergeWriterNode.class);
+    }
+
+    public static Pattern<MergeProcessorNode> mergeProcessor()
+    {
+        return typeOf(MergeProcessorNode.class);
     }
 
     public static Pattern<ExchangeNode> exchange()
@@ -96,6 +101,11 @@ public final class Patterns
     public static Pattern<JoinNode> join()
     {
         return typeOf(JoinNode.class);
+    }
+
+    public static Pattern<DynamicFilterSourceNode> dynamicFilterSource()
+    {
+        return typeOf(DynamicFilterSourceNode.class);
     }
 
     public static Pattern<SpatialJoinNode> spatialJoin()
@@ -178,6 +188,11 @@ public final class Patterns
         return typeOf(ValuesNode.class);
     }
 
+    public static Pattern<ValuesNode> emptyValues()
+    {
+        return values().with(rowCount().equalTo(0));
+    }
+
     public static Pattern<UnnestNode> unnest()
     {
         return typeOf(UnnestNode.class);
@@ -186,6 +201,21 @@ public final class Patterns
     public static Pattern<WindowNode> window()
     {
         return typeOf(WindowNode.class);
+    }
+
+    public static Pattern<PatternRecognitionNode> patternRecognition()
+    {
+        return typeOf(PatternRecognitionNode.class);
+    }
+
+    public static Pattern<TableFunctionNode> tableFunction()
+    {
+        return typeOf(TableFunctionNode.class);
+    }
+
+    public static Pattern<TableFunctionProcessorNode> tableFunctionProcessor()
+    {
+        return typeOf(TableFunctionProcessorNode.class);
     }
 
     public static Pattern<RowNumberNode> rowNumber()
@@ -211,6 +241,11 @@ public final class Patterns
     public static Pattern<ExceptNode> except()
     {
         return typeOf(ExceptNode.class);
+    }
+
+    public static Pattern<RemoteSourceNode> remoteSourceNode()
+    {
+        return typeOf(RemoteSourceNode.class);
     }
 
     public static Property<PlanNode, Lookup, PlanNode> source()
@@ -274,7 +309,7 @@ public final class Patterns
 
     public static final class Join
     {
-        public static Property<JoinNode, Lookup, JoinNode.Type> type()
+        public static Property<JoinNode, Lookup, JoinType> type()
         {
             return property("type", JoinNode::getType);
         }
@@ -307,7 +342,7 @@ public final class Patterns
             return property("filter", CorrelatedJoinNode::getFilter);
         }
 
-        public static Property<CorrelatedJoinNode, Lookup, Type> type()
+        public static Property<CorrelatedJoinNode, Lookup, JoinType> type()
         {
             return property("type", CorrelatedJoinNode::getType);
         }
@@ -318,6 +353,11 @@ public final class Patterns
         public static Property<LimitNode, Lookup, Long> count()
         {
             return property("count", LimitNode::getCount);
+        }
+
+        public static Property<LimitNode, Lookup, Boolean> requiresPreSortedInputs()
+        {
+            return property("requiresPreSortedInputs", LimitNode::requiresPreSortedInputs);
         }
     }
 
@@ -390,6 +430,14 @@ public final class Patterns
         public static Property<ExceptNode, Lookup, Boolean> distinct()
         {
             return property("distinct", ExceptNode::isDistinct);
+        }
+    }
+
+    public static final class PatternRecognition
+    {
+        public static Property<PatternRecognitionNode, Lookup, RowsPerMatch> rowsPerMatch()
+        {
+            return property("rowsPerMatch", PatternRecognitionNode::getRowsPerMatch);
         }
     }
 }

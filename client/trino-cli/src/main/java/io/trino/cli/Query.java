@@ -16,7 +16,6 @@ package io.trino.cli;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import io.airlift.log.Logger;
 import io.trino.cli.ClientOptions.OutputFormat;
 import io.trino.client.ClientSelectedRole;
 import io.trino.client.Column;
@@ -44,6 +43,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Logger;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
@@ -56,6 +56,7 @@ import static io.trino.cli.TerminalUtils.isRealTerminal;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.logging.Level.FINE;
 import static org.jline.utils.AttributedStyle.CYAN;
 import static org.jline.utils.AttributedStyle.DEFAULT;
 import static org.jline.utils.AttributedStyle.RED;
@@ -63,7 +64,7 @@ import static org.jline.utils.AttributedStyle.RED;
 public class Query
         implements Closeable
 {
-    private static final Logger log = Logger.get(Query.class);
+    private static final Logger log = Logger.getLogger(Query.class.getName());
 
     private final AtomicBoolean ignoreUserInterrupt = new AtomicBoolean();
     private final StatementClient client;
@@ -85,9 +86,19 @@ public class Query
         return client.getSetSchema();
     }
 
-    public Optional<String> getSetPath()
+    public Optional<List<String>> getSetPath()
     {
         return client.getSetPath();
+    }
+
+    public Optional<String> getSetAuthorizationUser()
+    {
+        return client.getSetAuthorizationUser();
+    }
+
+    public boolean isResetAuthorizationUser()
+    {
+        return client.isResetAuthorizationUser();
     }
 
     public Map<String, String> getSetSessionProperties()
@@ -125,7 +136,7 @@ public class Query
         return client.isClearTransactionId();
     }
 
-    public boolean renderOutput(Terminal terminal, PrintStream out, PrintStream errorChannel, OutputFormat outputFormat, boolean usePager, boolean showProgress)
+    public boolean renderOutput(Terminal terminal, PrintStream out, PrintStream errorChannel, OutputFormat outputFormat, Optional<String> pager, boolean showProgress, boolean decimalDataSize)
     {
         Thread clientThread = Thread.currentThread();
         SignalHandler oldHandler = terminal.handle(Signal.INT, signal -> {
@@ -136,7 +147,7 @@ public class Query
             clientThread.interrupt();
         });
         try {
-            return renderQueryOutput(terminal, out, errorChannel, outputFormat, usePager, showProgress);
+            return renderQueryOutput(terminal, out, errorChannel, outputFormat, pager, showProgress, decimalDataSize);
         }
         finally {
             terminal.handle(Signal.INT, oldHandler);
@@ -144,13 +155,13 @@ public class Query
         }
     }
 
-    private boolean renderQueryOutput(Terminal terminal, PrintStream out, PrintStream errorChannel, OutputFormat outputFormat, boolean usePager, boolean showProgress)
+    private boolean renderQueryOutput(Terminal terminal, PrintStream out, PrintStream errorChannel, OutputFormat outputFormat, Optional<String> pager, boolean showProgress, boolean decimalDataSize)
     {
         StatusPrinter statusPrinter = null;
         WarningsPrinter warningsPrinter = new PrintStreamWarningsPrinter(errorChannel);
 
         if (showProgress) {
-            statusPrinter = new StatusPrinter(client, errorChannel, debug);
+            statusPrinter = new StatusPrinter(client, errorChannel, debug, isInteractive(pager), decimalDataSize);
             statusPrinter.printInitialStatusUpdates(terminal);
         }
         else {
@@ -161,14 +172,18 @@ public class Query
         if (client.isRunning() || (client.isFinished() && client.finalStatusInfo().getError() == null)) {
             QueryStatusInfo results = client.isRunning() ? client.currentStatusInfo() : client.finalStatusInfo();
             if (results.getUpdateType() != null) {
-                renderUpdate(errorChannel, results);
+                renderUpdate(terminal, errorChannel, results, outputFormat, pager);
             }
+            // TODO once https://github.com/trinodb/trino/issues/14253 is done this else here should be needed
+            // and should be replaced with just simple:
+            // if there is updateCount print it
+            // if there are columns(resultSet) then print it
             else if (results.getColumns() == null) {
                 errorChannel.printf("Query %s has no columns\n", results.getId());
                 return false;
             }
             else {
-                renderResults(out, outputFormat, usePager, results.getColumns());
+                renderResults(terminal, out, outputFormat, pager, results.getColumns());
             }
         }
 
@@ -198,15 +213,20 @@ public class Query
         return true;
     }
 
+    private boolean isInteractive(Optional<String> pager)
+    {
+        return pager.map(name -> name.trim().length() != 0).orElse(true);
+    }
+
     private void processInitialStatusUpdates(WarningsPrinter warningsPrinter)
     {
-        while (client.isRunning() && (client.currentData().getData() == null)) {
+        while (client.isRunning() && client.currentRows().isNull()) {
             warningsPrinter.print(client.currentStatusInfo().getWarnings(), true, false);
             try {
                 client.advance();
             }
             catch (RuntimeException e) {
-                log.debug(e, "error printing status");
+                log.log(FINE, "error printing status", e);
             }
         }
         List<Warning> warnings;
@@ -219,14 +239,21 @@ public class Query
         warningsPrinter.print(warnings, false, true);
     }
 
-    private void renderUpdate(PrintStream out, QueryStatusInfo results)
+    private void renderUpdate(Terminal terminal, PrintStream out, QueryStatusInfo results, OutputFormat outputFormat, Optional<String> pager)
     {
         String status = results.getUpdateType();
         if (results.getUpdateCount() != null) {
             long count = results.getUpdateCount();
             status += format(": %s row%s", count, (count != 1) ? "s" : "");
+            out.println(status);
         }
-        out.println(status);
+        else if (results.getColumns() != null && !results.getColumns().isEmpty()) {
+            out.println(status);
+            renderResults(terminal, out, outputFormat, pager, results.getColumns());
+        }
+        else {
+            out.println(status);
+        }
         discardResults();
     }
 
@@ -240,10 +267,10 @@ public class Query
         }
     }
 
-    private void renderResults(PrintStream out, OutputFormat outputFormat, boolean interactive, List<Column> columns)
+    private void renderResults(Terminal terminal, PrintStream out, OutputFormat outputFormat, Optional<String> pager, List<Column> columns)
     {
         try {
-            doRenderResults(out, outputFormat, interactive, columns);
+            doRenderResults(terminal, out, outputFormat, pager, columns);
         }
         catch (QueryAbortedException e) {
             System.out.println("(query aborted by user)");
@@ -254,24 +281,24 @@ public class Query
         }
     }
 
-    private void doRenderResults(PrintStream out, OutputFormat format, boolean interactive, List<Column> columns)
+    private void doRenderResults(Terminal terminal, PrintStream out, OutputFormat format, Optional<String> pager, List<Column> columns)
             throws IOException
     {
-        if (interactive) {
-            pageOutput(format, columns);
+        if (isInteractive(pager)) {
+            pageOutput(pager, format, terminal.getWidth(), columns);
         }
         else {
-            sendOutput(out, format, columns);
+            sendOutput(out, format, terminal.getWidth(), columns);
         }
     }
 
-    private void pageOutput(OutputFormat format, List<Column> columns)
+    private void pageOutput(Optional<String> pagerName, OutputFormat format, int maxWidth, List<Column> columns)
             throws IOException
     {
-        try (Pager pager = Pager.create();
+        try (Pager pager = Pager.create(pagerName);
                 ThreadInterruptor clientThread = new ThreadInterruptor();
                 Writer writer = createWriter(pager);
-                OutputHandler handler = createOutputHandler(format, writer, columns)) {
+                OutputHandler handler = createOutputHandler(format, maxWidth, writer, columns)) {
             if (!pager.isNullPager()) {
                 // ignore the user pressing ctrl-C while in the pager
                 ignoreUserInterrupt.set(true);
@@ -291,25 +318,27 @@ public class Query
         }
     }
 
-    private void sendOutput(PrintStream out, OutputFormat format, List<Column> fieldNames)
+    private void sendOutput(PrintStream out, OutputFormat format, int maxWidth, List<Column> fieldNames)
             throws IOException
     {
-        try (OutputHandler handler = createOutputHandler(format, createWriter(out), fieldNames)) {
+        try (OutputHandler handler = createOutputHandler(format, maxWidth, createWriter(out), fieldNames)) {
             handler.processRows(client);
         }
     }
 
-    private static OutputHandler createOutputHandler(OutputFormat format, Writer writer, List<Column> columns)
+    private static OutputHandler createOutputHandler(OutputFormat format, int maxWidth, Writer writer, List<Column> columns)
     {
-        return new OutputHandler(createOutputPrinter(format, writer, columns));
+        return new OutputHandler(createOutputPrinter(format, maxWidth, writer, columns));
     }
 
-    private static OutputPrinter createOutputPrinter(OutputFormat format, Writer writer, List<Column> columns)
+    private static OutputPrinter createOutputPrinter(OutputFormat format, int maxWidth, Writer writer, List<Column> columns)
     {
         List<String> fieldNames = columns.stream()
                 .map(Column::getName)
                 .collect(toImmutableList());
         switch (format) {
+            case AUTO:
+                return new AutoTablePrinter(columns, writer, maxWidth);
             case ALIGNED:
                 return new AlignedTablePrinter(columns, writer);
             case VERTICAL:
@@ -328,6 +357,8 @@ public class Query
                 return new TsvPrinter(fieldNames, writer, true);
             case JSON:
                 return new JsonPrinter(fieldNames, writer);
+            case MARKDOWN:
+                return new MarkdownTablePrinter(columns, writer);
             case NULL:
                 return new NullPrinter();
         }
@@ -413,8 +444,7 @@ public class Query
         @Override
         protected void print(List<String> warnings)
         {
-            warnings.stream()
-                    .forEach(printStream::println);
+            warnings.forEach(printStream::println);
         }
 
         @Override

@@ -20,10 +20,18 @@ import java.util.concurrent.CompletableFuture;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * Source of splits to be processed.
+ * <p>
+ * Thread-safety: the implementations are not required to be thread-safe.
+ */
 public interface ConnectorSplitSource
         extends Closeable
 {
-    CompletableFuture<ConnectorSplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, int maxSize);
+    default CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
+    {
+        throw new UnsupportedOperationException();
+    }
 
     @Override
     void close();
@@ -37,6 +45,11 @@ public interface ConnectorSplitSource
      * will be inherently racy.
      */
     boolean isFinished();
+
+    default Optional<List<Object>> getTableExecuteSplitsInfo()
+    {
+        return Optional.empty();
+    }
 
     class ConnectorSplitBatch
     {
@@ -58,10 +71,5 @@ public interface ConnectorSplitSource
         {
             return noMoreSplits;
         }
-    }
-
-    default Optional<Integer> getMinScheduleSplitBatchSize()
-    {
-        return Optional.empty();
     }
 }

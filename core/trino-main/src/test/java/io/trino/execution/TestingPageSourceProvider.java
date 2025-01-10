@@ -20,12 +20,13 @@ import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedPageSource;
-import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
 import java.util.Optional;
@@ -34,11 +35,17 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 public class TestingPageSourceProvider
-        implements ConnectorPageSourceProvider
+        implements ConnectorPageSourceProviderFactory, ConnectorPageSourceProvider
 {
     public TestingPageSourceProvider()
     {
         System.out.println();
+    }
+
+    @Override
+    public ConnectorPageSourceProvider createPageSourceProvider()
+    {
+        return this;
     }
 
     @Override
@@ -48,7 +55,7 @@ public class TestingPageSourceProvider
             ConnectorSplit split,
             ConnectorTableHandle table,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter)
     {
         requireNonNull(columns, "columns is null");
 

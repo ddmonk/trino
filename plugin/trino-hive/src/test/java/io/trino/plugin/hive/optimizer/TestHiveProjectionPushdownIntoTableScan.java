@@ -16,60 +16,68 @@ package io.trino.plugin.hive.optimizer;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.io.Files;
 import io.trino.Session;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableHandle;
-import io.trino.plugin.hive.HdfsConfig;
-import io.trino.plugin.hive.HdfsConfiguration;
-import io.trino.plugin.hive.HdfsConfigurationInitializer;
-import io.trino.plugin.hive.HdfsEnvironment;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.metastore.Database;
+import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.HiveMetastoreFactory;
 import io.trino.plugin.hive.HiveColumnHandle;
-import io.trino.plugin.hive.HiveHdfsConfiguration;
 import io.trino.plugin.hive.HiveTableHandle;
-import io.trino.plugin.hive.NodeVersion;
-import io.trino.plugin.hive.authentication.HiveIdentity;
-import io.trino.plugin.hive.authentication.NoHdfsAuthentication;
-import io.trino.plugin.hive.metastore.Database;
-import io.trino.plugin.hive.metastore.HiveMetastore;
-import io.trino.plugin.hive.metastore.MetastoreConfig;
-import io.trino.plugin.hive.metastore.file.FileHiveMetastore;
-import io.trino.plugin.hive.metastore.file.FileHiveMetastoreConfig;
-import io.trino.plugin.hive.testing.TestingHiveConnectorFactory;
+import io.trino.plugin.hive.TestingHiveConnectorFactory;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
+import io.trino.spi.type.RowType;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.assertions.BasePushdownPlanTest;
-import io.trino.testing.LocalQueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import io.trino.testing.PlanTester;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.base.Predicates.equalTo;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.trino.plugin.hive.TestHiveReaderProjectionsUtil.createProjectedColumnHandle;
+import static io.trino.plugin.hive.TestingHiveUtils.getConnectorService;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.any;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
+import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHiveProjectionPushdownIntoTableScan
         extends BasePushdownPlanTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction ADD_INTEGER = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(INTEGER, INTEGER));
+
     private static final String HIVE_CATALOG_NAME = "hive";
     private static final String SCHEMA_NAME = "test_schema";
 
@@ -81,32 +89,28 @@ public class TestHiveProjectionPushdownIntoTableScan
     private File baseDir;
 
     @Override
-    protected LocalQueryRunner createLocalQueryRunner()
+    protected PlanTester createPlanTester()
     {
-        baseDir = Files.createTempDir();
-        HdfsConfig config = new HdfsConfig();
-        HdfsConfiguration configuration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(config), ImmutableSet.of());
-        HdfsEnvironment environment = new HdfsEnvironment(configuration, config, new NoHdfsAuthentication());
+        try {
+            baseDir = Files.createTempDirectory(null).toFile();
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
 
-        HiveMetastore metastore = new FileHiveMetastore(
-                new NodeVersion("test_version"),
-                environment,
-                new MetastoreConfig(),
-                new FileHiveMetastoreConfig()
-                        .setCatalogDirectory(baseDir.toURI().toString())
-                        .setMetastoreUser("test"));
-        Database database = Database.builder()
+        PlanTester planTester = PlanTester.create(HIVE_SESSION);
+        planTester.createCatalog(HIVE_CATALOG_NAME, new TestingHiveConnectorFactory(baseDir.toPath()), ImmutableMap.of());
+
+        HiveMetastore metastore = getConnectorService(planTester, HiveMetastoreFactory.class)
+                .createMetastore(Optional.empty());
+
+        metastore.createDatabase(Database.builder()
                 .setDatabaseName(SCHEMA_NAME)
-                .setOwnerName("public")
-                .setOwnerType(PrincipalType.ROLE)
-                .build();
+                .setOwnerName(Optional.of("public"))
+                .setOwnerType(Optional.of(PrincipalType.ROLE))
+                .build());
 
-        metastore.createDatabase(new HiveIdentity(HIVE_SESSION.toConnectorSession()), database);
-
-        LocalQueryRunner queryRunner = LocalQueryRunner.create(HIVE_SESSION);
-        queryRunner.createCatalog(HIVE_CATALOG_NAME, new TestingHiveConnectorFactory(metastore), ImmutableMap.of());
-
-        return queryRunner;
+        return planTester;
     }
 
     @Test
@@ -114,11 +118,11 @@ public class TestHiveProjectionPushdownIntoTableScan
     {
         String testTable = "test_disabled_pushdown";
 
-        Session session = Session.builder(getQueryRunner().getDefaultSession())
+        Session session = Session.builder(getPlanTester().getDefaultSession())
                 .setCatalogSessionProperty(HIVE_CATALOG_NAME, "projection_pushdown_enabled", "false")
                 .build();
 
-        getQueryRunner().execute(format(
+        getPlanTester().executeStatement(format(
                 "CREATE TABLE %s (col0) AS" +
                         " SELECT cast(row(5, 6) as row(a bigint, b bigint)) AS col0 WHERE false",
                 testTable));
@@ -128,7 +132,9 @@ public class TestHiveProjectionPushdownIntoTableScan
                 session,
                 any(
                         project(
-                                ImmutableMap.of("expr", expression("col0.a"), "expr_2", expression("col0.b")),
+                                ImmutableMap.of(
+                                        "expr", expression(new FieldReference(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "col0"), 0)),
+                                        "expr_2", expression(new FieldReference(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "col0"), 1))),
                                 tableScan(testTable, ImmutableMap.of("col0", "col0")))));
     }
 
@@ -138,15 +144,17 @@ public class TestHiveProjectionPushdownIntoTableScan
         String testTable = "test_simple_projection_pushdown";
         QualifiedObjectName completeTableName = new QualifiedObjectName(HIVE_CATALOG_NAME, SCHEMA_NAME, testTable);
 
-        getQueryRunner().execute(format(
+        getPlanTester().executeStatement(format(
                 "CREATE TABLE %s (col0, col1) AS" +
                         " SELECT cast(row(5, 6) as row(x bigint, y bigint)) AS col0, 5 AS col1 WHERE false",
                 testTable));
 
-        Session session = getQueryRunner().getDefaultSession();
+        Session session = getPlanTester().getDefaultSession();
 
         Optional<TableHandle> tableHandle = getTableHandle(session, completeTableName);
-        assertTrue(tableHandle.isPresent(), "expected the table handle to be present");
+        assertThat(tableHandle.isPresent())
+                .describedAs("expected the table handle to be present")
+                .isTrue();
 
         Map<String, ColumnHandle> columns = getColumnHandles(session, completeTableName);
 
@@ -160,33 +168,44 @@ public class TestHiveProjectionPushdownIntoTableScan
         assertPlan(
                 "SELECT col0.x expr_x, col0.y expr_y FROM " + testTable,
                 any(tableScan(
-                        equalTo(tableHandle.get().getConnectorHandle()),
+                        ((HiveTableHandle) tableHandle.get().connectorHandle())
+                                .withProjectedColumns(ImmutableSet.of(columnX, columnY))::equals,
                         TupleDomain.all(),
-                        ImmutableMap.of("col0#x", equalTo(columnX), "col0#y", equalTo(columnY)))));
+                        ImmutableMap.of("col0#x", columnX::equals, "col0#y", columnY::equals))));
 
         // Projection and predicate pushdown
         assertPlan(
                 format("SELECT col0.x FROM %s WHERE col0.x = col1 + 3 and col0.y = 2", testTable),
                 anyTree(
                         filter(
-                                "col0_y = BIGINT '2' AND (col0_x =  cast((col1 + 3) as BIGINT))",
+                                new Logical(AND, ImmutableList.of(new Comparison(EQUAL, new Reference(BIGINT, "col0_y"), new Constant(BIGINT, 2L)), new Comparison(EQUAL, new Reference(BIGINT, "col0_x"), new Cast(new Call(ADD_INTEGER, ImmutableList.of(new Reference(INTEGER, "col1"), new Constant(INTEGER, 3L))), BIGINT)))),
                                 tableScan(
-                                        table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
-                                                .equals(ImmutableMap.of(columnY, Domain.singleValue(BIGINT, 2L))),
+                                        table -> {
+                                            HiveTableHandle hiveTableHandle = (HiveTableHandle) table;
+                                            return hiveTableHandle.getCompactEffectivePredicate().equals(TupleDomain.withColumnDomains(
+                                                    ImmutableMap.of(columnY, Domain.singleValue(BIGINT, 2L)))) &&
+                                                    hiveTableHandle.getProjectedColumns().equals(
+                                                            ImmutableSet.of(column1Handle, columnX, columnY));
+                                        },
                                         TupleDomain.all(),
-                                        ImmutableMap.of("col0_y", equalTo(columnY), "col0_x", equalTo(columnX), "col1", equalTo(column1Handle))))));
+                                        ImmutableMap.of("col0_y", columnY::equals, "col0_x", columnX::equals, "col1", column1Handle::equals)))));
 
         // Projection and predicate pushdown with overlapping columns
         assertPlan(
                 format("SELECT col0, col0.y expr_y FROM %s WHERE col0.x = 5", testTable),
                 anyTree(
                         filter(
-                                "col0_x = BIGINT '5'",
+                                new Comparison(EQUAL, new Reference(BIGINT, "col0_x"), new Constant(BIGINT, 5L)),
                                 tableScan(
-                                        table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
-                                                .equals(ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 5L))),
+                                        table -> {
+                                            HiveTableHandle hiveTableHandle = (HiveTableHandle) table;
+                                            return hiveTableHandle.getCompactEffectivePredicate().equals(TupleDomain.withColumnDomains(
+                                                    ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 5L)))) &&
+                                                    hiveTableHandle.getProjectedColumns().equals(
+                                                            ImmutableSet.of(column0Handle, columnX));
+                                        },
                                         TupleDomain.all(),
-                                        ImmutableMap.of("col0", equalTo(column0Handle), "col0_x", equalTo(columnX))))));
+                                        ImmutableMap.of("col0", column0Handle::equals, "col0_x", columnX::equals)))));
 
         // Projection and predicate pushdown with joins
         assertPlan(
@@ -194,28 +213,30 @@ public class TestHiveProjectionPushdownIntoTableScan
                 anyTree(
                         project(
                                 ImmutableMap.of(
-                                        "expr_0_x", expression("expr_0.x"),
-                                        "expr_0", expression("expr_0"),
-                                        "expr_0_y", expression("expr_0.y")),
-                                join(
-                                        INNER,
-                                        ImmutableList.of(equiJoinClause("t_expr_1", "s_expr_1")),
-                                        anyTree(
-                                                filter(
-                                                        "expr_0_x = BIGINT '2'",
+                                        "expr_0_x", expression(new FieldReference(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0"), 0)),
+                                        "expr_0", expression(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0")),
+                                        "expr_0_y", expression(new FieldReference(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0"), 1))),
+                                join(INNER, builder -> builder
+                                        .equiCriteria("t_expr_1", "s_expr_1")
+                                        .left(
+                                                anyTree(
+                                                        filter(
+                                                                new Comparison(EQUAL, new Reference(BIGINT, "expr_0_x"), new Constant(BIGINT, 2L)),
+                                                                tableScan(
+                                                                        table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
+                                                                                .equals(ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 2L))),
+                                                                        TupleDomain.all(),
+                                                                        ImmutableMap.of("expr_0_x", columnX::equals, "expr_0", column0Handle::equals, "t_expr_1", column1Handle::equals)))))
+                                        .right(
+                                                anyTree(
                                                         tableScan(
-                                                                table -> ((HiveTableHandle) table).getCompactEffectivePredicate().getDomains().get()
-                                                                        .equals(ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 2L))),
+                                                                ((HiveTableHandle) tableHandle.get().connectorHandle())
+                                                                        .withProjectedColumns(ImmutableSet.of(column1Handle))::equals,
                                                                 TupleDomain.all(),
-                                                                ImmutableMap.of("expr_0_x", equalTo(columnX), "expr_0", equalTo(column0Handle), "t_expr_1", equalTo(column1Handle))))),
-                                        anyTree(
-                                                tableScan(
-                                                        equalTo(tableHandle.get().getConnectorHandle()),
-                                                        TupleDomain.all(),
-                                                        ImmutableMap.of("s_expr_1", equalTo(column1Handle))))))));
+                                                                ImmutableMap.of("s_expr_1", column1Handle::equals))))))));
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void cleanup()
             throws Exception
     {

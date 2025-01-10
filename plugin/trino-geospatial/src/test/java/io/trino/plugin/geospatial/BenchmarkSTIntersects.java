@@ -14,6 +14,7 @@
 package io.trino.plugin.geospatial;
 
 import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -24,18 +25,14 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
-import org.testng.annotations.Test;
 
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.plugin.geospatial.GeoFunctions.stContains;
 import static io.trino.plugin.geospatial.GeoFunctions.stEnvelope;
 import static io.trino.plugin.geospatial.GeoFunctions.stGeometryFromText;
@@ -160,10 +157,6 @@ public class BenchmarkSTIntersects
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkSTIntersects.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkSTIntersects.class).run();
     }
 }

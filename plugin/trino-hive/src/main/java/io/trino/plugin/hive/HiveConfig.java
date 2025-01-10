@@ -13,8 +13,8 @@
  */
 package io.trino.plugin.hive;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.DefunctConfig;
@@ -24,21 +24,27 @@ import io.airlift.units.Duration;
 import io.airlift.units.MaxDataSize;
 import io.airlift.units.MinDataSize;
 import io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior;
+import jakarta.annotation.Nullable;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.joda.time.DateTimeZone;
 
-import javax.annotation.Nullable;
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
-
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TimeZone;
 
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.APPEND;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.ERROR;
+import static java.util.Locale.ENGLISH;
 import static java.util.concurrent.TimeUnit.MINUTES;
 
 @DefunctConfig({
@@ -52,47 +58,54 @@ import static java.util.concurrent.TimeUnit.MINUTES;
         "hive.time-zone",
         "hive.assume-canonical-partition-keys",
         "hive.partition-use-column-names",
+        "hive.allow-corrupt-writes-for-testing",
+        "hive.optimize-symlink-listing",
+        "hive.s3select-pushdown.enabled",
+        "hive.s3select-pushdown.experimental-textfile-pushdown-enabled",
+        "hive.s3select-pushdown.max-connections",
 })
 public class HiveConfig
 {
-    private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
+    private boolean singleStatementWritesOnly;
 
     private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
-    private int maxPartitionsPerScan = 100_000;
-    private int maxOutstandingSplits = 1_000;
+    private int maxPartitionsPerScan = 1_000_000;
+    private int maxPartitionsForEagerLoad = 100_000;
+    private int maxOutstandingSplits = 3_000;
     private DataSize maxOutstandingSplitsSize = DataSize.of(256, MEGABYTE);
     private int maxSplitIteratorThreads = 1_000;
     private int minPartitionBatchSize = 10;
     private int maxPartitionBatchSize = 100;
     private int maxInitialSplits = 200;
-    private int splitLoaderConcurrency = 4;
+    private int splitLoaderConcurrency = 64;
     private Integer maxSplitsPerSecond;
     private DataSize maxInitialSplitSize;
-    private int domainCompactionThreshold = 100;
-    private DataSize writerSortBufferSize = DataSize.of(64, MEGABYTE);
+    private int domainCompactionThreshold = 1000;
     private boolean forceLocalScheduling;
     private boolean recursiveDirWalkerEnabled;
     private boolean ignoreAbsentPartitions;
 
-    private int maxConcurrentFileRenames = 20;
+    private int maxConcurrentFileSystemOperations = 20;
     private int maxConcurrentMetastoreDrops = 20;
     private int maxConcurrentMetastoreUpdates = 20;
-
-    private boolean allowCorruptWritesForTesting;
+    private int maxPartitionDropsPerQuery = 100_000;
 
     private long perTransactionMetastoreCacheMaximumSize = 1000;
 
     private HiveStorageFormat hiveStorageFormat = HiveStorageFormat.ORC;
-    private HiveCompressionCodec hiveCompressionCodec = HiveCompressionCodec.GZIP;
+    private HiveCompressionOption hiveCompressionCodec = HiveCompressionOption.GZIP;
     private boolean respectTableFormat = true;
     private boolean immutablePartitions;
     private Optional<InsertExistingPartitionsBehavior> insertExistingPartitionsBehavior = Optional.empty();
     private boolean createEmptyBucketFiles;
+    // This is meant to protect users who are misusing schema locations (by
+    // putting schemas in locations with extraneous files), so default to false
+    // to avoid deleting those files if Trino is unable to check.
+    private boolean deleteSchemaLocationsFallback;
     private int maxPartitionsPerWriter = 100;
-    private int maxOpenSortFiles = 50;
     private int writeValidationThreads = 16;
     private boolean validateBucketing = true;
-    private boolean parallelPartitionedBucketedInserts = true;
+    private boolean parallelPartitionedBucketedWrites = true;
 
     private DataSize textMaxLineLength = DataSize.of(100, MEGABYTE);
 
@@ -109,8 +122,9 @@ public class HiveConfig
 
     private boolean bucketExecutionEnabled = true;
     private boolean sortedWritingEnabled = true;
+    private boolean propagateTableScanSortingProperties;
 
-    private boolean optimizeMismatchedBucketCount;
+    private boolean optimizeMismatchedBucketCount = true;
     private boolean writesToNonManagedTablesEnabled;
     private boolean createsOfNonManagedTablesEnabled = true;
 
@@ -119,32 +133,61 @@ public class HiveConfig
     private boolean ignoreCorruptedStatistics;
     private boolean collectColumnStatisticsOnWrite = true;
 
-    private boolean s3SelectPushdownEnabled;
-    private int s3SelectPushdownMaxConnections = 500;
-
     private boolean isTemporaryStagingDirectoryEnabled = true;
     private String temporaryStagingDirectoryPath = "/tmp/presto-${USER}";
+    private boolean delegateTransactionalManagedTableLocationToMetastore;
 
     private Duration fileStatusCacheExpireAfterWrite = new Duration(1, MINUTES);
-    private long fileStatusCacheMaxSize = 1000 * 1000;
+    private DataSize fileStatusCacheMaxRetainedSize = DataSize.of(1, GIGABYTE);
     private List<String> fileStatusCacheTables = ImmutableList.of();
+    private DataSize perTransactionFileStatusCacheMaxRetainedSize = DataSize.of(100, MEGABYTE);
+
     private boolean translateHiveViews;
+    private boolean legacyHiveViewTranslation;
+    private boolean hiveViewsRunAsInvoker;
 
     private Optional<Duration> hiveTransactionHeartbeatInterval = Optional.empty();
     private int hiveTransactionHeartbeatThreads = 5;
 
     private boolean allowRegisterPartition;
     private boolean queryPartitionFilterRequired;
+    private Set<String> queryPartitionFilterRequiredSchemas = ImmutableSet.of();
 
     private boolean projectionPushdownEnabled = true;
 
-    private Duration dynamicFilteringProbeBlockingTimeout = new Duration(0, MINUTES);
+    private Duration dynamicFilteringWaitTimeout = new Duration(0, MINUTES);
 
     private HiveTimestampPrecision timestampPrecision = HiveTimestampPrecision.DEFAULT_PRECISION;
 
-    private boolean optimizeSymlinkListing = true;
+    private Optional<String> icebergCatalogName = Optional.empty();
+    private Optional<String> deltaLakeCatalogName = Optional.empty();
+    private Optional<String> hudiCatalogName = Optional.empty();
 
-    private boolean legacyHiveViewTranslation;
+    private DataSize targetMaxFileSize = DataSize.of(1, GIGABYTE);
+    private DataSize idleWriterMinFileSize = DataSize.of(16, MEGABYTE);
+
+    private boolean sizeBasedSplitWeightsEnabled = true;
+    private double minimumAssignedSplitWeight = 0.05;
+    private boolean autoPurge;
+
+    private boolean partitionProjectionEnabled;
+
+    private S3StorageClassFilter s3StorageClassFilter = S3StorageClassFilter.READ_ALL;
+
+    private int metadataParallelism = 8;
+
+    public boolean isSingleStatementWritesOnly()
+    {
+        return singleStatementWritesOnly;
+    }
+
+    @Config("hive.single-statement-writes")
+    @ConfigDescription("Require transaction to be in auto-commit mode for writes")
+    public HiveConfig setSingleStatementWritesOnly(boolean singleStatementWritesOnly)
+    {
+        this.singleStatementWritesOnly = singleStatementWritesOnly;
+        return this;
+    }
 
     public int getMaxInitialSplits()
     {
@@ -215,17 +258,29 @@ public class HiveConfig
         return this;
     }
 
-    @MinDataSize("1MB")
-    @MaxDataSize("1GB")
-    public DataSize getWriterSortBufferSize()
+    public DataSize getTargetMaxFileSize()
     {
-        return writerSortBufferSize;
+        return targetMaxFileSize;
     }
 
-    @Config("hive.writer-sort-buffer-size")
-    public HiveConfig setWriterSortBufferSize(DataSize writerSortBufferSize)
+    @Config("hive.target-max-file-size")
+    @ConfigDescription("Target maximum size of written files; the actual size may be larger")
+    public HiveConfig setTargetMaxFileSize(DataSize targetMaxFileSize)
     {
-        this.writerSortBufferSize = writerSortBufferSize;
+        this.targetMaxFileSize = targetMaxFileSize;
+        return this;
+    }
+
+    public DataSize getIdleWriterMinFileSize()
+    {
+        return idleWriterMinFileSize;
+    }
+
+    @Config("hive.idle-writer-min-file-size")
+    @ConfigDescription("Minimum data written by a single partition writer before it can be consider as 'idle' and could be closed by the engine")
+    public HiveConfig setIdleWriterMinFileSize(DataSize idleWriterMinFileSize)
+    {
+        this.idleWriterMinFileSize = idleWriterMinFileSize;
         return this;
     }
 
@@ -242,15 +297,16 @@ public class HiveConfig
     }
 
     @Min(1)
-    public int getMaxConcurrentFileRenames()
+    public int getMaxConcurrentFileSystemOperations()
     {
-        return maxConcurrentFileRenames;
+        return maxConcurrentFileSystemOperations;
     }
 
-    @Config("hive.max-concurrent-file-renames")
-    public HiveConfig setMaxConcurrentFileRenames(int maxConcurrentFileRenames)
+    @LegacyConfig("hive.max-concurrent-file-renames")
+    @Config("hive.max-concurrent-file-system-operations")
+    public HiveConfig setMaxConcurrentFileSystemOperations(int maxConcurrentFileSystemOperations)
     {
-        this.maxConcurrentFileRenames = maxConcurrentFileRenames;
+        this.maxConcurrentFileSystemOperations = maxConcurrentFileSystemOperations;
         return this;
     }
 
@@ -277,6 +333,19 @@ public class HiveConfig
     public HiveConfig setMaxConcurrentMetastoreUpdates(int maxConcurrentMetastoreUpdates)
     {
         this.maxConcurrentMetastoreUpdates = maxConcurrentMetastoreUpdates;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxPartitionDropsPerQuery()
+    {
+        return maxPartitionDropsPerQuery;
+    }
+
+    @Config("hive.max-partition-drops-per-query")
+    public HiveConfig setMaxPartitionDropsPerQuery(int maxPartitionDropsPerQuery)
+    {
+        this.maxPartitionDropsPerQuery = maxPartitionDropsPerQuery;
         return this;
     }
 
@@ -332,6 +401,20 @@ public class HiveConfig
     }
 
     @Min(1)
+    public int getMaxPartitionsForEagerLoad()
+    {
+        return maxPartitionsForEagerLoad;
+    }
+
+    @Config("hive.max-partitions-for-eager-load")
+    @ConfigDescription("Maximum allowed partitions for a single table scan to be loaded eagerly on coordinator. Certain optimizations are not possible without eager loading.")
+    public HiveConfig setMaxPartitionsForEagerLoad(int maxPartitionsForEagerLoad)
+    {
+        this.maxPartitionsForEagerLoad = maxPartitionsForEagerLoad;
+        return this;
+    }
+
+    @Min(1)
     public int getMaxOutstandingSplits()
     {
         return maxOutstandingSplits;
@@ -369,21 +452,6 @@ public class HiveConfig
     public HiveConfig setMaxSplitIteratorThreads(int maxSplitIteratorThreads)
     {
         this.maxSplitIteratorThreads = maxSplitIteratorThreads;
-        return this;
-    }
-
-    @Deprecated
-    public boolean getAllowCorruptWritesForTesting()
-    {
-        return allowCorruptWritesForTesting;
-    }
-
-    @Deprecated
-    @Config("hive.allow-corrupt-writes-for-testing")
-    @ConfigDescription("Allow Hive connector to write data even when data will likely be corrupt")
-    public HiveConfig setAllowCorruptWritesForTesting(boolean allowCorruptWritesForTesting)
-    {
-        this.allowCorruptWritesForTesting = allowCorruptWritesForTesting;
         return this;
     }
 
@@ -438,13 +506,13 @@ public class HiveConfig
         return this;
     }
 
-    public HiveCompressionCodec getHiveCompressionCodec()
+    public HiveCompressionOption getHiveCompressionCodec()
     {
         return hiveCompressionCodec;
     }
 
     @Config("hive.compression-codec")
-    public HiveConfig setHiveCompressionCodec(HiveCompressionCodec hiveCompressionCodec)
+    public HiveConfig setHiveCompressionCodec(HiveCompressionOption hiveCompressionCodec)
     {
         this.hiveCompressionCodec = hiveCompressionCodec;
         return this;
@@ -510,6 +578,19 @@ public class HiveConfig
         return this;
     }
 
+    public boolean isDeleteSchemaLocationsFallback()
+    {
+        return this.deleteSchemaLocationsFallback;
+    }
+
+    @Config("hive.delete-schema-locations-fallback")
+    @ConfigDescription("Whether schema locations should be deleted when Trino can't determine whether they contain external files.")
+    public HiveConfig setDeleteSchemaLocationsFallback(boolean deleteSchemaLocationsFallback)
+    {
+        this.deleteSchemaLocationsFallback = deleteSchemaLocationsFallback;
+        return this;
+    }
+
     @Min(1)
     public int getMaxPartitionsPerWriter()
     {
@@ -521,21 +602,6 @@ public class HiveConfig
     public HiveConfig setMaxPartitionsPerWriter(int maxPartitionsPerWriter)
     {
         this.maxPartitionsPerWriter = maxPartitionsPerWriter;
-        return this;
-    }
-
-    @Min(2)
-    @Max(1000)
-    public int getMaxOpenSortFiles()
-    {
-        return maxOpenSortFiles;
-    }
-
-    @Config("hive.max-open-sort-files")
-    @ConfigDescription("Maximum number of writer temporary files to read in one pass")
-    public HiveConfig setMaxOpenSortFiles(int maxOpenSortFiles)
-    {
-        this.maxOpenSortFiles = maxOpenSortFiles;
         return this;
     }
 
@@ -565,22 +631,24 @@ public class HiveConfig
         return this;
     }
 
-    public boolean isParallelPartitionedBucketedInserts()
+    public boolean isParallelPartitionedBucketedWrites()
     {
-        return parallelPartitionedBucketedInserts;
+        return parallelPartitionedBucketedWrites;
     }
 
-    @Config("hive.parallel-partitioned-bucketed-inserts")
-    @ConfigDescription("Improve parallelism of partitioned and bucketed table inserts")
-    public HiveConfig setParallelPartitionedBucketedInserts(boolean parallelPartitionedBucketedInserts)
+    @Config("hive.parallel-partitioned-bucketed-writes")
+    @LegacyConfig("hive.parallel-partitioned-bucketed-inserts")
+    @ConfigDescription("Improve parallelism of partitioned and bucketed table writes")
+    public HiveConfig setParallelPartitionedBucketedWrites(boolean parallelPartitionedBucketedWrites)
     {
-        this.parallelPartitionedBucketedInserts = parallelPartitionedBucketedInserts;
+        this.parallelPartitionedBucketedWrites = parallelPartitionedBucketedWrites;
         return this;
     }
 
     public DateTimeZone getRcfileDateTimeZone()
     {
-        return DateTimeZone.forID(rcfileTimeZone);
+        TimeZone timeZone = TimeZone.getTimeZone(ZoneId.of(rcfileTimeZone));
+        return DateTimeZone.forTimeZone(timeZone);
     }
 
     @NotNull
@@ -628,7 +696,8 @@ public class HiveConfig
 
     public DateTimeZone getOrcLegacyDateTimeZone()
     {
-        return DateTimeZone.forID(orcLegacyTimeZone);
+        TimeZone timeZone = TimeZone.getTimeZone(ZoneId.of(orcLegacyTimeZone));
+        return DateTimeZone.forTimeZone(timeZone);
     }
 
     @NotNull
@@ -647,7 +716,8 @@ public class HiveConfig
 
     public DateTimeZone getParquetDateTimeZone()
     {
-        return DateTimeZone.forID(parquetTimeZone);
+        TimeZone timeZone = TimeZone.getTimeZone(ZoneId.of(parquetTimeZone));
+        return DateTimeZone.forTimeZone(timeZone);
     }
 
     @NotNull
@@ -695,9 +765,34 @@ public class HiveConfig
     }
 
     @Config("hive.file-status-cache-tables")
-    public HiveConfig setFileStatusCacheTables(String fileStatusCacheTables)
+    public HiveConfig setFileStatusCacheTables(List<String> fileStatusCacheTables)
     {
-        this.fileStatusCacheTables = SPLITTER.splitToList(fileStatusCacheTables);
+        this.fileStatusCacheTables = ImmutableList.copyOf(fileStatusCacheTables);
+        return this;
+    }
+
+    @MinDataSize("0MB")
+    @NotNull
+    public DataSize getPerTransactionFileStatusCacheMaxRetainedSize()
+    {
+        return perTransactionFileStatusCacheMaxRetainedSize;
+    }
+
+    @Config("hive.per-transaction-file-status-cache.max-retained-size")
+    @ConfigDescription("Maximum retained size of file statuses cached by transactional file status cache")
+    public HiveConfig setPerTransactionFileStatusCacheMaxRetainedSize(DataSize perTransactionFileStatusCacheMaxRetainedSize)
+    {
+        this.perTransactionFileStatusCacheMaxRetainedSize = perTransactionFileStatusCacheMaxRetainedSize;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "hive.per-transaction-file-status-cache-maximum-size", replacedBy = "hive.per-transaction-file-status-cache.max-retained-size")
+    @ConfigDescription("Maximum number of file statuses cached by transactional file status cache")
+    public HiveConfig setPerTransactionFileStatusCacheMaximumSize(long perTransactionFileStatusCacheMaximumSize)
+    {
+        // assume some fixed size per entry in order to keep the deprecated property for backward compatibility
+        this.perTransactionFileStatusCacheMaxRetainedSize = DataSize.of(perTransactionFileStatusCacheMaximumSize, KILOBYTE);
         return this;
     }
 
@@ -706,8 +801,8 @@ public class HiveConfig
         return translateHiveViews;
     }
 
-    @LegacyConfig("hive.views-execution.enabled")
-    @Config("hive.translate-hive-views")
+    @LegacyConfig({"hive.views-execution.enabled", "hive.translate-hive-views"})
+    @Config("hive.hive-views.enabled")
     @ConfigDescription("Experimental: Allow translation of Hive views into Trino views")
     public HiveConfig setTranslateHiveViews(boolean translateHiveViews)
     {
@@ -715,15 +810,53 @@ public class HiveConfig
         return this;
     }
 
-    public long getFileStatusCacheMaxSize()
+    public boolean isLegacyHiveViewTranslation()
     {
-        return fileStatusCacheMaxSize;
+        return this.legacyHiveViewTranslation;
     }
 
-    @Config("hive.file-status-cache-size")
+    @LegacyConfig("hive.legacy-hive-view-translation")
+    @Config("hive.hive-views.legacy-translation")
+    @ConfigDescription("Use legacy Hive view translation mechanism")
+    public HiveConfig setLegacyHiveViewTranslation(boolean legacyHiveViewTranslation)
+    {
+        this.legacyHiveViewTranslation = legacyHiveViewTranslation;
+        return this;
+    }
+
+    public boolean isHiveViewsRunAsInvoker()
+    {
+        return hiveViewsRunAsInvoker;
+    }
+
+    @Config("hive.hive-views.run-as-invoker")
+    @ConfigDescription("Execute Hive views with permissions of invoker")
+    public HiveConfig setHiveViewsRunAsInvoker(boolean hiveViewsRunAsInvoker)
+    {
+        this.hiveViewsRunAsInvoker = hiveViewsRunAsInvoker;
+        return this;
+    }
+
+    @MinDataSize("0MB")
+    @NotNull
+    public DataSize getFileStatusCacheMaxRetainedSize()
+    {
+        return fileStatusCacheMaxRetainedSize;
+    }
+
+    @Config("hive.file-status-cache.max-retained-size")
+    public HiveConfig setFileStatusCacheMaxRetainedSize(DataSize fileStatusCacheMaxRetainedSize)
+    {
+        this.fileStatusCacheMaxRetainedSize = fileStatusCacheMaxRetainedSize;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "hive.file-status-cache-size", replacedBy = "hive.file-status-cache.max-retained-size")
     public HiveConfig setFileStatusCacheMaxSize(long fileStatusCacheMaxSize)
     {
-        this.fileStatusCacheMaxSize = fileStatusCacheMaxSize;
+        // assume some fixed size per entry in order to keep the deprecated property for backward compatibility
+        this.fileStatusCacheMaxRetainedSize = DataSize.of(fileStatusCacheMaxSize, KILOBYTE);
         return this;
     }
 
@@ -771,7 +904,7 @@ public class HiveConfig
     }
 
     @Config("hive.bucket-execution")
-    @ConfigDescription("Enable bucket-aware execution: only use a single worker per bucket")
+    @ConfigDescription("Enable bucket-aware execution: use physical bucketing information to optimize queries")
     public HiveConfig setBucketExecutionEnabled(boolean bucketExecutionEnabled)
     {
         this.bucketExecutionEnabled = bucketExecutionEnabled;
@@ -788,6 +921,19 @@ public class HiveConfig
     public HiveConfig setSortedWritingEnabled(boolean sortedWritingEnabled)
     {
         this.sortedWritingEnabled = sortedWritingEnabled;
+        return this;
+    }
+
+    public boolean isPropagateTableScanSortingProperties()
+    {
+        return propagateTableScanSortingProperties;
+    }
+
+    @Config("hive.propagate-table-scan-sorting-properties")
+    @ConfigDescription("Use sorted table layout to generate more efficient execution plans. May lead to incorrect results if files are not sorted as per table definition.")
+    public HiveConfig setPropagateTableScanSortingProperties(boolean propagateTableScanSortingProperties)
+    {
+        this.propagateTableScanSortingProperties = propagateTableScanSortingProperties;
         return this;
     }
 
@@ -870,32 +1016,6 @@ public class HiveConfig
         return this;
     }
 
-    public boolean isS3SelectPushdownEnabled()
-    {
-        return s3SelectPushdownEnabled;
-    }
-
-    @Config("hive.s3select-pushdown.enabled")
-    @ConfigDescription("Enable query pushdown to AWS S3 Select service")
-    public HiveConfig setS3SelectPushdownEnabled(boolean s3SelectPushdownEnabled)
-    {
-        this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
-        return this;
-    }
-
-    @Min(1)
-    public int getS3SelectPushdownMaxConnections()
-    {
-        return s3SelectPushdownMaxConnections;
-    }
-
-    @Config("hive.s3select-pushdown.max-connections")
-    public HiveConfig setS3SelectPushdownMaxConnections(int s3SelectPushdownMaxConnections)
-    {
-        this.s3SelectPushdownMaxConnections = s3SelectPushdownMaxConnections;
-        return this;
-    }
-
     @Config("hive.temporary-staging-directory-enabled")
     @ConfigDescription("Should use (if possible) temporary staging directory for write operations")
     public HiveConfig setTemporaryStagingDirectoryEnabled(boolean temporaryStagingDirectoryEnabled)
@@ -921,6 +1041,19 @@ public class HiveConfig
     public String getTemporaryStagingDirectoryPath()
     {
         return temporaryStagingDirectoryPath;
+    }
+
+    @Config("hive.delegate-transactional-managed-table-location-to-metastore")
+    @ConfigDescription("When transactional, managed table is created via Trino the location will not be set in request sent to HMS and location will be determined by metastore; if this value is set to true, CREATE TABLE AS queries are not supported.")
+    public HiveConfig setDelegateTransactionalManagedTableLocationToMetastore(boolean delegateTransactionalManagedTableLocationToMetastore)
+    {
+        this.delegateTransactionalManagedTableLocationToMetastore = delegateTransactionalManagedTableLocationToMetastore;
+        return this;
+    }
+
+    public boolean isDelegateTransactionalManagedTableLocationToMetastore()
+    {
+        return delegateTransactionalManagedTableLocationToMetastore;
     }
 
     @Config("hive.transaction-heartbeat-interval")
@@ -975,6 +1108,21 @@ public class HiveConfig
         return this;
     }
 
+    public Set<String> getQueryPartitionFilterRequiredSchemas()
+    {
+        return queryPartitionFilterRequiredSchemas;
+    }
+
+    @Config("hive.query-partition-filter-required-schemas")
+    @ConfigDescription("List of schemas for which filter on partition column is enforced")
+    public HiveConfig setQueryPartitionFilterRequiredSchemas(List<String> queryPartitionFilterRequiredSchemas)
+    {
+        this.queryPartitionFilterRequiredSchemas = queryPartitionFilterRequiredSchemas.stream()
+                .map(value -> value.toLowerCase(ENGLISH))
+                .collect(toImmutableSet());
+        return this;
+    }
+
     public boolean isProjectionPushdownEnabled()
     {
         return projectionPushdownEnabled;
@@ -989,16 +1137,17 @@ public class HiveConfig
     }
 
     @NotNull
-    public Duration getDynamicFilteringProbeBlockingTimeout()
+    public Duration getDynamicFilteringWaitTimeout()
     {
-        return dynamicFilteringProbeBlockingTimeout;
+        return dynamicFilteringWaitTimeout;
     }
 
-    @Config("hive.dynamic-filtering-probe-blocking-timeout")
-    @ConfigDescription("Duration to wait for completion of dynamic filters during split generation for probe side table")
-    public HiveConfig setDynamicFilteringProbeBlockingTimeout(Duration dynamicFilteringProbeBlockingTimeout)
+    @Config("hive.dynamic-filtering.wait-timeout")
+    @LegacyConfig("hive.dynamic-filtering-probe-blocking-timeout")
+    @ConfigDescription("Duration to wait for completion of dynamic filters during split generation")
+    public HiveConfig setDynamicFilteringWaitTimeout(Duration dynamicFilteringWaitTimeout)
     {
-        this.dynamicFilteringProbeBlockingTimeout = dynamicFilteringProbeBlockingTimeout;
+        this.dynamicFilteringWaitTimeout = dynamicFilteringWaitTimeout;
         return this;
     }
 
@@ -1015,29 +1164,121 @@ public class HiveConfig
         return this;
     }
 
-    public boolean isOptimizeSymlinkListing()
+    public Optional<String> getIcebergCatalogName()
     {
-        return this.optimizeSymlinkListing;
+        return icebergCatalogName;
     }
 
-    @Config("hive.optimize-symlink-listing")
-    @ConfigDescription("Optimize listing for SymlinkTextFormat tables with files in a single directory")
-    public HiveConfig setOptimizeSymlinkListing(boolean optimizeSymlinkListing)
+    @Config("hive.iceberg-catalog-name")
+    @ConfigDescription("The catalog to redirect iceberg tables to")
+    public HiveConfig setIcebergCatalogName(String icebergCatalogName)
     {
-        this.optimizeSymlinkListing = optimizeSymlinkListing;
+        this.icebergCatalogName = Optional.ofNullable(icebergCatalogName);
         return this;
     }
 
-    @Config("hive.legacy-hive-view-translation")
-    @ConfigDescription("Use legacy Hive view translation mechanism")
-    public HiveConfig setLegacyHiveViewTranslation(boolean legacyHiveViewTranslation)
+    @Config("hive.size-based-split-weights-enabled")
+    public HiveConfig setSizeBasedSplitWeightsEnabled(boolean sizeBasedSplitWeightsEnabled)
     {
-        this.legacyHiveViewTranslation = legacyHiveViewTranslation;
+        this.sizeBasedSplitWeightsEnabled = sizeBasedSplitWeightsEnabled;
         return this;
     }
 
-    public boolean isLegacyHiveViewTranslation()
+    public boolean isSizeBasedSplitWeightsEnabled()
     {
-        return this.legacyHiveViewTranslation;
+        return sizeBasedSplitWeightsEnabled;
+    }
+
+    @Config("hive.minimum-assigned-split-weight")
+    @ConfigDescription("Minimum weight that a split can be assigned when size based split weights are enabled")
+    public HiveConfig setMinimumAssignedSplitWeight(double minimumAssignedSplitWeight)
+    {
+        this.minimumAssignedSplitWeight = minimumAssignedSplitWeight;
+        return this;
+    }
+
+    @DecimalMax("1")
+    @DecimalMin(value = "0", inclusive = false)
+    public double getMinimumAssignedSplitWeight()
+    {
+        return minimumAssignedSplitWeight;
+    }
+
+    public Optional<String> getDeltaLakeCatalogName()
+    {
+        return deltaLakeCatalogName;
+    }
+
+    @Config("hive.delta-lake-catalog-name")
+    @ConfigDescription("Catalog to redirect to when a Delta Lake table is referenced")
+    public HiveConfig setDeltaLakeCatalogName(String deltaLakeCatalogName)
+    {
+        this.deltaLakeCatalogName = Optional.ofNullable(deltaLakeCatalogName);
+        return this;
+    }
+
+    public Optional<String> getHudiCatalogName()
+    {
+        return hudiCatalogName;
+    }
+
+    @Config("hive.hudi-catalog-name")
+    @ConfigDescription("Catalog to redirect to when a Hudi table is referenced")
+    public HiveConfig setHudiCatalogName(String hudiCatalogName)
+    {
+        this.hudiCatalogName = Optional.ofNullable(hudiCatalogName);
+        return this;
+    }
+
+    public boolean isAutoPurge()
+    {
+        return this.autoPurge;
+    }
+
+    @Config("hive.auto-purge")
+    public HiveConfig setAutoPurge(boolean autoPurge)
+    {
+        this.autoPurge = autoPurge;
+        return this;
+    }
+
+    public boolean isPartitionProjectionEnabled()
+    {
+        return partitionProjectionEnabled;
+    }
+
+    @Config("hive.partition-projection-enabled")
+    @ConfigDescription("Enables AWS Athena partition projection")
+    public HiveConfig setPartitionProjectionEnabled(boolean enabledAthenaPartitionProjection)
+    {
+        this.partitionProjectionEnabled = enabledAthenaPartitionProjection;
+        return this;
+    }
+
+    public S3StorageClassFilter getS3StorageClassFilter()
+    {
+        return s3StorageClassFilter;
+    }
+
+    @Config("hive.s3.storage-class-filter")
+    @ConfigDescription("Filter based on storage class of S3 object")
+    public HiveConfig setS3StorageClassFilter(S3StorageClassFilter s3StorageClassFilter)
+    {
+        this.s3StorageClassFilter = s3StorageClassFilter;
+        return this;
+    }
+
+    @Min(1)
+    public int getMetadataParallelism()
+    {
+        return metadataParallelism;
+    }
+
+    @ConfigDescription("Limits metadata enumeration calls parallelism")
+    @Config("hive.metadata.parallelism")
+    public HiveConfig setMetadataParallelism(int metadataParallelism)
+    {
+        this.metadataParallelism = metadataParallelism;
+        return this;
     }
 }

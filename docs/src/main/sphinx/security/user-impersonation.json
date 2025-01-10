@@ -1,22 +1,22 @@
 {
     "impersonation": [
         {
-            "original_user": "alice",
+            "original_role": "admin",
             "new_user": "bob",
             "allow": false
         },
         {
-            "original_user": "bob",
-            "new_user": "alice",
-            "allow": false
-        },
-        {
-            "original_user": "alice|bob",
+            "original_role": "admin",
             "new_user": ".*"
         },
         {
             "original_user": ".*",
             "new_user": "test"
+        },
+        {
+            "original_user": "team_(.*)",
+            "new_user": "team_$1_sandbox",
+            "allow": true
         }
     ]
 }

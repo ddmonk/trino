@@ -17,11 +17,17 @@ import com.google.common.collect.ImmutableList;
 import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
+import static io.trino.SystemSessionProperties.PREFER_PARTIAL_AGGREGATION;
+import static io.trino.SystemSessionProperties.USE_PARTIAL_DISTINCT_LIMIT;
+import static io.trino.SystemSessionProperties.USE_PARTIAL_TOPN;
 import static io.trino.tpch.TpchTable.NATION;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestShowStats
         extends AbstractTestQueryFramework
 {
@@ -32,11 +38,11 @@ public class TestShowStats
         return HiveQueryRunner.builder()
                 // create nation so tpch schema got created
                 .setInitialTables(ImmutableList.of(NATION))
-                .setNodeCount(1)
+                .setWorkerCount(0)
                 .build();
     }
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         assertUpdate("CREATE TABLE nation_partitioned(nationkey BIGINT, name VARCHAR, comment VARCHAR, regionkey BIGINT) WITH (partitioned_by = ARRAY['regionkey'])");
@@ -225,6 +231,111 @@ public class TestShowStats
     }
 
     @Test
+    public void testShowStatsWithBoolean()
+    {
+        assertQuery(
+                "SHOW STATS FOR (VALUES true)",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, 'true', 'true'), " +
+                        "   (null, null, null, null, 1, null, null)");
+        assertQuery(
+                "SHOW STATS FOR (VALUES false)",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, 'false', 'false'), " +
+                        "   (null, null, null, null, 1, null, null)");
+        assertQuery(
+                "SHOW STATS FOR (VALUES true, false)",
+                "VALUES " +
+                        "   ('_col0', null, 2, 0, null, 'false', 'true'), " +
+                        "   (null, null, null, null, 2, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithTimestamp()
+    {
+        // precision 0
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00', '2021-07-20 16:52:00'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 3
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123', '2021-07-20 16:52:00.123'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 6
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123456')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123456', '2021-07-20 16:52:00.123456'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 9
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123456789')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123456', '2021-07-20 16:52:00.123456'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 12
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123456789012')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123456', '2021-07-20 16:52:00.123456'), " +
+                        "   (null, null, null, null, 1, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithTimestampWithTimeZone()
+    {
+        // precision 0
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00 UTC')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00 UTC', '2021-07-20 16:52:00 UTC'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 3
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123 UTC')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123 UTC', '2021-07-20 16:52:00.123 UTC'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 6
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123999 UTC')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123 UTC', '2021-07-20 16:52:00.123 UTC'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 9
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123999999 UTC')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123 UTC', '2021-07-20 16:52:00.123 UTC'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // precision 12
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123999999999 UTC')",
+                "VALUES " +
+                        "   ('_col0', null, 1, 0, null, '2021-07-20 16:52:00.123 UTC', '2021-07-20 16:52:00.123 UTC'), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        // non-UTC zone, min < max
+        assertQuery(
+                "SHOW STATS FOR (VALUES TIMESTAMP '2021-07-20 16:52:00.123456789 Europe/Warsaw', TIMESTAMP '2021-07-20 16:52:00.123456789 America/Los_Angeles')",
+                "VALUES " +
+                        "   ('_col0', null, 2, 0, null, '2021-07-20 14:52:00.123 UTC', '2021-07-20 23:52:00.123 UTC'), " +
+                        "   (null, null, null, null, 2, null, null)");
+    }
+
+    @Test
     public void testShowStatsWithoutFrom()
     {
         assertQuery(
@@ -335,14 +446,84 @@ public class TestShowStats
     }
 
     @Test
+    public void testShowStatsWithValues()
+    {
+        assertQuery(
+                "SHOW STATS FOR (VALUES 1, 2, 3)",
+                "VALUES " +
+                        "   ('_col0', null, 3, 0, null, 1, 3), " +
+                        "   (null, null, null, null, 3, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithTable()
+    {
+        assertQuery(
+                "SHOW STATS FOR (TABLE nation)",
+                "VALUES " +
+                        "   ('nationkey', null, 25, 0, null, 0, 24), " +
+                        "   ('name', 177, 25, 0, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   ('comment', 1857, 25, 0, null, null, null), " +
+                        "   (null, null, null, null, 25, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithWith()
+    {
+        assertQuery(
+                "SHOW STATS FOR ( " +
+                        "   WITH t AS (SELECT nationkey, name, regionkey FROM nation) " +
+                        "   SELECT * FROM t)",
+                "VALUES " +
+                        "   ('nationkey', null, 25, 0, null, 0, 24), " +
+                        "   ('name', 177, 25, 0, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 25, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithIntersect()
+    {
+        assertQuery(
+                "SHOW STATS FOR ((SELECT nationkey FROM nation) INTERSECT (SELECT regionkey FROM region))",
+                "VALUES " +
+                        "   ('nationkey', null, 22.5, 0.0, null, 0, 24), " +
+                        "   (null, null, null, null, 22.5, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithAggregation()
+    {
+        assertQuery(
+                "SHOW STATS FOR (SELECT count(*) AS x FROM orders)",
+                "VALUES " +
+                        "   ('x', null, null, null, null, null, null), " +
+                        "   (null, null, null, null, 1, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), PREFER_PARTIAL_AGGREGATION, "false"),
+                "SHOW STATS FOR (SELECT count(*) AS x FROM orders)",
+                "VALUES " +
+                        "   ('x', null, null, null, null, null, null), " +
+                        "   (null, null, null, null, 1, null, null)");
+    }
+
+    @Test
     public void testShowStatsWithGroupBy()
     {
-        // TODO calculate row count - https://github.com/trinodb/trino/issues/6323
         assertQuery(
                 "SHOW STATS FOR (SELECT avg(totalprice) AS x FROM orders GROUP BY orderkey)",
                 "VALUES " +
                         "   ('x', null, null, null, null, null, null), " +
-                        "   (null, null, null, null, null, null, null)");
+                        "   (null, null, null, null, 15000.0, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), PREFER_PARTIAL_AGGREGATION, "false"),
+                "SHOW STATS FOR (SELECT avg(totalprice) AS x FROM orders GROUP BY orderkey)",
+                "VALUES " +
+                        "   ('x', null, null, null, null, null, null), " +
+                        "   (null, null, null, null, 15000, null, null)");
     }
 
     @Test
@@ -352,32 +533,112 @@ public class TestShowStats
                 "SHOW STATS FOR (SELECT count(nationkey) AS x FROM nation_partitioned GROUP BY regionkey HAVING regionkey > 0)",
                 "VALUES " +
                         "   ('x', null, null, null, null, null, null), " +
-                        "   (null, null, null, null, null, null, null)");
+                        "   (null, null, null, null, 4.0, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), PREFER_PARTIAL_AGGREGATION, "false"),
+                "SHOW STATS FOR (SELECT count(nationkey) AS x FROM nation_partitioned GROUP BY regionkey HAVING regionkey > 0)",
+                "VALUES " +
+                        "   ('x', null, null, null, null, null, null), " +
+                        "   (null, null, null, null, 4, null, null)");
     }
 
     @Test
     public void testShowStatsWithSelectDistinct()
     {
-        // TODO calculate row count - https://github.com/trinodb/trino/issues/6323
         assertQuery(
                 "SHOW STATS FOR (SELECT DISTINCT * FROM orders)",
                 "VALUES " +
-                        "   ('orderkey', null, null, null, null, null, null), " +
-                        "   ('custkey', null, null, null, null, null, null), " +
-                        "   ('orderstatus', null, null, null, null, null, null), " +
-                        "   ('totalprice', null, null, null, null, null, null), " +
-                        "   ('orderdate', null, null, null, null, null, null), " +
-                        "   ('orderpriority', null, null, null, null, null, null), " +
-                        "   ('clerk', null, null, null, null, null, null), " +
-                        "   ('shippriority', null, null, null, null, null, null), " +
-                        "   ('comment', null, null, null, null, null, null), " +
-                        "   (null, null, null, null, null, null, null)");
-        // TODO calculate row count - https://github.com/trinodb/trino/issues/6323
+                        "   ('orderkey', null, 15000.0, 0.0, null, '1', '60000'), " +
+                        "   ('custkey', null, 990.0, 0.0, null, '1', '1499'), " +
+                        "   ('orderstatus',  15000.0, 3.0, 0.0, null, null, null), " +
+                        "   ('totalprice', null, 15000.0, 0.0, null, '874.89', '466001.28'), " +
+                        "   ('orderdate', null, 2406.0, 0.0, null, '1992-01-01', '1998-08-02'), " +
+                        "   ('orderpriority', 126188.00000000001, 5.0, 0.0, null, null, null), " +
+                        "   ('clerk', 225000.0, 995.0, 0.0, null, null, null), " +
+                        "   ('shippriority', null, 1.0, 0.0, null, '0', '0'), " +
+                        "   ('comment', 727364.0, 15000.0, 0.0, null, null, null), " +
+                        "   (null, null, null, null, 15000.0, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), PREFER_PARTIAL_AGGREGATION, "false"),
+                "SHOW STATS FOR (SELECT DISTINCT orderkey, custkey, orderstatus, totalprice, clerk, shippriority, comment FROM orders)",
+                "VALUES " +
+                        "   ('orderkey', null, 15000, 0, null, 1, 60000), " +
+                        "   ('custkey', null, 990, 0, null, 1, 1499), " +
+                        "   ('orderstatus', 15000, 3, 0, null, null, null), " +
+                        "   ('totalprice', null, 15000, 0, null, 874.89, 466001.28), " +
+                        "   ('clerk', 225000, 995, 0, null, null, null), " +
+                        "   ('shippriority', null, 1, 0, null, 0, 0), " +
+                        "   ('comment', 727364, 15000, 0, null, null, null), " +
+                        "   (null, null, null, null, 15000, null, null)");
+
         assertQuery(
                 "SHOW STATS FOR (SELECT DISTINCT regionkey FROM region)",
                 "VALUES " +
+                        "   ('regionkey', null, 5.0, 0.0, null, 0, 4), " +
+                        "   (null, null, null, null, 5.0, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), PREFER_PARTIAL_AGGREGATION, "false"),
+                "SHOW STATS FOR (SELECT DISTINCT regionkey FROM region)",
+                "VALUES " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 5, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithDistinctLimit()
+    {
+        // TODO calculate row count - https://github.com/trinodb/trino/issues/6323
+        assertQuery(
+                "SHOW STATS FOR (SELECT DISTINCT regionkey FROM nation LIMIT 3)",
+                "VALUES " +
                         "   ('regionkey', null, null, null, null, null, null), " +
                         "   (null, null, null, null, null, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), USE_PARTIAL_DISTINCT_LIMIT, "false"),
+                "SHOW STATS FOR (SELECT DISTINCT regionkey FROM nation LIMIT 3)",
+                "VALUES " +
+                        "   ('regionkey', null, 3, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 3, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithLimit()
+    {
+        assertQuery(
+                "SHOW STATS FOR (SELECT * FROM nation LIMIT 7)",
+                "VALUES " +
+                        "   ('nationkey', null, 7, 0, null, 0, 24), " +
+                        "   ('name', 49.56, 7, 0, null, null, null), " +
+                        "   ('comment', 519.96, 7, 0, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 7, null, null)");
+    }
+
+    @Test
+    public void testShowStatsWithTopN()
+    {
+        assertQuery(
+                "SHOW STATS FOR (SELECT * FROM nation ORDER BY nationkey LIMIT 7)",
+                "VALUES " +
+                        "   ('nationkey', null, 7, 0, null, 0, 24), " +
+                        "   ('name', 49.56, 7, 0, null, null, null), " +
+                        "   ('comment', 519.96, 7, 0, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 7, null, null)");
+
+        assertQuery(
+                sessionWith(getSession(), USE_PARTIAL_TOPN, "false"),
+                "SHOW STATS FOR (SELECT * FROM nation ORDER BY nationkey LIMIT 7)",
+                "VALUES " +
+                        "   ('nationkey', null, 7, 0, null, 0, 24), " +
+                        "   ('name', 49.56, 7, 0, null, null, null), " +
+                        "   ('comment', 519.96, 7, 0, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, 7, null, null)");
     }
 
     @Test
@@ -388,12 +649,6 @@ public class TestShowStats
                 "VALUES " +
                         "   ('x', null, null, null, null, null, null), " +
                         "   (null, null, null, null, 15000, null, null)");
-        // TODO - row count should be 1 - https://github.com/trinodb/trino/issues/6323
-        assertQuery(
-                "SHOW STATS FOR (SELECT count(*) AS x FROM orders)",
-                "VALUES " +
-                        "   ('x', null, null, null, null, null, null), " +
-                        "   (null, null, null, null, null, null, null)");
     }
 
     @Test
@@ -426,10 +681,10 @@ public class TestShowStats
         assertQuery(
                 "SHOW STATS FOR (SELECT * FROM nation_partitioned WHERE sin(regionkey) > 0)",
                 "VALUES " +
-                        "   ('nationkey', null, null, null, null, null, null), " +
-                        "   ('name', null, null, null, null, null, null), " +
-                        "   ('comment', null, null, null, null, null, null), " +
-                        "   ('regionkey', null, null, null, null, null, null), " +
+                        "   ('nationkey', null, 5, 0, null, 1, 24), " +
+                        "   ('name', null, 5, 0, null, null, null), " +
+                        "   ('comment', null, 5, 0, null, null, null), " +
+                        "   ('regionkey', null, 3, 0, null, 1, 3), " +
                         "   (null, null, null, null, null, null, null)");
     }
 
@@ -448,11 +703,39 @@ public class TestShowStats
         assertQuery(
                 "SHOW STATS FOR (SELECT * FROM nation_view WHERE regionkey = 0)",
                 "VALUES " +
-                        "   ('nationkey', null, 1, 0, null, 0, 24), " +
-                        "   ('name', 7.08, 1, 0, null, null, null), " +
-                        "   ('comment', 74.28, 1, 0, null, null, null), " +
-                        "   ('regionkey', null, 1, 0, null, 0, 0), " +
-                        "   (null, null, null, null, 1, null, null)");
+                        "   ('nationkey', null, 0.29906975624424414, 0, null, 0, 24), " +
+                        "   ('name', 2.1174138742092485, 0.29906975624424414, 0, null, null, null), " +
+                        "   ('comment', 22.214901493822456, 0.29906975624424414, 0, null, null, null), " +
+                        "   ('regionkey', null, 0.29906975624424414, 0, null, 0, 0), " +
+                        "   (null, null, null, null, 0.29906975624424414, null, null)");
         assertUpdate("DROP VIEW nation_view");
+    }
+
+    @Test
+    public void testShowStatsForPartitionedTableWhenStatisticsAreAbsentInMetastore()
+    {
+        Session session = Session.builder(getSession())
+                .setCatalogSessionProperty("hive", "collect_column_statistics_on_write", "false")
+                .build();
+        assertUpdate(session, "CREATE TABLE nation_partitioned_without_stats(nationkey BIGINT, name VARCHAR, comment VARCHAR, regionkey BIGINT) WITH (partitioned_by = ARRAY['regionkey'])");
+        assertUpdate(session, "INSERT INTO nation_partitioned_without_stats SELECT nationkey, name, comment, regionkey FROM tpch.tiny.nation", 25);
+        assertUpdate("CALL system.drop_stats('tpch', 'nation_partitioned_without_stats')");
+        assertQuery(
+                "SHOW STATS FOR (SELECT * FROM nation_partitioned_without_stats)",
+                "VALUES " +
+                        "   ('nationkey', null, null, null, null, null, null), " +
+                        "   ('name', null, null, null, null, null, null), " +
+                        "   ('comment', null, null, null, null, null, null), " +
+                        "   ('regionkey', null, 5, 0, null, 0, 4), " +
+                        "   (null, null, null, null, null, null, null)");
+
+        assertUpdate("DROP TABLE nation_partitioned_without_stats");
+    }
+
+    private static Session sessionWith(Session base, String property, String value)
+    {
+        return Session.builder(base)
+                .setSystemProperty(property, value)
+                .build();
     }
 }

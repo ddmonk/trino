@@ -13,16 +13,25 @@
  */
 package io.trino.connector;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.base.security.AllowAllAccessControl;
+import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
+import io.trino.spi.security.ViewExpression;
 
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.spi.security.AccessDeniedException.denyGrantSchemaPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantTablePrivilege;
@@ -37,11 +46,19 @@ class MockConnectorAccessControl
 
     private final Grants<String> schemaGrants;
     private final Grants<SchemaTableName> tableGrants;
+    private final Function<SchemaTableName, ViewExpression> rowFilters;
+    private final BiFunction<SchemaTableName, String, ViewExpression> columnMasks;
 
-    MockConnectorAccessControl(Grants<String> schemaGrants, Grants<SchemaTableName> tableGrants)
+    MockConnectorAccessControl(
+            Grants<String> schemaGrants,
+            Grants<SchemaTableName> tableGrants,
+            Function<SchemaTableName, ViewExpression> rowFilters,
+            BiFunction<SchemaTableName, String, ViewExpression> columnMasks)
     {
         this.schemaGrants = requireNonNull(schemaGrants, "schemaGrants is null");
         this.tableGrants = requireNonNull(tableGrants, "tableGrants is null");
+        this.rowFilters = requireNonNull(rowFilters, "rowFilters is null");
+        this.columnMasks = requireNonNull(columnMasks, "columnMasks is null");
     }
 
     @Override
@@ -58,6 +75,12 @@ class MockConnectorAccessControl
         if (!schemaGrants.canGrant(context.getIdentity().getUser(), schemaName, privilege)) {
             denyGrantSchemaPrivilege(privilege.toString(), schemaName);
         }
+    }
+
+    @Override
+    public void checkCanDenySchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -86,12 +109,35 @@ class MockConnectorAccessControl
     }
 
     @Override
+    public void checkCanDenyTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void checkCanRevokeTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal revokee, boolean grantOption)
     {
         String user = context.getIdentity().getUser();
         if (!schemaGrants.canGrant(user, tableName.getSchemaName(), privilege) && !tableGrants.canGrant(user, tableName, privilege)) {
             denyRevokeTablePrivilege(privilege.toString(), tableName.toString());
         }
+    }
+
+    @Override
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        return Optional.ofNullable(rowFilters.apply(tableName))
+                .map(ImmutableList::of)
+                .orElseGet(ImmutableList::of);
+    }
+
+    @Override
+    public Map<ColumnSchema, ViewExpression> getColumnMasks(ConnectorSecurityContext context, SchemaTableName tableName, List<ColumnSchema> columns)
+    {
+        return columns.stream()
+                .map(column -> Map.entry(column, Optional.ofNullable(columnMasks.apply(tableName, column.getName()))))
+                .filter(entry -> entry.getValue().isPresent())
+                .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().orElseThrow()));
     }
 
     public void grantSchemaPrivileges(String schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption)

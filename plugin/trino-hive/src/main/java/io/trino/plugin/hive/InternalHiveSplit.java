@@ -14,52 +14,51 @@
 package io.trino.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.trino.annotation.NotThreadSafe;
+import io.trino.metastore.HiveTypeName;
 import io.trino.plugin.hive.HiveSplit.BucketConversion;
 import io.trino.plugin.hive.HiveSplit.BucketValidation;
 import io.trino.spi.HostAddress;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.concurrent.NotThreadSafe;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.Properties;
+import java.util.function.BooleanSupplier;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 @NotThreadSafe
 public class InternalHiveSplit
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(InternalHiveSplit.class).instanceSize() +
-            ClassLayout.parseClass(String.class).instanceSize() +
-            ClassLayout.parseClass(Properties.class).instanceSize() +
-            ClassLayout.parseClass(String.class).instanceSize() +
-            ClassLayout.parseClass(OptionalInt.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(InternalHiveSplit.class) + instanceSize(OptionalInt.class);
+    private static final int INTEGER_INSTANCE_SIZE = instanceSize(Integer.class);
 
     private final String path;
     private final long end;
     private final long estimatedFileSize;
     private final long fileModifiedTime;
-    private final Properties schema;
+    private final Schema schema;
     private final List<HivePartitionKey> partitionKeys;
     private final List<InternalHiveBlock> blocks;
     private final String partitionName;
-    private final OptionalInt bucketNumber;
-    private final int statementId;
+    private final OptionalInt readBucketNumber;
+    private final OptionalInt tableBucketNumber;
     private final boolean splittable;
     private final boolean forceLocalScheduling;
-    private final TableToPartitionMapping tableToPartitionMapping;
+    private final Map<Integer, HiveTypeName> hiveColumnCoercions;
     private final Optional<BucketConversion> bucketConversion;
     private final Optional<BucketValidation> bucketValidation;
-    private final boolean s3SelectPushdownEnabled;
     private final Optional<AcidInfo> acidInfo;
+    private final BooleanSupplier partitionMatchSupplier;
 
     private long start;
     private int currentBlockIndex;
@@ -71,18 +70,18 @@ public class InternalHiveSplit
             long end,
             long estimatedFileSize,
             long fileModifiedTime,
-            Properties schema,
+            Schema schema,
             List<HivePartitionKey> partitionKeys,
             List<InternalHiveBlock> blocks,
-            OptionalInt bucketNumber,
-            int statementId,
+            OptionalInt readBucketNumber,
+            OptionalInt tableBucketNumber,
             boolean splittable,
             boolean forceLocalScheduling,
-            TableToPartitionMapping tableToPartitionMapping,
+            Map<Integer, HiveTypeName> hiveColumnCoercions,
             Optional<BucketConversion> bucketConversion,
             Optional<BucketValidation> bucketValidation,
-            boolean s3SelectPushdownEnabled,
-            Optional<AcidInfo> acidInfo)
+            Optional<AcidInfo> acidInfo,
+            BooleanSupplier partitionMatchSupplier)
     {
         checkArgument(start >= 0, "start must be positive");
         checkArgument(end >= 0, "length must be positive");
@@ -92,11 +91,13 @@ public class InternalHiveSplit
         requireNonNull(schema, "schema is null");
         requireNonNull(partitionKeys, "partitionKeys is null");
         requireNonNull(blocks, "blocks is null");
-        requireNonNull(bucketNumber, "bucketNumber is null");
-        requireNonNull(tableToPartitionMapping, "tableToPartitionMapping is null");
+        requireNonNull(readBucketNumber, "readBucketNumber is null");
+        requireNonNull(tableBucketNumber, "tableBucketNumber is null");
+        requireNonNull(hiveColumnCoercions, "hiveColumnCoercions is null");
         requireNonNull(bucketConversion, "bucketConversion is null");
         requireNonNull(bucketValidation, "bucketValidation is null");
         requireNonNull(acidInfo, "acidInfo is null");
+        requireNonNull(partitionMatchSupplier, "partitionMatchSupplier is null");
 
         this.partitionName = partitionName;
         this.path = path;
@@ -107,15 +108,15 @@ public class InternalHiveSplit
         this.schema = schema;
         this.partitionKeys = ImmutableList.copyOf(partitionKeys);
         this.blocks = ImmutableList.copyOf(blocks);
-        this.bucketNumber = bucketNumber;
-        this.statementId = statementId;
+        this.readBucketNumber = readBucketNumber;
+        this.tableBucketNumber = tableBucketNumber;
         this.splittable = splittable;
         this.forceLocalScheduling = forceLocalScheduling;
-        this.tableToPartitionMapping = tableToPartitionMapping;
+        this.hiveColumnCoercions = ImmutableMap.copyOf(hiveColumnCoercions);
         this.bucketConversion = bucketConversion;
         this.bucketValidation = bucketValidation;
-        this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
         this.acidInfo = acidInfo;
+        this.partitionMatchSupplier = partitionMatchSupplier;
     }
 
     public String getPath()
@@ -143,12 +144,7 @@ public class InternalHiveSplit
         return fileModifiedTime;
     }
 
-    public boolean isS3SelectPushdownEnabled()
-    {
-        return s3SelectPushdownEnabled;
-    }
-
-    public Properties getSchema()
+    public Schema getSchema()
     {
         return schema;
     }
@@ -163,14 +159,14 @@ public class InternalHiveSplit
         return partitionName;
     }
 
-    public OptionalInt getBucketNumber()
+    public OptionalInt getReadBucketNumber()
     {
-        return bucketNumber;
+        return readBucketNumber;
     }
 
-    public int getStatementId()
+    public OptionalInt getTableBucketNumber()
     {
-        return statementId;
+        return tableBucketNumber;
     }
 
     public boolean isSplittable()
@@ -183,9 +179,9 @@ public class InternalHiveSplit
         return forceLocalScheduling;
     }
 
-    public TableToPartitionMapping getTableToPartitionMapping()
+    public Map<Integer, HiveTypeName> getHiveColumnCoercions()
     {
-        return tableToPartitionMapping;
+        return hiveColumnCoercions;
     }
 
     public Optional<BucketConversion> getBucketConversion()
@@ -225,16 +221,21 @@ public class InternalHiveSplit
     {
         long result = INSTANCE_SIZE +
                 estimatedSizeOf(path) +
-                estimatedSizeOf(partitionKeys, HivePartitionKey::getEstimatedSizeInBytes) +
+                estimatedSizeOf(partitionKeys, HivePartitionKey::estimatedSizeInBytes) +
                 estimatedSizeOf(blocks, InternalHiveBlock::getEstimatedSizeInBytes) +
                 estimatedSizeOf(partitionName) +
-                tableToPartitionMapping.getEstimatedSizeInBytes();
+                estimatedSizeOf(hiveColumnCoercions, (Integer key) -> INTEGER_INSTANCE_SIZE, HiveTypeName::getEstimatedSizeInBytes);
         return toIntExact(result);
     }
 
     public Optional<AcidInfo> getAcidInfo()
     {
         return acidInfo;
+    }
+
+    public BooleanSupplier getPartitionMatchSupplier()
+    {
+        return partitionMatchSupplier;
     }
 
     @Override
@@ -250,9 +251,8 @@ public class InternalHiveSplit
 
     public static class InternalHiveBlock
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(InternalHiveBlock.class).instanceSize();
-        private static final int HOST_ADDRESS_INSTANCE_SIZE = ClassLayout.parseClass(HostAddress.class).instanceSize() +
-                ClassLayout.parseClass(String.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(InternalHiveBlock.class);
+        private static final int HOST_ADDRESS_INSTANCE_SIZE = instanceSize(HostAddress.class);
 
         private final long start;
         private final long end;

@@ -13,19 +13,26 @@
  */
 package io.trino.plugin.elasticsearch;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 
-import java.util.Objects;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
-public final class ElasticsearchTableHandle
+public record ElasticsearchTableHandle(
+        Type type,
+        String schema,
+        String index,
+        TupleDomain<ColumnHandle> constraint,
+        Map<String, String> regexes,
+        Optional<String> query,
+        OptionalLong limit)
         implements ConnectorTableHandle
 {
     public enum Type
@@ -33,99 +40,27 @@ public final class ElasticsearchTableHandle
         SCAN, QUERY
     }
 
-    private final Type type;
-    private final String schema;
-    private final String index;
-    private final TupleDomain<ColumnHandle> constraint;
-    private final Optional<String> query;
-    private final OptionalLong limit;
-
     public ElasticsearchTableHandle(Type type, String schema, String index, Optional<String> query)
     {
-        this.type = requireNonNull(type, "type is null");
-        this.schema = requireNonNull(schema, "schema is null");
-        this.index = requireNonNull(index, "index is null");
-        this.query = requireNonNull(query, "query is null");
-
-        constraint = TupleDomain.all();
-        limit = OptionalLong.empty();
+        this(
+                type,
+                schema,
+                index,
+                TupleDomain.all(),
+                ImmutableMap.of(),
+                query,
+                OptionalLong.empty());
     }
 
-    @JsonCreator
-    public ElasticsearchTableHandle(
-            @JsonProperty("type") Type type,
-            @JsonProperty("schema") String schema,
-            @JsonProperty("index") String index,
-            @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint,
-            @JsonProperty("query") Optional<String> query,
-            @JsonProperty("limit") OptionalLong limit)
+    public ElasticsearchTableHandle
     {
-        this.type = requireNonNull(type, "type is null");
-        this.schema = requireNonNull(schema, "schema is null");
-        this.index = requireNonNull(index, "index is null");
-        this.constraint = requireNonNull(constraint, "constraint is null");
-        this.query = requireNonNull(query, "query is null");
-        this.limit = requireNonNull(limit, "limit is null");
-    }
-
-    @JsonProperty
-    public Type getType()
-    {
-        return type;
-    }
-
-    @JsonProperty
-    public String getSchema()
-    {
-        return schema;
-    }
-
-    @JsonProperty
-    public String getIndex()
-    {
-        return index;
-    }
-
-    @JsonProperty
-    public TupleDomain<ColumnHandle> getConstraint()
-    {
-        return constraint;
-    }
-
-    @JsonProperty
-    public OptionalLong getLimit()
-    {
-        return limit;
-    }
-
-    @JsonProperty
-    public Optional<String> getQuery()
-    {
-        return query;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        ElasticsearchTableHandle that = (ElasticsearchTableHandle) o;
-        return type == that.type &&
-                schema.equals(that.schema) &&
-                index.equals(that.index) &&
-                constraint.equals(that.constraint) &&
-                query.equals(that.query) &&
-                limit.equals(that.limit);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(type, schema, index, constraint, query, limit);
+        requireNonNull(type, "type is null");
+        requireNonNull(schema, "schema is null");
+        requireNonNull(index, "index is null");
+        requireNonNull(constraint, "constraint is null");
+        regexes = ImmutableMap.copyOf(requireNonNull(regexes, "regexes is null"));
+        requireNonNull(query, "query is null");
+        requireNonNull(limit, "limit is null");
     }
 
     @Override
@@ -135,6 +70,13 @@ public final class ElasticsearchTableHandle
         builder.append(type + ":" + index);
 
         StringBuilder attributes = new StringBuilder();
+        if (!regexes.isEmpty()) {
+            attributes.append("regexes=[");
+            attributes.append(regexes.entrySet().stream()
+                    .map(regex -> regex.getKey() + ":" + regex.getValue())
+                    .collect(Collectors.joining(", ")));
+            attributes.append("]");
+        }
         limit.ifPresent(value -> attributes.append("limit=" + value));
         query.ifPresent(value -> attributes.append("query" + value));
 

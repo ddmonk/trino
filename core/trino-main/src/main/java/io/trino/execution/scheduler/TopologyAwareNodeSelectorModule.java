@@ -17,7 +17,7 @@ import com.google.inject.Binder;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 
-import static io.airlift.configuration.ConditionalModule.installModuleIf;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.trino.execution.scheduler.TopologyAwareNodeSelectorConfig.TopologyType.FILE;
 import static io.trino.execution.scheduler.TopologyAwareNodeSelectorConfig.TopologyType.FLAT;
@@ -39,21 +39,22 @@ public class TopologyAwareNodeSelectorModule
 
     private void bindNetworkTopology()
     {
-        install(installModuleIf(
+        install(conditionalModule(
                 TopologyAwareNodeSelectorConfig.class,
                 config -> config.getType() == FLAT,
                 binder -> binder.bind(NetworkTopology.class).to(FlatNetworkTopology.class).in(Scopes.SINGLETON)));
 
-        install(installModuleIf(
+        install(conditionalModule(
                 TopologyAwareNodeSelectorConfig.class,
                 config -> config.getType() == FILE,
                 binder -> {
                     configBinder(binder).bindConfig(TopologyFileConfig.class);
                     binder.bind(NetworkTopology.class).to(FileBasedNetworkTopology.class).in(Scopes.SINGLETON);
+                    binder.bind(FileBasedNetworkTopology.class).in(Scopes.SINGLETON);
                     newExporter(binder).export(FileBasedNetworkTopology.class).withGeneratedName();
                 }));
 
-        install(installModuleIf(
+        install(conditionalModule(
                 TopologyAwareNodeSelectorConfig.class,
                 config -> config.getType() == SUBNET,
                 binder -> {

@@ -17,6 +17,8 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 
 import java.util.List;
@@ -26,31 +28,21 @@ import static java.util.Collections.singletonList;
 public class QuantileDigestType
         extends AbstractVariableWidthType
 {
-    private final Type type;
+    private final Type valueType;
 
     @JsonCreator
-    public QuantileDigestType(Type type)
+    public QuantileDigestType(Type valueType)
     {
-        super(new TypeSignature(StandardTypes.QDIGEST, TypeSignatureParameter.typeParameter(type.getTypeSignature())), Slice.class);
-        this.type = type;
-    }
-
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            block.writeBytesTo(position, 0, block.getSliceLength(position), blockBuilder);
-            blockBuilder.closeEntry();
-        }
+        super(new TypeSignature(StandardTypes.QDIGEST, TypeSignatureParameter.typeParameter(valueType.getTypeSignature())), Slice.class);
+        this.valueType = valueType;
     }
 
     @Override
     public Slice getSlice(Block block, int position)
     {
-        return block.getSlice(position, 0, block.getSliceLength(position));
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        return valueBlock.getSlice(valuePosition);
     }
 
     @Override
@@ -62,7 +54,7 @@ public class QuantileDigestType
     @Override
     public void writeSlice(BlockBuilder blockBuilder, Slice value, int offset, int length)
     {
-        blockBuilder.writeBytes(value, offset, length).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(value, offset, length);
     }
 
     @Override
@@ -72,12 +64,17 @@ public class QuantileDigestType
             return null;
         }
 
-        return new SqlVarbinary(block.getSlice(position, 0, block.getSliceLength(position)).getBytes());
+        return new SqlVarbinary(getSlice(block, position).getBytes());
+    }
+
+    public Type getValueType()
+    {
+        return valueType;
     }
 
     @Override
     public List<Type> getTypeParameters()
     {
-        return singletonList(type);
+        return singletonList(valueType);
     }
 }

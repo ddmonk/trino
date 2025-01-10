@@ -15,7 +15,7 @@ package io.trino.server;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -31,26 +31,32 @@ public class TestServerConfig
     {
         assertRecordedDefaults(recordDefaults(ServerConfig.class)
                 .setCoordinator(true)
+                .setConcurrentStartup(false)
                 .setIncludeExceptionInResponse(true)
                 .setGracePeriod(new Duration(2, MINUTES))
-                .setQueryResultsCompressionEnabled(true));
+                .setQueryResultsCompressionEnabled(true)
+                .setQueryInfoUrlTemplate(null));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("coordinator", "false")
+                .put("experimental.concurrent-startup", "true")
                 .put("http.include-exception-in-response", "false")
                 .put("shutdown.grace-period", "5m")
                 .put("query-results.compression-enabled", "false")
-                .build();
+                .put("query.info-url-template", "https://example.com/query/${QUERY_ID}")
+                .buildOrThrow();
 
         ServerConfig expected = new ServerConfig()
                 .setCoordinator(false)
+                .setConcurrentStartup(true)
                 .setIncludeExceptionInResponse(false)
                 .setGracePeriod(new Duration(5, MINUTES))
-                .setQueryResultsCompressionEnabled(false);
+                .setQueryResultsCompressionEnabled(false)
+                .setQueryInfoUrlTemplate("https://example.com/query/${QUERY_ID}");
 
         assertFullMapping(properties, expected);
     }

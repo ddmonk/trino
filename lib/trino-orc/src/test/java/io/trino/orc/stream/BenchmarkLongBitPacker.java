@@ -27,14 +27,10 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.orc.stream.TestingBitPackingUtils.unpackGeneric;
 
 @SuppressWarnings("MethodMayBeStatic")
@@ -219,9 +215,7 @@ public class BenchmarkLongBitPacker
         @Setup
         public void setup()
         {
-            byte[] bytes = new byte[256 * 64];
-            ThreadLocalRandom.current().nextBytes(bytes);
-            input = Slices.wrappedBuffer(bytes).getInput();
+            input = Slices.random(256 * 64).getInput();
         }
     }
 
@@ -233,10 +227,6 @@ public class BenchmarkLongBitPacker
         data.setup();
         new BenchmarkLongBitPacker().baselineLength256(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkLongBitPacker.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkLongBitPacker.class).run();
     }
 }

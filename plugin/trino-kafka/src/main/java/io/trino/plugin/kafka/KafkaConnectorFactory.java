@@ -13,29 +13,34 @@
  */
 package io.trino.plugin.kafka;
 
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.json.JsonModule;
+import io.trino.plugin.base.CatalogNameModule;
+import io.trino.plugin.base.TypeDeserializerModule;
+import io.trino.plugin.kafka.security.KafkaSecurityModule;
 import io.trino.spi.NodeManager;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
-import io.trino.spi.connector.ConnectorHandleResolver;
 import io.trino.spi.type.TypeManager;
 
+import java.util.List;
 import java.util.Map;
 
+import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
 import static java.util.Objects.requireNonNull;
 
 public class KafkaConnectorFactory
         implements ConnectorFactory
 {
-    private final Module extension;
+    private final List<Module> extensions;
 
-    public KafkaConnectorFactory(Module extension)
+    public KafkaConnectorFactory(List<Module> extensions)
     {
-        this.extension = requireNonNull(extension, "extension is null");
+        this.extensions = ImmutableList.copyOf(extensions);
     }
 
     @Override
@@ -45,29 +50,29 @@ public class KafkaConnectorFactory
     }
 
     @Override
-    public ConnectorHandleResolver getHandleResolver()
-    {
-        return new KafkaHandleResolver();
-    }
-
-    @Override
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
     {
         requireNonNull(catalogName, "catalogName is null");
         requireNonNull(config, "config is null");
+        checkStrictSpiVersionMatch(context, this);
 
         Bootstrap app = new Bootstrap(
-                new JsonModule(),
-                new KafkaConnectorModule(),
-                extension,
-                binder -> {
-                    binder.bind(ClassLoader.class).toInstance(KafkaConnectorFactory.class.getClassLoader());
-                    binder.bind(TypeManager.class).toInstance(context.getTypeManager());
-                    binder.bind(NodeManager.class).toInstance(context.getNodeManager());
-                });
+                ImmutableList.<Module>builder()
+                        .add(new CatalogNameModule(catalogName))
+                        .add(new JsonModule())
+                        .add(new TypeDeserializerModule(context.getTypeManager()))
+                        .add(new KafkaConnectorModule(context.getTypeManager()))
+                        .add(new KafkaClientsModule())
+                        .add(new KafkaSecurityModule())
+                        .add(binder -> {
+                            binder.bind(ClassLoader.class).toInstance(KafkaConnectorFactory.class.getClassLoader());
+                            binder.bind(TypeManager.class).toInstance(context.getTypeManager());
+                            binder.bind(NodeManager.class).toInstance(context.getNodeManager());
+                        })
+                        .addAll(extensions)
+                        .build());
 
         Injector injector = app
-                .strictConfig()
                 .doNotInitializeLogging()
                 .setRequiredConfigurationProperties(config)
                 .initialize();

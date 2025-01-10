@@ -13,12 +13,15 @@
  */
 package io.trino.client.auth.external;
 
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -32,10 +35,12 @@ import static java.net.HttpURLConnection.HTTP_GONE;
 import static java.net.HttpURLConnection.HTTP_OK;
 import static java.net.HttpURLConnection.HTTP_UNAVAILABLE;
 import static java.net.URI.create;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestHttpTokenPoller
 {
     private static final String TOKEN_PATH = "/v1/authentications/sso/test/token";
@@ -44,7 +49,7 @@ public class TestHttpTokenPoller
     private TokenPoller tokenPoller;
     private MockWebServer server;
 
-    @BeforeMethod(alwaysRun = true)
+    @BeforeEach
     public void setup()
             throws Exception
     {
@@ -56,7 +61,7 @@ public class TestHttpTokenPoller
                 .build());
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void teardown()
             throws IOException
     {
@@ -159,6 +164,44 @@ public class TestHttpTokenPoller
                 .hasMessageEndingWith(": timeout");
     }
 
+    @Test
+    public void testTokenReceived()
+            throws InterruptedException
+    {
+        server.enqueue(status(HTTP_OK));
+
+        tokenPoller.tokenReceived(tokenUri());
+
+        RecordedRequest request = server.takeRequest(1, MILLISECONDS);
+        assertThat(request.getMethod()).isEqualTo("DELETE");
+        assertThat(request.getRequestUrl()).isEqualTo(HttpUrl.get(tokenUri()));
+    }
+
+    @Test
+    public void testTokenReceivedRetriesUntilNotErrorReturned()
+    {
+        server.enqueue(status(HTTP_UNAVAILABLE));
+        server.enqueue(status(HTTP_UNAVAILABLE));
+        server.enqueue(status(HTTP_UNAVAILABLE));
+        server.enqueue(status(202));
+
+        tokenPoller.tokenReceived(tokenUri());
+
+        assertThat(server.getRequestCount()).isEqualTo(4);
+    }
+
+    @Test
+    public void testTokenReceivedDoesNotRetriesIndefinitely()
+    {
+        for (int i = 1; i <= 100; i++) {
+            server.enqueue(status(HTTP_UNAVAILABLE));
+        }
+
+        tokenPoller.tokenReceived(tokenUri());
+
+        assertThat(server.getRequestCount()).isLessThan(100);
+    }
+
     private URI tokenUri()
     {
         return create("http://" + server.getHostName() + ":" + server.getPort() + TOKEN_PATH);
@@ -175,5 +218,11 @@ public class TestHttpTokenPoller
                 .setResponseCode(status)
                 .addHeader(CONTENT_TYPE, JSON_UTF_8)
                 .setBody(body);
+    }
+
+    private static MockResponse status(int status)
+    {
+        return new MockResponse()
+                .setResponseCode(status);
     }
 }

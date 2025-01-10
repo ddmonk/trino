@@ -14,18 +14,17 @@
 package io.trino.tests.product.launcher.env.common;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.COORDINATOR;
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.HADOOP;
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.TESTS;
-import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TEMPTO_PROFILE_CONFIG;
+import static io.trino.tests.product.launcher.env.EnvironmentContainers.configureTempto;
 import static java.util.Objects.requireNonNull;
 import static org.testcontainers.utility.MountableFile.forHostPath;
 
@@ -43,28 +42,29 @@ public class HadoopKerberosKms
     {
         this.configDir = dockerFiles.getDockerFilesHostDirectory("common/hadoop-kerberos-kms/");
         this.hadoopKerberos = requireNonNull(hadoopKerberos, "hadoopKerberos is null");
-        requireNonNull(environmentConfig, "environmentOptions is null");
-        hadoopImagesVersion = requireNonNull(environmentConfig, "environmentConfig is null").getHadoopImagesVersion();
+        hadoopImagesVersion = environmentConfig.getHadoopImagesVersion();
     }
 
     @Override
     public void extendEnvironment(Environment.Builder builder)
     {
-        // TODO (https://github.com/trinodb/trino/issues/1652) create images with HDP and KMS
-        String dockerImageName = "ghcr.io/trinodb/testing/cdh5.15-hive-kerberized-kms:" + hadoopImagesVersion;
+        String dockerImageName = "ghcr.io/trinodb/testing/hdp3.1-hive-kerberized-kms:" + hadoopImagesVersion;
 
         builder.configureContainer(HADOOP, container -> {
             container.setDockerImageName(dockerImageName);
             container
-                    .withCopyFileToContainer(forHostPath(configDir.getPath("kms-core-site.xml")), "/etc/hadoop-kms/conf/core-site.xml");
+                    .withCopyFileToContainer(forHostPath(configDir.getPath("kms-core-site.xml")), "/opt/hadoop/etc/hadoop/core-site.xml");
         });
 
-        builder.configureContainer(COORDINATOR, container -> container.setDockerImageName(dockerImageName));
+        builder.configureContainer(COORDINATOR,
+                container -> container
+                        .withCopyFileToContainer(forHostPath(configDir.getPath("hive-disable-key-provider-cache-site.xml")), "/etc/hadoop-kms/conf/hive-disable-key-provider-cache-site.xml")
+                        .setDockerImageName(dockerImageName));
 
         builder.configureContainer(TESTS, container -> {
             container.setDockerImageName(dockerImageName);
-            container.withCopyFileToContainer(forHostPath(configDir.getPath("tempto-configuration.yaml")), CONTAINER_TEMPTO_PROFILE_CONFIG);
         });
+        configureTempto(builder, configDir);
     }
 
     @Override

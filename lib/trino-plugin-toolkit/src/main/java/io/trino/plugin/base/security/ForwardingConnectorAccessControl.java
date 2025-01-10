@@ -13,15 +13,19 @@
  */
 package io.trino.plugin.base.security;
 
+import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.SchemaRoutineName;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
 import io.trino.spi.type.Type;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -47,9 +51,9 @@ public abstract class ForwardingConnectorAccessControl
     protected abstract ConnectorAccessControl delegate();
 
     @Override
-    public void checkCanCreateSchema(ConnectorSecurityContext context, String schemaName)
+    public void checkCanCreateSchema(ConnectorSecurityContext context, String schemaName, Map<String, Object> properties)
     {
-        delegate().checkCanCreateSchema(context, schemaName);
+        delegate().checkCanCreateSchema(context, schemaName, properties);
     }
 
     @Override
@@ -95,9 +99,9 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
-    public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Object> properties)
     {
-        delegate().checkCanCreateTable(context, tableName);
+        delegate().checkCanCreateTable(context, tableName, properties);
     }
 
     @Override
@@ -113,9 +117,21 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
+    public void checkCanSetTableProperties(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Optional<Object>> properties)
+    {
+        delegate().checkCanSetTableProperties(context, tableName, properties);
+    }
+
+    @Override
     public void checkCanSetTableComment(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         delegate().checkCanSetTableComment(context, tableName);
+    }
+
+    @Override
+    public void checkCanSetViewComment(ConnectorSecurityContext context, SchemaTableName viewName)
+    {
+        delegate().checkCanSetViewComment(context, viewName);
     }
 
     @Override
@@ -143,9 +159,9 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
-    public Set<String> filterColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columns)
+    public Map<SchemaTableName, Set<String>> filterColumns(ConnectorSecurityContext context, Map<SchemaTableName, Set<String>> tableColumns)
     {
-        return delegate().filterColumns(context, tableName, columns);
+        return delegate().filterColumns(context, tableColumns);
     }
 
     @Override
@@ -164,6 +180,12 @@ public abstract class ForwardingConnectorAccessControl
     public void checkCanRenameColumn(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         delegate().checkCanRenameColumn(context, tableName);
+    }
+
+    @Override
+    public void checkCanAlterColumn(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        delegate().checkCanAlterColumn(context, tableName);
     }
 
     @Override
@@ -188,6 +210,12 @@ public abstract class ForwardingConnectorAccessControl
     public void checkCanDeleteFromTable(ConnectorSecurityContext context, SchemaTableName tableName)
     {
         delegate().checkCanDeleteFromTable(context, tableName);
+    }
+
+    @Override
+    public void checkCanTruncateTable(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        delegate().checkCanTruncateTable(context, tableName);
     }
 
     @Override
@@ -227,6 +255,36 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
+    public void checkCanCreateMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Object> properties)
+    {
+        delegate().checkCanCreateMaterializedView(context, materializedViewName, properties);
+    }
+
+    @Override
+    public void checkCanRefreshMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        delegate().checkCanRefreshMaterializedView(context, materializedViewName);
+    }
+
+    @Override
+    public void checkCanDropMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    {
+        delegate().checkCanDropMaterializedView(context, materializedViewName);
+    }
+
+    @Override
+    public void checkCanRenameMaterializedView(ConnectorSecurityContext context, SchemaTableName viewName, SchemaTableName newViewName)
+    {
+        delegate().checkCanRenameMaterializedView(context, viewName, newViewName);
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewProperties(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Optional<Object>> properties)
+    {
+        delegate().checkCanSetMaterializedViewProperties(context, materializedViewName, properties);
+    }
+
+    @Override
     public void checkCanSetCatalogSessionProperty(ConnectorSecurityContext context, String propertyName)
     {
         delegate().checkCanSetCatalogSessionProperty(context, propertyName);
@@ -239,6 +297,12 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
+    public void checkCanDenySchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenySchemaPrivilege(context, privilege, schemaName, grantee);
+    }
+
+    @Override
     public void checkCanRevokeSchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal revokee, boolean grantOption)
     {
         delegate().checkCanRevokeSchemaPrivilege(context, privilege, schemaName, revokee, grantOption);
@@ -248,6 +312,12 @@ public abstract class ForwardingConnectorAccessControl
     public void checkCanGrantTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal grantee, boolean grantOption)
     {
         delegate().checkCanGrantTablePrivilege(context, privilege, tableName, grantee, grantOption);
+    }
+
+    @Override
+    public void checkCanDenyTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenyTablePrivilege(context, privilege, tableName, grantee);
     }
 
     @Override
@@ -269,45 +339,47 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
-    public void checkCanGrantRoles(ConnectorSecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanGrantRoles(ConnectorSecurityContext context,
+            Set<String> roles,
+            Set<TrinoPrincipal> grantees,
+            boolean adminOption,
+            Optional<TrinoPrincipal> grantor)
     {
-        delegate().checkCanGrantRoles(context, roles, grantees, adminOption, grantor, catalogName);
+        delegate().checkCanGrantRoles(context, roles, grantees, adminOption, grantor);
     }
 
     @Override
-    public void checkCanRevokeRoles(ConnectorSecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanRevokeRoles(ConnectorSecurityContext context,
+            Set<String> roles,
+            Set<TrinoPrincipal> grantees,
+            boolean adminOption,
+            Optional<TrinoPrincipal> grantor)
     {
-        delegate().checkCanRevokeRoles(context, roles, grantees, adminOption, grantor, catalogName);
+        delegate().checkCanRevokeRoles(context, roles, grantees, adminOption, grantor);
     }
 
     @Override
-    public void checkCanSetRole(ConnectorSecurityContext context, String role, String catalogName)
+    public void checkCanSetRole(ConnectorSecurityContext context, String role)
     {
-        delegate().checkCanSetRole(context, role, catalogName);
+        delegate().checkCanSetRole(context, role);
     }
 
     @Override
-    public void checkCanShowRoleAuthorizationDescriptors(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowRoles(ConnectorSecurityContext context)
     {
-        delegate().checkCanShowRoleAuthorizationDescriptors(context, catalogName);
+        delegate().checkCanShowRoles(context);
     }
 
     @Override
-    public void checkCanShowRoles(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowCurrentRoles(ConnectorSecurityContext context)
     {
-        delegate().checkCanShowRoles(context, catalogName);
+        delegate().checkCanShowCurrentRoles(context);
     }
 
     @Override
-    public void checkCanShowCurrentRoles(ConnectorSecurityContext context, String catalogName)
+    public void checkCanShowRoleGrants(ConnectorSecurityContext context)
     {
-        delegate().checkCanShowCurrentRoles(context, catalogName);
-    }
-
-    @Override
-    public void checkCanShowRoleGrants(ConnectorSecurityContext context, String catalogName)
-    {
-        delegate().checkCanShowRoleGrants(context, catalogName);
+        delegate().checkCanShowRoleGrants(context);
     }
 
     @Override
@@ -317,14 +389,68 @@ public abstract class ForwardingConnectorAccessControl
     }
 
     @Override
-    public Optional<ViewExpression> getRowFilter(ConnectorSecurityContext context, SchemaTableName tableName)
+    public void checkCanExecuteTableProcedure(ConnectorSecurityContext context, SchemaTableName tableName, String procedure)
     {
-        return delegate().getRowFilter(context, tableName);
+        delegate().checkCanExecuteTableProcedure(context, tableName, procedure);
+    }
+
+    @Override
+    public boolean canExecuteFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        return delegate().canExecuteFunction(context, function);
+    }
+
+    @Override
+    public boolean canCreateViewWithExecuteFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        return delegate().canCreateViewWithExecuteFunction(context, function);
+    }
+
+    @Override
+    public void checkCanShowFunctions(ConnectorSecurityContext context, String schemaName)
+    {
+        delegate().checkCanShowFunctions(context, schemaName);
+    }
+
+    @Override
+    public Set<SchemaFunctionName> filterFunctions(ConnectorSecurityContext context, Set<SchemaFunctionName> functionNames)
+    {
+        return delegate().filterFunctions(context, functionNames);
+    }
+
+    @Override
+    public void checkCanCreateFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        delegate().checkCanCreateFunction(context, function);
+    }
+
+    @Override
+    public void checkCanDropFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        delegate().checkCanDropFunction(context, function);
+    }
+
+    @Override
+    public void checkCanShowCreateFunction(ConnectorSecurityContext context, SchemaRoutineName function)
+    {
+        delegate().checkCanShowCreateFunction(context, function);
+    }
+
+    @Override
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
+    {
+        return delegate().getRowFilters(context, tableName);
     }
 
     @Override
     public Optional<ViewExpression> getColumnMask(ConnectorSecurityContext context, SchemaTableName tableName, String columnName, Type type)
     {
         return delegate().getColumnMask(context, tableName, columnName, type);
+    }
+
+    @Override
+    public Map<ColumnSchema, ViewExpression> getColumnMasks(ConnectorSecurityContext context, SchemaTableName tableName, List<ColumnSchema> columns)
+    {
+        return delegate().getColumnMasks(context, tableName, columns);
     }
 }

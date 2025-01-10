@@ -18,32 +18,26 @@ import com.google.inject.Module;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
 
-import static java.util.Objects.requireNonNull;
+import java.util.List;
 
 public class KafkaPlugin
         implements Plugin
 {
-    public static final Module DEFAULT_EXTENSION = binder -> {
-        binder.install(new KafkaConsumerModule());
-        binder.install(new KafkaProducerModule());
-        binder.install(new KafkaAdminModule());
-    };
-
-    private final Module extension;
+    private final List<Module> extensions;
 
     public KafkaPlugin()
     {
-        this(DEFAULT_EXTENSION);
+        this(ImmutableList.of());
     }
 
-    public KafkaPlugin(Module extension)
+    public KafkaPlugin(List<Module> extensions)
     {
-        this.extension = requireNonNull(extension, "extension is null");
+        this.extensions = ImmutableList.copyOf(extensions);
     }
 
     @Override
     public synchronized Iterable<ConnectorFactory> getConnectorFactories()
     {
-        return ImmutableList.of(new KafkaConnectorFactory(extension));
+        return ImmutableList.of(new KafkaConnectorFactory(extensions));
     }
 }

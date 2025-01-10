@@ -13,29 +13,28 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import io.trino.Session;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
+import static io.trino.SystemSessionProperties.MAX_RECURSION_DEPTH;
 import static io.trino.SystemSessionProperties.getMaxRecursionDepth;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestRecursiveCte
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -185,12 +184,12 @@ public class TestRecursiveCte
 
         // result of step relation coerced from varchar(5) to varchar
         assertThat(assertions.query("WITH RECURSIVE t(n) AS (" +
-                "          SELECT CAST('ABCDE' AS varchar)" +
+                "          SELECT VARCHAR 'ABCDE'" +
                 "          UNION ALL" +
                 "          SELECT CAST(substr(n, 2) AS varchar(5)) FROM t WHERE n < 'E'" +
                 "          )" +
                 "          SELECT * from t"))
-                .matches("VALUES (CAST('ABCDE' AS varchar)), (CAST('BCDE' AS varchar)), (CAST('CDE' AS varchar)), (CAST('DE' AS varchar)), (CAST('E' AS varchar))");
+                .matches("VALUES (VARCHAR 'ABCDE'), (VARCHAR 'BCDE'), (VARCHAR 'CDE'), (VARCHAR 'DE'), (VARCHAR 'E')");
 
         //multiple coercions
         assertThat(assertions.query("WITH RECURSIVE t(n, m) AS (" +
@@ -276,12 +275,80 @@ public class TestRecursiveCte
     @Test
     public void testRecursionDepthLimitExceeded()
     {
-        assertThatThrownBy(() -> assertions.query("WITH RECURSIVE t(n) AS (" +
+        assertThat(assertions.query("WITH RECURSIVE t(n) AS (" +
                 "          SELECT 1" +
                 "          UNION ALL" +
                 "          SELECT * FROM t" +
                 "          )" +
                 "          SELECT * FROM t"))
-                .hasMessage("Recursion depth limit exceeded (%s). Use 'max_recursion_depth' session property to modify the limit.", getMaxRecursionDepth(assertions.getDefaultSession()));
+                .failure().hasMessage("Recursion depth limit exceeded (%s). Use 'max_recursion_depth' session property to modify the limit.", getMaxRecursionDepth(assertions.getDefaultSession()));
+    }
+
+    @Test
+    public void testDuplicateOutputsInAnchorAndStepRelation()
+    {
+        // This example tests recursive query with symbol ambiguity on different stages of recursion planning:
+        // - the base relation outputs the same symbol (`a`) twice, once as `a`, and once as `root_a`
+        // - the step relation in the first recursion step also outputs the same symbol twice:
+        // `T.orig_a` is the same as `CTE.root_a`, and the planner uses the same output symbol for both.
+        // In each case, such ambiguity is resolved by adding a disambiguating projection,
+        // so that the output consists of distinct symbols.
+        // This is necessary to successfully replace the part of the plan with another plan
+        // in the next recursion step. The replacement must fit in the output layout of the previous
+        // recursion step, without a constraint that certain outputs should be equal.
+        assertThat(assertions.query(
+                Session.builder(assertions.getDefaultSession())
+                        .setSystemProperty(MAX_RECURSION_DEPTH, "4")
+                        .build(),
+                "WITH RECURSIVE " +
+                        "        T(a, orig_a) AS (VALUES (1, 0), (2, 0), (3, 1), (4, 1), (5, 2), (6, 3), (7, 5)), " +
+                        "        CTE(a, orig_a, base_id, root_a) AS( " +
+                        "                                           SELECT a, orig_a, 'base_entry', a " +
+                        "                                               FROM T " +
+                        "                                               WHERE orig_a = 0 " +
+                        "                                           UNION ALL " +
+                        "                                           SELECT T.a, T.orig_a, 'derived', CTE.root_a " +
+                        "                                               FROM T " +
+                        "                                               INNER JOIN " +
+                        "                                               CTE " +
+                        "                                               ON CTE.a = T.orig_a " +
+                        "                                           ) " +
+                        "SELECT * FROM CTE"))
+                .matches("VALUES (1, 0, 'base_entry', 1), " +
+                        "        (2, 0, 'base_entry', 2), " +
+                        "        (3, 1, 'derived',    1), " +
+                        "        (4, 1, 'derived',    1), " +
+                        "        (5, 2, 'derived',    2), " +
+                        "        (6, 3, 'derived',    1), " +
+                        "        (7, 5, 'derived',    2)");
+    }
+
+    @Test
+    public void testLambda()
+    {
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(list) AS (
+                    SELECT ARRAY[0]
+                    UNION ALL
+                    SELECT list || 0
+                    FROM t
+                    WHERE any_match(list, x -> x = x) AND cardinality(list) < 4)
+                SELECT * FROM t
+                """))
+                .matches("VALUES (ARRAY[0]), (ARRAY[0, 0]), (ARRAY[0, 0, 0]), (ARRAY[0, 0, 0, 0])");
+
+        // lambda contains a symbol other than lambda argument (a)
+        assertThat(assertions.query(
+                """
+                WITH RECURSIVE t(list, a) AS (
+                    SELECT ARRAY[0], 1
+                    UNION ALL
+                    SELECT list || a, a + 1
+                    FROM t
+                    WHERE all_match(list, x -> x < a) AND cardinality(list) < 4)
+                SELECT list FROM t
+                """))
+                .matches("VALUES (ARRAY[0]), (ARRAY[0, 1]), (ARRAY[0, 1, 2]), (ARRAY[0, 1, 2, 3])");
     }
 }

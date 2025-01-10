@@ -16,14 +16,18 @@ package io.trino.plugin.kudu;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import io.trino.testing.sql.TestTable;
+import io.trino.testing.sql.TrinoSqlExecutor;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
-import static io.trino.plugin.kudu.KuduQueryRunnerFactory.createKuduQueryRunner;
 import static java.lang.String.format;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.offset;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestKuduIntegrationDecimalColumns
         extends AbstractTestQueryFramework
 {
@@ -44,14 +48,16 @@ public class TestKuduIntegrationDecimalColumns
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        kuduServer = new TestingKuduServer();
-        return createKuduQueryRunner(kuduServer, "decimal");
+        return KuduQueryRunnerFactory.builder(closeAfterClass(new TestingKuduServer())).build();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public final void destroy()
     {
-        kuduServer.close();
+        if (kuduServer != null) {
+            kuduServer.close();
+            kuduServer = null;
+        }
     }
 
     @Test
@@ -65,67 +71,56 @@ public class TestKuduIntegrationDecimalColumns
     @Test
     public void testDecimalColumn()
     {
-        assertUpdate("CREATE TABLE IF NOT EXISTS test_decimal (" +
-                "id INT WITH (primary_key=true), " +
-                "col_decimal decimal(10, 6)" +
-                ") WITH (" +
-                " partition_by_hash_columns = ARRAY['id'], " +
-                " partition_by_hash_buckets = 2" +
-                ")");
-
-        assertUpdate("INSERT INTO test_decimal VALUES (0, 0.0), (2, 2.2), (1, 1.1)", 3);
-        assertQuery("SELECT * FROM test_decimal WHERE col_decimal = 1.1", "VALUES (1, 1.1)");
-        assertUpdate("DELETE FROM test_decimal WHERE col_decimal = 1.1", 1);
-
-        assertUpdate("DROP TABLE test_decimal");
+        try (TestTable testTable = new TestTable(
+                new TrinoSqlExecutor(getQueryRunner()),
+                "test_decimal",
+                "(id INT WITH (primary_key=true), col_decimal decimal(10, 6)) " +
+                        "WITH (partition_by_hash_columns = ARRAY['id'], partition_by_hash_buckets = 2)")) {
+            assertUpdate(format("INSERT INTO %s VALUES (0, 0.0), (2, 2.2), (1, 1.1)", testTable.getName()), 3);
+            assertQuery(format("SELECT * FROM %s WHERE col_decimal = 1.1", testTable.getName()), "VALUES (1, 1.1)");
+            assertUpdate(format("DELETE FROM %s WHERE col_decimal = 1.1", testTable.getName()), 1);
+            assertQueryReturnsEmptyResult(format("SELECT * FROM %s WHERE col_decimal = 1.1", testTable.getName()));
+        }
     }
 
     @Test
     public void testDeleteByPrimaryKeyDecimalColumn()
     {
-        assertUpdate("CREATE TABLE IF NOT EXISTS test_decimal (" +
-                "decimal_id decimal(18, 3) WITH (primary_key=true), " +
-                "col_decimal decimal(18, 3)" +
-                ") WITH (" +
-                " partition_by_hash_columns = ARRAY['decimal_id'], " +
-                " partition_by_hash_buckets = 2" +
-                ")");
-
-        assertUpdate("INSERT INTO test_decimal VALUES (1.1, 1.1), (2.2, 2.2)", 2);
-        assertUpdate("DELETE FROM test_decimal WHERE decimal_id = 2.2", 1);
-        assertQuery("SELECT * FROM test_decimal", "VALUES (1.1, 1.1)");
-
-        assertUpdate("DROP TABLE test_decimal");
+        try (TestTable testTable = new TestTable(
+                new TrinoSqlExecutor(getQueryRunner()),
+                "test_decimal",
+                "(decimal_id decimal(18, 3) WITH (primary_key=true), col_decimal decimal(18, 3)) " +
+                        "WITH (partition_by_hash_columns = ARRAY['decimal_id'], partition_by_hash_buckets = 2)")) {
+            assertUpdate(format("INSERT INTO %s VALUES (1.1, 1.1), (2.2, 2.2)", testTable.getName()), 2);
+            assertUpdate(format("DELETE FROM %s WHERE decimal_id = 2.2", testTable.getName()), 1);
+            assertQuery(format("SELECT * FROM %s", testTable.getName()), "VALUES (1.1, 1.1)");
+        }
     }
 
     private void doTestCreateTableWithDecimalColumn(TestDecimal decimal)
     {
-        String tableName = decimal.getTableName();
-        String dropTable = "DROP TABLE IF EXISTS " + tableName;
-        String createTable = "" +
-                "CREATE TABLE " + tableName + " (\n" +
-                "  id INT WITH (primary_key=true),\n" +
-                "  dec DECIMAL(" + decimal.precision + "," + decimal.scale + ")\n" +
-                ") WITH (\n" +
-                " partition_by_hash_columns = ARRAY['id'],\n" +
-                " partition_by_hash_buckets = 2\n" +
-                ")";
+        String tableDefinition = format(
+                "(id INT WITH (primary_key=true), dec DECIMAL(%s, %s)) " +
+                "WITH (partition_by_hash_columns = ARRAY['id'], partition_by_hash_buckets = 2)",
+                decimal.precision,
+                decimal.scale);
 
-        assertUpdate(dropTable);
-        assertUpdate(createTable);
+        try (TestTable testTable = new TestTable(new TrinoSqlExecutor(getQueryRunner()), decimal.getTableName(), tableDefinition)) {
+            String fullPrecisionValue = "1234567890.1234567890123456789012345678";
+            int maxScale = decimal.precision - 10;
+            int valuePrecision = decimal.precision - maxScale + Math.min(maxScale, decimal.scale);
+            String insertValue = fullPrecisionValue.substring(0, valuePrecision + 1);
+            assertUpdate(format("INSERT INTO %s VALUES(1, DECIMAL '%s')", testTable.getName(), insertValue), 1);
 
-        String fullPrecisionValue = "1234567890.1234567890123456789012345678";
-        int maxScale = decimal.precision - 10;
-        int valuePrecision = decimal.precision - maxScale + Math.min(maxScale, decimal.scale);
-        String insertValue = fullPrecisionValue.substring(0, valuePrecision + 1);
-        assertUpdate("INSERT INTO " + tableName + " VALUES(1, DECIMAL '" + insertValue + "')", 1);
-
-        MaterializedResult result = computeActual("SELECT id, CAST((dec - (DECIMAL '" + insertValue + "')) as DOUBLE) FROM " + tableName);
-        assertEquals(result.getRowCount(), 1);
-        Object obj = result.getMaterializedRows().get(0).getField(1);
-        assertTrue(obj instanceof Double);
-        Double actual = (Double) obj;
-        assertEquals(0, actual, 0.3 * Math.pow(0.1, decimal.scale), "p=" + decimal.precision + ",s=" + decimal.scale + " => " + actual + ",insert = " + insertValue);
+            MaterializedResult result = computeActual(format("SELECT id, CAST((dec - (DECIMAL '%s')) as DOUBLE) FROM %s", insertValue, testTable.getName()));
+            assertThat(result.getRowCount()).isEqualTo(1);
+            Object obj = result.getMaterializedRows().get(0).getField(1);
+            assertThat(obj).isInstanceOf(Double.class);
+            Double actual = (Double) obj;
+            assertThat(actual)
+                    .describedAs("p=" + decimal.precision + ",s=" + decimal.scale + " => " + actual + ",insert = " + insertValue)
+                    .isCloseTo(0, offset(0.3 * Math.pow(0.1, decimal.scale)));
+        }
     }
 
     static class TestDecimal

@@ -13,27 +13,25 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestExpressions
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -49,6 +47,25 @@ public class TestExpressions
         assertThat(assertions.query("VALUES CASE 1 = 2 WHEN true THEN 10 ELSE 20 END")).matches("VALUES 20");
         assertThat(assertions.query("VALUES CASE 1 < 2 WHEN true THEN 10 ELSE 20 END")).matches("VALUES 10");
         assertThat(assertions.query("VALUES CASE 1 > 2 WHEN true THEN 10 ELSE 20 END")).matches("VALUES 20");
+    }
+
+    @Test
+    public void testInShortCircuit()
+    {
+        // Because of the failing in-list item 5 / 0, the in-predicate cannot be simplified.
+        // Also, because of the non-deterministic expression `rand()` referenced twice in
+        // the in-predicate (`x + x`), the in-predicate cannot be inlined into Values.
+        // It is instead processed with the use of generated code which applies the short-circuit
+        // logic and finds a match without evaluating the failing item.
+        // According to in-predicate semantics, this query should fail, as all the in-list items
+        // should be successfully evaluated before a check for the match is performed.
+        // However, the execution of in-predicate is optimized for efficiency at the cost of
+        // correctness in this edge case.
+        assertThat(assertions.query("SELECT IF(3 IN (2, 4, 3, 5 / 0), 1e0, x + x) FROM (VALUES rand()) t(x)")).matches("VALUES 1e0");
+
+        // the in-predicate is inlined into Values and evaluated by the ExpressionInterpreter: eager evaluation, failure.
+        assertThat(assertions.query("SELECT 3 IN (2, 4, 3, 5 / 0)"))
+                .failure().hasMessage("Division by zero");
     }
 
     @Test

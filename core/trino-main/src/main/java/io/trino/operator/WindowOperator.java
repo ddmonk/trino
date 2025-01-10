@@ -13,25 +13,26 @@
  */
 package io.trino.operator;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.PeekingIterator;
 import com.google.common.primitives.Ints;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.WorkProcessor.ProcessState;
 import io.trino.operator.WorkProcessor.Transformation;
 import io.trino.operator.WorkProcessor.TransformationState;
 import io.trino.operator.window.FrameInfo;
-import io.trino.operator.window.FramedWindowFunction;
+import io.trino.operator.window.Partitioner;
+import io.trino.operator.window.PartitionerSupplier;
+import io.trino.operator.window.PatternRecognitionPartitioner;
 import io.trino.operator.window.WindowPartition;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.connector.SortOrder;
+import io.trino.spi.function.WindowFunction;
 import io.trino.spi.type.Type;
 import io.trino.spiller.Spiller;
 import io.trino.spiller.SpillerFactory;
@@ -44,8 +45,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiPredicate;
-import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkPositionIndex;
@@ -54,12 +54,14 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.concat;
 import static com.google.common.collect.Iterators.peekingIterator;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.concurrent.MoreFutures.checkSuccess;
+import static io.trino.operator.PositionSearcher.findEndPosition;
 import static io.trino.operator.WorkProcessor.TransformationState.needsMoreData;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_LAST;
-import static io.trino.sql.tree.FrameBound.Type.FOLLOWING;
-import static io.trino.sql.tree.FrameBound.Type.PRECEDING;
-import static io.trino.sql.tree.WindowFrame.Type.RANGE;
+import static io.trino.sql.planner.plan.FrameBoundType.FOLLOWING;
+import static io.trino.sql.planner.plan.FrameBoundType.PRECEDING;
+import static io.trino.sql.planner.plan.WindowFrameType.RANGE;
 import static io.trino.util.MergeSortedPages.mergeSortedPages;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
@@ -86,6 +88,8 @@ public class WindowOperator
         private final boolean spillEnabled;
         private final SpillerFactory spillerFactory;
         private final OrderingCompiler orderingCompiler;
+        private final List<Type> measureTypes;
+        private final PartitionerSupplier partitionerSupplier;
 
         public WindowOperatorFactory(
                 int operatorId,
@@ -102,7 +106,9 @@ public class WindowOperator
                 PagesIndex.Factory pagesIndexFactory,
                 boolean spillEnabled,
                 SpillerFactory spillerFactory,
-                OrderingCompiler orderingCompiler)
+                OrderingCompiler orderingCompiler,
+                List<Type> measureTypes,
+                PartitionerSupplier partitionerSupplier)
         {
             requireNonNull(sourceTypes, "sourceTypes is null");
             requireNonNull(planNodeId, "planNodeId is null");
@@ -119,6 +125,8 @@ public class WindowOperator
             checkArgument(sortChannels.size() == sortOrder.size(), "Must have same number of sort channels as sort orders");
             checkArgument(preSortedChannelPrefix <= sortChannels.size(), "Cannot have more pre-sorted channels than specified sorted channels");
             checkArgument(preSortedChannelPrefix == 0 || ImmutableSet.copyOf(preGroupedChannels).equals(ImmutableSet.copyOf(partitionChannels)), "preSortedChannelPrefix can only be greater than zero if all partition channels are pre-grouped");
+            requireNonNull(measureTypes, "measureTypes is null");
+            requireNonNull(partitionerSupplier, "partitionerSupplier is null");
 
             this.pagesIndexFactory = pagesIndexFactory;
             this.operatorId = operatorId;
@@ -135,6 +143,8 @@ public class WindowOperator
             this.spillEnabled = spillEnabled;
             this.spillerFactory = spillerFactory;
             this.orderingCompiler = orderingCompiler;
+            this.measureTypes = measureTypes;
+            this.partitionerSupplier = partitionerSupplier;
         }
 
         @Override
@@ -157,7 +167,9 @@ public class WindowOperator
                     pagesIndexFactory,
                     spillEnabled,
                     spillerFactory,
-                    orderingCompiler);
+                    orderingCompiler,
+                    measureTypes,
+                    partitionerSupplier.get(operatorContext.aggregateUserMemoryContext()));
         }
 
         @Override
@@ -184,21 +196,26 @@ public class WindowOperator
                     pagesIndexFactory,
                     spillEnabled,
                     spillerFactory,
-                    orderingCompiler);
+                    orderingCompiler,
+                    measureTypes,
+                    partitionerSupplier);
         }
     }
 
     private final OperatorContext operatorContext;
     private final List<Type> outputTypes;
     private final int[] outputChannels;
-    private final List<FramedWindowFunction> windowFunctions;
+    private final List<WindowFunction> windowFunctions;
+    private final List<FrameInfo> frames;
     private final WindowInfo.DriverWindowInfoBuilder windowInfo;
-    private final AtomicReference<Optional<WindowInfo.DriverWindowInfo>> driverWindowInfo = new AtomicReference<>(Optional.empty());
+    private final AtomicReference<WindowInfo> driverWindowInfo = new AtomicReference<>(WindowInfo.emptyInfo());
 
     private final Optional<SpillablePagesToPagesIndexes> spillablePagesToPagesIndexes;
 
     private final WorkProcessor<Page> outputPages;
     private final PageBuffer pageBuffer = new PageBuffer();
+
+    private final Partitioner partitioner;
 
     public WindowOperator(
             OperatorContext operatorContext,
@@ -214,11 +231,17 @@ public class WindowOperator
             PagesIndex.Factory pagesIndexFactory,
             boolean spillEnabled,
             SpillerFactory spillerFactory,
-            OrderingCompiler orderingCompiler)
+            OrderingCompiler orderingCompiler,
+            List<Type> measureTypes,
+            Partitioner partitioner)
     {
         requireNonNull(operatorContext, "operatorContext is null");
         requireNonNull(outputChannels, "outputChannels is null");
         requireNonNull(windowFunctionDefinitions, "windowFunctionDefinitions is null");
+        checkArgument(
+                windowFunctionDefinitions.stream().allMatch(definition -> definition.getFrameInfo().isPresent()) ||
+                        windowFunctionDefinitions.stream().allMatch(definition -> definition.getFrameInfo().isEmpty()),
+                "FrameInfo must be equally present or empty for all window functions");
         requireNonNull(partitionChannels, "partitionChannels is null");
         requireNonNull(preGroupedChannels, "preGroupedChannels is null");
         checkArgument(partitionChannels.containsAll(preGroupedChannels), "preGroupedChannels must be a subset of partitionChannels");
@@ -229,19 +252,35 @@ public class WindowOperator
         checkArgument(sortChannels.size() == sortOrder.size(), "Must have same number of sort channels as sort orders");
         checkArgument(preSortedChannelPrefix <= sortChannels.size(), "Cannot have more pre-sorted channels than specified sorted channels");
         checkArgument(preSortedChannelPrefix == 0 || ImmutableSet.copyOf(preGroupedChannels).equals(ImmutableSet.copyOf(partitionChannels)), "preSortedChannelPrefix can only be greater than zero if all partition channels are pre-grouped");
+        requireNonNull(measureTypes, "measureTypes is null");
+        requireNonNull(partitioner, "partitioner is null");
+        checkArgument(
+                windowFunctionDefinitions.stream().noneMatch(definition -> definition.getFrameInfo().isEmpty()) || partitioner instanceof PatternRecognitionPartitioner,
+                "Missing FrameInfo for a window function outside pattern recognition context");
 
         this.operatorContext = operatorContext;
         this.outputChannels = Ints.toArray(outputChannels);
         this.windowFunctions = windowFunctionDefinitions.stream()
-                .map(functionDefinition -> new FramedWindowFunction(functionDefinition.createWindowFunction(), functionDefinition.getFrameInfo()))
+                .map(WindowFunctionDefinition::createWindowFunction)
                 .collect(toImmutableList());
+        if (windowFunctionDefinitions.stream().anyMatch(definition -> definition.getFrameInfo().isPresent())) {
+            this.frames = windowFunctionDefinitions.stream()
+                    .map(functionDefinition -> functionDefinition.getFrameInfo().get())
+                    .collect(toImmutableList());
+        }
+        else {
+            this.frames = ImmutableList.of();
+        }
 
-        this.outputTypes = Stream.concat(
-                outputChannels.stream()
-                        .map(sourceTypes::get),
-                windowFunctionDefinitions.stream()
-                        .map(WindowFunctionDefinition::getType))
-                .collect(toImmutableList());
+        ImmutableList.Builder<Type> outputTypes = ImmutableList.builder();
+        outputTypes.addAll(outputChannels.stream()
+                .map(sourceTypes::get)
+                .collect(Collectors.toList()));
+        outputTypes.addAll(measureTypes);
+        outputTypes.addAll(windowFunctionDefinitions.stream()
+                .map(WindowFunctionDefinition::getType)
+                .collect(Collectors.toList()));
+        this.outputTypes = outputTypes.build();
 
         List<Integer> unGroupedPartitionChannels = partitionChannels.stream()
                 .filter(channel -> !preGroupedChannels.contains(channel))
@@ -312,12 +351,9 @@ public class WindowOperator
         }
 
         windowInfo = new WindowInfo.DriverWindowInfoBuilder();
-        operatorContext.setInfoSupplier(this::getWindowInfo);
-    }
+        operatorContext.setInfoSupplier(driverWindowInfo::get);
 
-    private OperatorInfo getWindowInfo()
-    {
-        return new WindowInfo(driverWindowInfo.get().map(ImmutableList::of).orElse(ImmutableList.of()));
+        this.partitioner = partitioner;
     }
 
     @Override
@@ -339,7 +375,7 @@ public class WindowOperator
     }
 
     @Override
-    public ListenableFuture<?> isBlocked()
+    public ListenableFuture<Void> isBlocked()
     {
         // We can block e.g. because of self-triggered spill
         if (outputPages.isBlocked()) {
@@ -376,7 +412,7 @@ public class WindowOperator
     }
 
     @Override
-    public ListenableFuture<?> startMemoryRevoke()
+    public ListenableFuture<Void> startMemoryRevoke()
     {
         return spillablePagesToPagesIndexes.get().spill();
     }
@@ -427,8 +463,9 @@ public class WindowOperator
         ImmutableMap.Builder<FrameBoundKey, PagesIndexComparator> builder = ImmutableMap.builder();
 
         for (int i = 0; i < windowFunctionDefinitions.size(); i++) {
-            FrameInfo frameInfo = windowFunctionDefinitions.get(i).getFrameInfo();
-            if (frameInfo.getType() == RANGE) {
+            Optional<FrameInfo> frame = windowFunctionDefinitions.get(i).getFrameInfo();
+            if (frame.isPresent() && frame.get().getType() == RANGE) {
+                FrameInfo frameInfo = frame.get();
                 if (frameInfo.getStartType() == PRECEDING || frameInfo.getStartType() == FOLLOWING) {
                     PagesIndexComparator comparator = pagesIndex.createChannelComparator(frameInfo.getSortKeyChannelForStartComparison(), frameInfo.getStartChannel());
                     builder.put(new FrameBoundKey(i, FrameBoundKey.Type.START), comparator);
@@ -440,7 +477,7 @@ public class WindowOperator
             }
         }
 
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     public static class FrameBoundKey
@@ -561,7 +598,17 @@ public class WindowOperator
 
                 int partitionEnd = findGroupEnd(pagesIndex, pagesIndexWithHashStrategies.unGroupedPartitionHashStrategy, partitionStart);
 
-                WindowPartition partition = new WindowPartition(pagesIndex, partitionStart, partitionEnd, outputChannels, windowFunctions, pagesIndexWithHashStrategies.peerGroupHashStrategy, pagesIndexWithHashStrategies.frameBoundComparators);
+                WindowPartition partition = partitioner.createPartition(
+                        pagesIndex,
+                        partitionStart,
+                        partitionEnd,
+                        outputChannels,
+                        windowFunctions,
+                        frames,
+                        pagesIndexWithHashStrategies.peerGroupHashStrategy,
+                        pagesIndexWithHashStrategies.frameBoundComparators,
+                        operatorContext.aggregateUserMemoryContext());
+
                 windowInfo.addPartition(partition);
                 partitionStart = partitionEnd;
                 return ProcessState.ofResult(partition);
@@ -627,7 +674,7 @@ public class WindowOperator
         Optional<Page> currentSpillGroupRowPage;
         Optional<Spiller> spiller;
         // Spill can be trigger by Driver, by us or both. `spillInProgress` is not empty when spill was triggered but not `finishMemoryRevoke()` yet
-        Optional<ListenableFuture<?>> spillInProgress = Optional.empty();
+        Optional<ListenableFuture<Void>> spillInProgress = Optional.empty();
 
         SpillablePagesToPagesIndexes(
                 PagesIndexWithHashStrategies inMemoryPagesIndexWithHashStrategies,
@@ -676,7 +723,6 @@ public class WindowOperator
             if (finishing && inMemoryPagesIndexWithHashStrategies.pagesIndex.getPositionCount() == 0 && spiller.isEmpty()) {
                 localRevocableMemoryContext.close();
                 localUserMemoryContext.close();
-                closeSpiller();
                 return TransformationState.finished();
             }
 
@@ -700,6 +746,12 @@ public class WindowOperator
             spiller = Optional.empty();
         }
 
+        void clearIndexes()
+        {
+            inMemoryPagesIndexWithHashStrategies.pagesIndex.clear();
+            mergedPagesIndexWithHashStrategies.pagesIndex.clear();
+        }
+
         TransformationState<WorkProcessor<PagesIndexWithHashStrategies>> fullGroupBuffered()
         {
             // Convert revocable memory to user memory as inMemoryPagesIndexWithHashStrategies holds on to memory so we no longer can revoke
@@ -720,7 +772,7 @@ public class WindowOperator
             return TransformationState.ofResult(unspill(), false);
         }
 
-        ListenableFuture<?> spill()
+        ListenableFuture<Void> spill()
         {
             if (spillInProgress.isPresent()) {
                 // Spill can be triggered first in SpillablePagesToPagesIndexes#process(..) and then by Driver (via WindowOperator#startMemoryRevoke)
@@ -729,7 +781,7 @@ public class WindowOperator
 
             if (localRevocableMemoryContext.getBytes() == 0) {
                 // This must be stale revoke request
-                spillInProgress = Optional.of(Futures.immediateFuture(null));
+                spillInProgress = Optional.of(immediateVoidFuture());
                 return spillInProgress.get();
             }
 
@@ -737,7 +789,7 @@ public class WindowOperator
                 spiller = Optional.of(spillerFactory.create(
                         sourceTypes,
                         operatorContext.getSpillContext(),
-                        operatorContext.newAggregateSystemMemoryContext()));
+                        operatorContext.newAggregateUserMemoryContext()));
             }
 
             verify(inMemoryPagesIndexWithHashStrategies.pagesIndex.getPositionCount() > 0);
@@ -818,12 +870,12 @@ public class WindowOperator
         PagesIndex pagesIndex = pagesIndexWithHashStrategies.pagesIndex;
         PagesHashStrategy preGroupedPartitionHashStrategy = pagesIndexWithHashStrategies.preGroupedPartitionHashStrategy;
         if (currentSpillGroupRowPage.isPresent()) {
-            if (!preGroupedPartitionHashStrategy.rowNotDistinctFromRow(0, currentSpillGroupRowPage.get().getColumns(pagesIndexWithHashStrategies.preGroupedPartitionChannels), startPosition, preGroupedPage)) {
+            if (!preGroupedPartitionHashStrategy.rowIdenticalToRow(0, currentSpillGroupRowPage.get().getColumns(pagesIndexWithHashStrategies.preGroupedPartitionChannels), startPosition, preGroupedPage)) {
                 return startPosition;
             }
         }
 
-        if (pagesIndex.getPositionCount() == 0 || pagesIndex.positionNotDistinctFromRow(preGroupedPartitionHashStrategy, 0, startPosition, preGroupedPage)) {
+        if (pagesIndex.getPositionCount() == 0 || pagesIndex.positionIdenticalToRow(preGroupedPartitionHashStrategy, 0, startPosition, preGroupedPage)) {
             // Find the position where the pre-grouped columns change
             int groupEnd = findGroupEnd(preGroupedPage, preGroupedPartitionHashStrategy, startPosition);
 
@@ -859,7 +911,7 @@ public class WindowOperator
         checkArgument(page.getPositionCount() > 0, "Must have at least one position");
         checkPositionIndex(startPosition, page.getPositionCount(), "startPosition out of bounds");
 
-        return findEndPosition(startPosition, page.getPositionCount(), (firstPosition, secondPosition) -> pagesHashStrategy.rowNotDistinctFromRow(firstPosition, page, secondPosition, page));
+        return findEndPosition(startPosition, page.getPositionCount(), (firstPosition, secondPosition) -> pagesHashStrategy.rowIdenticalToRow(firstPosition, page, secondPosition, page));
     }
 
     // Assumes input grouped on relevant pagesHashStrategy columns
@@ -868,42 +920,14 @@ public class WindowOperator
         checkArgument(pagesIndex.getPositionCount() > 0, "Must have at least one position");
         checkPositionIndex(startPosition, pagesIndex.getPositionCount(), "startPosition out of bounds");
 
-        return findEndPosition(startPosition, pagesIndex.getPositionCount(), (firstPosition, secondPosition) -> pagesIndex.positionNotDistinctFromPosition(pagesHashStrategy, firstPosition, secondPosition));
-    }
-
-    /**
-     * @param startPosition - inclusive
-     * @param endPosition - exclusive
-     * @param comparator - returns true if positions given as parameters are equal
-     * @return the end of the group position exclusive (the position the very next group starts)
-     */
-    @VisibleForTesting
-    static int findEndPosition(int startPosition, int endPosition, BiPredicate<Integer, Integer> comparator)
-    {
-        checkArgument(startPosition >= 0, "startPosition must be greater or equal than zero: %s", startPosition);
-        checkArgument(startPosition < endPosition, "startPosition (%s) must be less than endPosition (%s)", startPosition, endPosition);
-
-        int left = startPosition;
-        int right = endPosition;
-
-        while (left + 1 < right) {
-            int middle = (left + right) >>> 1;
-
-            if (comparator.test(startPosition, middle)) {
-                left = middle;
-            }
-            else {
-                right = middle;
-            }
-        }
-
-        return right;
+        return findEndPosition(startPosition, pagesIndex.getPositionCount(), (firstPosition, secondPosition) -> pagesIndex.positionIdenticalToPosition(pagesHashStrategy, firstPosition, secondPosition));
     }
 
     @Override
     public void close()
     {
-        driverWindowInfo.set(Optional.of(windowInfo.build()));
+        driverWindowInfo.set(new WindowInfo(ImmutableList.of(windowInfo.build())));
+        spillablePagesToPagesIndexes.ifPresent(SpillablePagesToPagesIndexes::clearIndexes);
         spillablePagesToPagesIndexes.ifPresent(SpillablePagesToPagesIndexes::closeSpiller);
     }
 }

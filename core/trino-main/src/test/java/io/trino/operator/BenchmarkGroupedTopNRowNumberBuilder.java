@@ -22,7 +22,6 @@ import io.trino.tpch.LineItem;
 import io.trino.tpch.LineItemGenerator;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
-import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
@@ -30,16 +29,13 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
 import static io.trino.spi.connector.SortOrder.DESC_NULLS_LAST;
 import static io.trino.spi.type.DateType.DATE;
@@ -69,28 +65,30 @@ public class BenchmarkGroupedTopNRowNumberBuilder
                 new TypeOperators());
 
         @Param({"1", "10", "100"})
-        private String topN = "1";
+        private int topN = 1;
 
         @Param({"10000", "1000000"})
-        private String positions = "1";
+        private int positions = 1000;
 
+        // when positions is evenly divisible by groupCount, each row will end up in the same group on each processPage call,
+        // which means it will stop inserting after topN is saturated which may or may not be desirable for any given benchmark scenario
         @Param({"1", "10000", "1000000"})
-        private String groupCount = "1";
+        private int groupCount = 1;
+
+        @Param("100")
+        private int addPageCalls = 1;
 
         private Page page;
-        private GroupedTopNRowNumberBuilder topNBuilder;
 
-        @Setup(value = Level.Invocation)
+        @Setup
         public void setup()
         {
-            page = createInputPage(Integer.valueOf(positions), types);
-
-            topNBuilder = new GroupedTopNRowNumberBuilder(types, comparator, Integer.valueOf(topN), false, new CyclingGroupByHash(Integer.valueOf(groupCount)));
+            page = createInputPage(positions, types);
         }
 
-        public GroupedTopNBuilder getTopNBuilder()
+        public GroupedTopNRowNumberBuilder newTopNRowNumberBuilder()
         {
-            return topNBuilder;
+            return new GroupedTopNRowNumberBuilder(types, comparator, topN, false, new int[0], new CyclingGroupByHash(groupCount));
         }
 
         public Page getPage()
@@ -100,10 +98,29 @@ public class BenchmarkGroupedTopNRowNumberBuilder
     }
 
     @Benchmark
+    public long processTopNInput(BenchmarkData data)
+    {
+        GroupedTopNRowNumberBuilder topNBuilder = data.newTopNRowNumberBuilder();
+        Page inputPage = data.getPage();
+        for (int i = 0; i < data.addPageCalls; i++) {
+            if (!topNBuilder.processPage(inputPage).process()) {
+                throw new IllegalStateException("Work did not complete");
+            }
+        }
+        return topNBuilder.getEstimatedSizeInBytes();
+    }
+
+    @Benchmark
     public List<Page> topN(BenchmarkData data)
     {
-        data.getTopNBuilder().processPage(data.getPage()).process();
-        return ImmutableList.copyOf(data.getTopNBuilder().buildResult());
+        GroupedTopNRowNumberBuilder topNBuilder = data.newTopNRowNumberBuilder();
+        Page inputPage = data.getPage();
+        for (int i = 0; i < data.addPageCalls; i++) {
+            if (!topNBuilder.processPage(inputPage).process()) {
+                throw new IllegalStateException("Work did not complete");
+            }
+        }
+        return ImmutableList.copyOf(topNBuilder.buildResult());
     }
 
     public static void main(String[] args)
@@ -111,14 +128,12 @@ public class BenchmarkGroupedTopNRowNumberBuilder
     {
         BenchmarkData data = new BenchmarkData();
         data.setup();
-        new BenchmarkGroupedTopNRowNumberBuilder().topN(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkGroupedTopNRowNumberBuilder.class.getSimpleName() + ".*")
-                .build();
+        BenchmarkGroupedTopNRowNumberBuilder benchmark = new BenchmarkGroupedTopNRowNumberBuilder();
+        benchmark.topN(data);
+        benchmark.processTopNInput(data);
 
-        new Runner(options).run();
+        benchmark(BenchmarkGroupedTopNRowNumberBuilder.class).run();
     }
 
     private static Page createInputPage(int positions, List<Type> types)
@@ -130,10 +145,10 @@ public class BenchmarkGroupedTopNRowNumberBuilder
             pageBuilder.declarePosition();
 
             LineItem lineItem = iterator.next();
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.getExtendedPrice());
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.getDiscount());
-            DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.getShipDate());
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.getQuantity());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.extendedPrice());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.discount());
+            DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.shipDate());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.quantity());
         }
         return pageBuilder.build();
     }

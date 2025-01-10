@@ -14,10 +14,13 @@
 package io.trino.cost;
 
 import io.trino.sql.planner.Symbol;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.type.UnknownType.UNKNOWN;
 import static java.lang.Double.POSITIVE_INFINITY;
 
 public class TestSortStatsRule
@@ -29,7 +32,7 @@ public class TestSortStatsRule
         PlanNodeStatsEstimate stats = PlanNodeStatsEstimate.builder()
                 .setOutputRowCount(100)
                 .addSymbolStatistics(
-                        new Symbol("a"),
+                        new Symbol(UNKNOWN, "a"),
                         SymbolStatsEstimate.builder()
                                 .setNullsFraction(0.3)
                                 .setLowValue(1)
@@ -37,7 +40,7 @@ public class TestSortStatsRule
                                 .setDistinctValuesCount(20)
                                 .build())
                 .addSymbolStatistics(
-                        new Symbol("b"),
+                        new Symbol(UNKNOWN, "b"),
                         SymbolStatsEstimate.builder()
                                 .setNullsFraction(0.6)
                                 .setLowValue(13.5)
@@ -46,16 +49,12 @@ public class TestSortStatsRule
                                 .build())
                 .build();
 
-        tester().assertStatsFor(pb -> pb
-                .output(outputBuilder -> {
+        tester()
+                .assertStatsFor(pb -> {
                     Symbol a = pb.symbol("a", BIGINT);
                     Symbol b = pb.symbol("b", DOUBLE);
-                    outputBuilder
-                            .source(pb.values(a, b))
-                            .column(a, "a1")
-                            .column(a, "a2")
-                            .column(b, "b");
-                }))
+                    return pb.sort(List.of(b), pb.values(a, b));
+                })
                 .withSourceStats(stats)
                 .check(outputStats -> outputStats.equalTo(stats));
     }

@@ -13,11 +13,10 @@
  */
 package io.trino.operator.index;
 
-import io.trino.operator.LookupSource;
+import io.trino.annotation.NotThreadSafe;
+import io.trino.operator.join.LookupSource;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
-
-import javax.annotation.concurrent.NotThreadSafe;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.operator.index.IndexSnapshot.UNLOADED_INDEX_KEY;
@@ -41,12 +40,6 @@ public class IndexLookupSource
     {
         // since the data is not loaded, we don't know if it is empty
         return false;
-    }
-
-    @Override
-    public int getChannelCount()
-    {
-        return indexLoader.getChannelCount();
     }
 
     @Override

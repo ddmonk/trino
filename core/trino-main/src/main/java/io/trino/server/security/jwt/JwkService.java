@@ -13,6 +13,7 @@
  */
 package io.trino.server.security.jwt;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.Closer;
 import io.airlift.concurrent.Threads;
 import io.airlift.http.client.HttpClient;
@@ -20,11 +21,9 @@ import io.airlift.http.client.Request;
 import io.airlift.http.client.StringResponseHandler.StringResponse;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import javax.annotation.processing.Generated;
-import javax.inject.Inject;
+import jakarta.annotation.Generated;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
 import java.net.URI;
@@ -54,12 +53,12 @@ public final class JwkService
     @Generated("this")
     private Closer closer;
 
-    @Inject
-    public JwkService(JwtAuthenticatorConfig config, @ForJwk HttpClient httpClient)
+    public JwkService(URI address, HttpClient httpClient)
     {
-        this(URI.create(config.getKeyFile()), httpClient, new Duration(15, TimeUnit.MINUTES));
+        this(address, httpClient, new Duration(15, TimeUnit.MINUTES));
     }
 
+    @VisibleForTesting
     public JwkService(URI address, HttpClient httpClient, Duration refreshDelay)
     {
         this.address = requireNonNull(address, "address is null");

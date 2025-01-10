@@ -14,20 +14,19 @@
 package io.trino.tests.product.launcher.env.common;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
 import io.trino.tests.product.launcher.testcontainers.PortBinder;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.COORDINATOR;
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.HADOOP;
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.TESTS;
-import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_PRESTO_CONFIG_PROPERTIES;
-import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TEMPTO_PROFILE_CONFIG;
+import static io.trino.tests.product.launcher.env.EnvironmentContainers.configureTempto;
+import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TRINO_CONFIG_PROPERTIES;
 import static java.util.Objects.requireNonNull;
 import static org.testcontainers.utility.MountableFile.forHostPath;
 
@@ -51,8 +50,8 @@ public class HadoopKerberos
     {
         this.configDir = dockerFiles.getDockerFilesHostDirectory("common/hadoop-kerberos/");
         this.portBinder = requireNonNull(portBinder, "portBinder is null");
-        hadoopBaseImage = requireNonNull(environmentConfig, "environmentConfig is null").getHadoopBaseImage();
-        hadoopImagesVersion = requireNonNull(environmentConfig, "environmentConfig is null").getHadoopImagesVersion();
+        hadoopBaseImage = environmentConfig.getHadoopBaseImage();
+        hadoopImagesVersion = environmentConfig.getHadoopImagesVersion();
         this.hadoop = requireNonNull(hadoop, "hadoop is null");
     }
 
@@ -69,12 +68,16 @@ public class HadoopKerberos
             portBinder.exposePort(container, 7778);
             container
                     .withCreateContainerCmdModifier(createContainerCmd -> createContainerCmd.withDomainName("docker.cluster"))
-                    .withCopyFileToContainer(forHostPath(configDir.getPath("config.properties")), CONTAINER_PRESTO_CONFIG_PROPERTIES);
+                    .withCopyFileToContainer(forHostPath(configDir.getPath("config.properties")), CONTAINER_TRINO_CONFIG_PROPERTIES)
+                    .withCopyFileToContainer(forHostPath(configDir.getPath("krb5.conf")), "/etc/krb5.conf")
+                    .withCopyFileToContainer(
+                            forHostPath(configDir.getPath("create_kerberos_credential_cache_files.sh")),
+                            "/docker/presto-init.d/create_kerberos_credentials.sh");
         });
         builder.configureContainer(TESTS, container -> {
             container.setDockerImageName(dockerImageName);
-            container.withCopyFileToContainer(forHostPath(configDir.getPath("tempto-configuration.yaml")), CONTAINER_TEMPTO_PROFILE_CONFIG);
         });
+        configureTempto(builder, configDir);
     }
 
     @Override

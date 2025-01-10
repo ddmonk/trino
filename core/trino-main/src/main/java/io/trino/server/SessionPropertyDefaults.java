@@ -14,16 +14,18 @@
 package io.trino.server;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.inject.Inject;
+import io.airlift.configuration.secrets.SecretsResolver;
 import io.airlift.log.Logger;
 import io.airlift.node.NodeInfo;
 import io.trino.Session;
+import io.trino.security.AccessControl;
+import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.resourcegroups.SessionPropertyConfigurationManagerContext;
 import io.trino.spi.session.SessionConfigurationContext;
 import io.trino.spi.session.SessionPropertyConfigurationManager;
 import io.trino.spi.session.SessionPropertyConfigurationManagerFactory;
-
-import javax.inject.Inject;
 
 import java.io.File;
 import java.io.IOException;
@@ -37,6 +39,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static io.airlift.configuration.ConfigurationLoader.loadPropertiesFrom;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 public class SessionPropertyDefaults
 {
@@ -49,10 +52,15 @@ public class SessionPropertyDefaults
     private final Map<String, SessionPropertyConfigurationManagerFactory> factories = new ConcurrentHashMap<>();
     private final AtomicReference<SessionPropertyConfigurationManager> delegate = new AtomicReference<>();
 
+    private final AccessControl accessControl;
+    private final SecretsResolver secretsResolver;
+
     @Inject
-    public SessionPropertyDefaults(NodeInfo nodeInfo)
+    public SessionPropertyDefaults(NodeInfo nodeInfo, AccessControl accessControl, SecretsResolver secretsResolver)
     {
         this.configurationManagerContext = new SessionPropertyConfigurationManagerContextInstance(nodeInfo.getEnvironment());
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+        this.secretsResolver = requireNonNull(secretsResolver, "secretsResolver is null");
     }
 
     public void addConfigurationManagerFactory(SessionPropertyConfigurationManagerFactory sessionConfigFactory)
@@ -65,11 +73,15 @@ public class SessionPropertyDefaults
     public void loadConfigurationManager()
             throws IOException
     {
-        File configFile = CONFIG_FILE.getAbsoluteFile();
+        loadConfigurationManager(CONFIG_FILE.getAbsoluteFile());
+    }
+
+    public void loadConfigurationManager(File configFile)
+            throws IOException
+    {
         if (!configFile.exists()) {
             return;
         }
-
         Map<String, String> properties = new HashMap<>(loadPropertiesFrom(configFile.getPath()));
 
         String name = properties.remove(NAME_PROPERTY);
@@ -86,7 +98,11 @@ public class SessionPropertyDefaults
         SessionPropertyConfigurationManagerFactory factory = factories.get(name);
         checkState(factory != null, "Session property configuration manager '%s' is not registered", name);
 
-        SessionPropertyConfigurationManager manager = factory.create(properties, configurationManagerContext);
+        SessionPropertyConfigurationManager manager;
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(factory.getClass().getClassLoader())) {
+            manager = factory.create(secretsResolver.getResolvedConfiguration(properties), configurationManagerContext);
+        }
+
         checkState(delegate.compareAndSet(null, manager), "sessionPropertyConfigurationManager is already set");
 
         log.info("-- Loaded session property configuration manager %s --", name);
@@ -108,6 +124,6 @@ public class SessionPropertyDefaults
 
         Map<String, String> systemPropertyOverrides = configurationManager.getSystemSessionProperties(context);
         Map<String, Map<String, String>> catalogPropertyOverrides = configurationManager.getCatalogSessionProperties(context);
-        return session.withDefaultProperties(systemPropertyOverrides, catalogPropertyOverrides);
+        return session.withDefaultProperties(systemPropertyOverrides, catalogPropertyOverrides, accessControl);
     }
 }

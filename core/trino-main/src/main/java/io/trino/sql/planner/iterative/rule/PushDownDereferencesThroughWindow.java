@@ -18,16 +18,16 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.DereferenceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.Map;
 import java.util.Set;
@@ -37,12 +37,11 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.ExpressionNodeInliner.replaceExpression;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.iterative.rule.DereferencePushdown.getBase;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.window;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Transforms:
@@ -66,12 +65,6 @@ public class PushDownDereferencesThroughWindow
         implements Rule<ProjectNode>
 {
     private static final Capture<WindowNode> CHILD = newCapture();
-    private final TypeAnalyzer typeAnalyzer;
-
-    public PushDownDereferencesThroughWindow(TypeAnalyzer typeAnalyzer)
-    {
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-    }
 
     @Override
     public Pattern<ProjectNode> getPattern()
@@ -86,7 +79,7 @@ public class PushDownDereferencesThroughWindow
         WindowNode windowNode = captures.get(CHILD);
 
         // Extract dereferences for pushdown
-        Set<DereferenceExpression> dereferences = extractDereferences(
+        Set<FieldReference> dereferences = extractRowSubscripts(
                 ImmutableList.<Expression>builder()
                         .addAll(projectNode.getAssignments().getExpressions())
                         // also include dereference projections used in window functions
@@ -96,13 +89,14 @@ public class PushDownDereferencesThroughWindow
                         .build(),
                 false);
 
-        WindowNode.Specification specification = windowNode.getSpecification();
+        DataOrganizationSpecification specification = windowNode.getSpecification();
         dereferences = dereferences.stream()
                 .filter(expression -> {
                     Symbol symbol = getBase(expression);
                     // Exclude partitionBy, orderBy and synthesized symbols
-                    return !specification.getPartitionBy().contains(symbol) &&
-                            !specification.getOrderingScheme().map(OrderingScheme::getOrderBy).orElse(ImmutableList.of()).contains(symbol) &&
+                    return !specification.partitionBy().contains(symbol) &&
+                            !specification.orderingScheme().map(OrderingScheme::orderBy).orElse(ImmutableList.of()).contains(symbol) &&
+                            !windowNode.getWindowFunctions().values().stream().anyMatch(function -> function.getOrderingScheme().map(scheme -> scheme.orderBy().contains(symbol)).orElse(false)) &&
                             !windowNode.getCreatedSymbols().contains(symbol);
                 })
                 .collect(toImmutableSet());
@@ -112,10 +106,10 @@ public class PushDownDereferencesThroughWindow
         }
 
         // Create new symbols for dereference expressions
-        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSession(), context.getSymbolAllocator(), typeAnalyzer);
+        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSymbolAllocator());
 
         // Rewrite project node assignments using new symbols for dereference expressions
-        Map<Expression, SymbolReference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
+        Map<Expression, Reference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
                 .inverse()
                 .entrySet().stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().toSymbolReference()));
@@ -145,8 +139,10 @@ public class PushDownDereferencesThroughWindow
                                                             oldFunction.getArguments().stream()
                                                                     .map(expression -> replaceExpression(expression, mappings))
                                                                     .collect(toImmutableList()),
+                                                            oldFunction.getOrderingScheme(),
                                                             oldFunction.getFrame(),
-                                                            oldFunction.isIgnoreNulls());
+                                                            oldFunction.isIgnoreNulls(),
+                                                            oldFunction.isDistinct());
                                                 })),
                                 windowNode.getHashSymbol(),
                                 windowNode.getPrePartitionedInputs(),

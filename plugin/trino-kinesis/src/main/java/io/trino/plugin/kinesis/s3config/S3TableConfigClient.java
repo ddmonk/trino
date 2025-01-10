@@ -26,12 +26,13 @@ import com.google.common.io.CharStreams;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
+import io.airlift.units.Duration;
 import io.trino.plugin.kinesis.KinesisClientProvider;
 import io.trino.plugin.kinesis.KinesisConfig;
 import io.trino.plugin.kinesis.KinesisStreamDescription;
 import io.trino.spi.connector.SchemaTableName;
-
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -43,13 +44,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 
 /**
  * Utility class to retrieve table definitions from a common place on Amazon S3.
@@ -66,12 +68,14 @@ public class S3TableConfigClient
 
     private final KinesisClientProvider clientManager;
     private final JsonCodec<KinesisStreamDescription> streamDescriptionCodec;
-
+    private final Duration tableDescriptionRefreshInterval;
     private final Optional<String> bucketUrl;
     private volatile long lastCheck;
     private volatile ScheduledFuture<?> updateTaskHandle;
 
     private final Map<String, KinesisStreamDescription> descriptors = Collections.synchronizedMap(new HashMap<>());
+
+    private ScheduledExecutorService scheduler;
 
     @Inject
     public S3TableConfigClient(
@@ -79,7 +83,7 @@ public class S3TableConfigClient
             KinesisClientProvider clientManager,
             JsonCodec<KinesisStreamDescription> jsonCodec)
     {
-        requireNonNull(connectorConfig, "connectorConfig is null");
+        this.tableDescriptionRefreshInterval = connectorConfig.getTableDescriptionRefreshInterval();
         this.clientManager = requireNonNull(clientManager, "clientManager is null");
         this.streamDescriptionCodec = requireNonNull(jsonCodec, "jsonCodec is null");
 
@@ -95,10 +99,17 @@ public class S3TableConfigClient
     @PostConstruct
     protected void startS3Updates()
     {
-        // TODO: if required make the update interval configurable
         if (this.bucketUrl.isPresent()) {
-            ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-            this.updateTaskHandle = scheduler.scheduleAtFixedRate(this::updateTablesFromS3, 5, 600, TimeUnit.SECONDS);
+            scheduler = newSingleThreadScheduledExecutor(daemonThreadsNamed("s3-table-config-client-%s"));
+            this.updateTaskHandle = scheduler.scheduleAtFixedRate(this::updateTablesFromS3, 5_000, tableDescriptionRefreshInterval.toMillis(), TimeUnit.MILLISECONDS);
+        }
+    }
+
+    @PreDestroy
+    public void destroy()
+    {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
         }
     }
 
@@ -107,7 +118,7 @@ public class S3TableConfigClient
      */
     public boolean isUsingS3()
     {
-        return bucketUrl.isPresent() && (bucketUrl.get().startsWith("s3://"));
+        return bucketUrl.isPresent() && bucketUrl.get().startsWith("s3://");
     }
 
     /**
@@ -122,9 +133,9 @@ public class S3TableConfigClient
         Collection<KinesisStreamDescription> streamValues = this.descriptors.values();
         ImmutableMap.Builder<SchemaTableName, KinesisStreamDescription> builder = ImmutableMap.builder();
         for (KinesisStreamDescription stream : streamValues) {
-            builder.put(new SchemaTableName(stream.getSchemaName(), stream.getTableName()), stream);
+            builder.put(new SchemaTableName(stream.schemaName(), stream.tableName()), stream);
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     @Override
@@ -166,7 +177,7 @@ public class S3TableConfigClient
             log.info("Completed getting S3 object listing.");
         }
         catch (AmazonClientException e) {
-            log.error("Skipping update as faced error fetching table descriptions from S3 " + e.toString());
+            log.error("Skipping update as faced error fetching table descriptions from S3 %s", e);
         }
         return result;
     }
@@ -197,7 +208,7 @@ public class S3TableConfigClient
                     log.info("Put table description into the map from %s", summary.getKey());
                 }
                 catch (IOException iox) {
-                    log.error("Problem reading input stream from object.", iox);
+                    log.error(iox, "Problem reading input stream from object.");
                     throw new RuntimeException(iox);
                 }
             }

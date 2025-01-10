@@ -13,78 +13,20 @@
  */
 package io.trino.plugin.redis;
 
-import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.redis.util.RedisServer;
-import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterClass;
-
-import static io.trino.plugin.redis.RedisQueryRunner.createRedisQueryRunner;
 
 public class TestRedisConnectorTest
-        extends BaseConnectorTest
+        extends BaseRedisConnectorTest
 {
-    private RedisServer redisServer;
-
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        redisServer = new RedisServer();
-        return createRedisQueryRunner(redisServer, ImmutableMap.of(), "string", REQUIRED_TPCH_TABLES);
-    }
-
-    @AfterClass(alwaysRun = true)
-    public void destroy()
-    {
-        redisServer.close();
-    }
-
-    @Override
-    protected boolean supportsCreateSchema()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsCreateTable()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsInsert()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsDelete()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsViews()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsArrays()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsCommentOnTable()
-    {
-        return false;
-    }
-
-    @Override
-    protected boolean supportsCommentOnColumn()
-    {
-        return false;
+        RedisServer redisServer = closeAfterClass(new RedisServer());
+        return RedisQueryRunner.builder(redisServer)
+                .setDataFormat("string")
+                .setInitialTables(REQUIRED_TPCH_TABLES)
+                .build();
     }
 }

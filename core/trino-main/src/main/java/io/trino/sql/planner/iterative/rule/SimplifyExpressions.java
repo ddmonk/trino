@@ -13,51 +13,40 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.Type;
-import io.trino.sql.planner.ExpressionInterpreter;
-import io.trino.sql.planner.LiteralEncoder;
-import io.trino.sql.planner.NoOpSymbolResolver;
-import io.trino.sql.planner.SymbolAllocator;
-import io.trino.sql.planner.TypeAnalyzer;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.ir.optimizer.IrExpressionOptimizer;
 import io.trino.sql.planner.iterative.Rule;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.NodeRef;
-import io.trino.sql.tree.SymbolReference;
 
-import java.util.Map;
 import java.util.Set;
 
+import static io.trino.sql.ir.optimizer.IrExpressionOptimizer.newOptimizer;
 import static io.trino.sql.planner.iterative.rule.ExtractCommonPredicatesExpressionRewriter.extractCommonPredicates;
+import static io.trino.sql.planner.iterative.rule.NormalizeOrExpressionRewriter.normalizeOrExpression;
 import static io.trino.sql.planner.iterative.rule.PushDownNegationsExpressionRewriter.pushDownNegations;
 import static java.util.Objects.requireNonNull;
 
 public class SimplifyExpressions
         extends ExpressionRewriteRuleSet
 {
-    @VisibleForTesting
-    static Expression rewrite(Expression expression, Session session, SymbolAllocator symbolAllocator, Metadata metadata, LiteralEncoder literalEncoder, TypeAnalyzer typeAnalyzer)
+    public static Expression rewrite(Expression expression, Session session, IrExpressionOptimizer optimizer)
     {
-        requireNonNull(metadata, "metadata is null");
-        requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-        if (expression instanceof SymbolReference) {
+        if (expression instanceof Reference) {
             return expression;
         }
-        Map<NodeRef<Expression>, Type> expressionTypes = typeAnalyzer.getTypes(session, symbolAllocator.getTypes(), expression);
-        expression = pushDownNegations(metadata, expression, expressionTypes);
-        expression = extractCommonPredicates(metadata, expression);
-        expressionTypes = typeAnalyzer.getTypes(session, symbolAllocator.getTypes(), expression);
-        ExpressionInterpreter interpreter = ExpressionInterpreter.expressionOptimizer(expression, metadata, session, expressionTypes);
-        Object optimized = interpreter.optimize(NoOpSymbolResolver.INSTANCE);
-        return literalEncoder.toExpression(optimized, expressionTypes.get(NodeRef.of(expression)));
+        expression = pushDownNegations(expression);
+        expression = extractCommonPredicates(expression);
+        expression = normalizeOrExpression(expression);
+        return optimizer.process(expression, session, ImmutableMap.of()).orElse(expression);
     }
 
-    public SimplifyExpressions(Metadata metadata, TypeAnalyzer typeAnalyzer)
+    public SimplifyExpressions(PlannerContext plannerContext)
     {
-        super(createRewrite(metadata, typeAnalyzer));
+        super(createRewrite(plannerContext));
     }
 
     @Override
@@ -67,15 +56,14 @@ public class SimplifyExpressions
                 projectExpressionRewrite(),
                 filterExpressionRewrite(),
                 joinExpressionRewrite(),
-                valuesExpressionRewrite()); // ApplyNode and AggregationNode are not supported, because ExpressionInterpreter doesn't support them
+                valuesExpressionRewrite(),
+                patternRecognitionExpressionRewrite()); // ApplyNode and AggregationNode are not supported, because ExpressionInterpreter doesn't support them
     }
 
-    private static ExpressionRewriter createRewrite(Metadata metadata, TypeAnalyzer typeAnalyzer)
+    private static ExpressionRewriter createRewrite(PlannerContext plannerContext)
     {
-        requireNonNull(metadata, "metadata is null");
-        requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-        LiteralEncoder literalEncoder = new LiteralEncoder(metadata);
+        requireNonNull(plannerContext, "plannerContext is null");
 
-        return (expression, context) -> rewrite(expression, context.getSession(), context.getSymbolAllocator(), metadata, literalEncoder, typeAnalyzer);
+        return (expression, context) -> rewrite(expression, context.getSession(), newOptimizer(plannerContext));
     }
 }

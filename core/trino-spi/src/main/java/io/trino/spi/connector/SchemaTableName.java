@@ -18,11 +18,15 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.Objects;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.connector.SchemaUtil.checkNotEmpty;
 import static java.util.Locale.ENGLISH;
 
 public final class SchemaTableName
 {
+    private static final int INSTANCE_SIZE = instanceSize(SchemaTableName.class);
+
     private final String schemaName;
     private final String tableName;
 
@@ -31,6 +35,11 @@ public final class SchemaTableName
     {
         this.schemaName = checkNotEmpty(schemaName, "schemaName").toLowerCase(ENGLISH);
         this.tableName = checkNotEmpty(tableName, "tableName").toLowerCase(ENGLISH);
+    }
+
+    public static SchemaTableName schemaTableName(String schemaName, String tableName)
+    {
+        return new SchemaTableName(schemaName, tableName);
     }
 
     @JsonProperty("schema")
@@ -74,5 +83,12 @@ public final class SchemaTableName
     public SchemaTablePrefix toSchemaTablePrefix()
     {
         return new SchemaTablePrefix(schemaName, tableName);
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(schemaName)
+                + estimatedSizeOf(tableName);
     }
 }

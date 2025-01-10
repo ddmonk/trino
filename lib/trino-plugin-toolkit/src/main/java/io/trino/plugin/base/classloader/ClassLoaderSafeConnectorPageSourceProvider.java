@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.base.classloader;
 
+import com.google.inject.Inject;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -22,9 +23,6 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
-import io.trino.spi.predicate.TupleDomain;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
@@ -44,25 +42,9 @@ public class ClassLoaderSafeConnectorPageSourceProvider
     }
 
     @Override
-    public ConnectorPageSource createPageSource(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorSplit split, ConnectorTableHandle table, List<ColumnHandle> columns)
-    {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.createPageSource(transaction, session, split, table, columns);
-        }
-    }
-
-    @Override
-    public ConnectorPageSource createPageSource(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorSplit split, ConnectorTableHandle table, List<ColumnHandle> columns, TupleDomain<ColumnHandle> dynamicFilter)
-    {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.createPageSource(transaction, session, split, table, columns, dynamicFilter);
-        }
-    }
-
-    @Override
     public ConnectorPageSource createPageSource(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorSplit split, ConnectorTableHandle table, List<ColumnHandle> columns, DynamicFilter dynamicFilter)
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.createPageSource(transaction, session, split, table, columns, dynamicFilter);
         }
     }

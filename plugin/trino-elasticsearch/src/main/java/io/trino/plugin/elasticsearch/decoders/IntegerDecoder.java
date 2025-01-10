@@ -13,6 +13,9 @@
  */
 package io.trino.plugin.elasticsearch.decoders;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.elasticsearch.DecoderDescriptor;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import org.elasticsearch.search.SearchHit;
@@ -45,12 +48,16 @@ public class IntegerDecoder
         }
 
         long decoded;
-        if (value instanceof Number) {
-            decoded = ((Number) value).longValue();
+        if (value instanceof Number number) {
+            decoded = number.longValue();
         }
-        else if (value instanceof String) {
+        else if (value instanceof String stringValue) {
+            if (stringValue.isEmpty()) {
+                output.appendNull();
+                return;
+            }
             try {
-                decoded = Long.parseLong((String) value);
+                decoded = Long.parseLong(stringValue);
             }
             catch (NumberFormatException e) {
                 throw new TrinoException(TYPE_MISMATCH, format("Cannot parse value for field '%s' as INTEGER: %s", path, value));
@@ -65,5 +72,29 @@ public class IntegerDecoder
         }
 
         INTEGER.writeLong(output, decoded);
+    }
+
+    public static class Descriptor
+            implements DecoderDescriptor
+    {
+        private final String path;
+
+        @JsonCreator
+        public Descriptor(String path)
+        {
+            this.path = path;
+        }
+
+        @JsonProperty
+        public String getPath()
+        {
+            return path;
+        }
+
+        @Override
+        public Decoder createDecoder()
+        {
+            return new IntegerDecoder(path);
+        }
     }
 }

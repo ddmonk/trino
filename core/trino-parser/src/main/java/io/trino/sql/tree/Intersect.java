@@ -83,12 +83,22 @@ public class Intersect
         }
         Intersect o = (Intersect) obj;
         return Objects.equals(relations, o.relations) &&
-                Objects.equals(isDistinct(), o.isDistinct());
+               isDistinct() == o.isDistinct();
     }
 
     @Override
     public int hashCode()
     {
         return Objects.hash(relations, isDistinct());
+    }
+
+    @Override
+    public boolean shallowEquals(Node other)
+    {
+        if (!sameClass(this, other)) {
+            return false;
+        }
+
+        return this.isDistinct() == ((Intersect) other).isDistinct();
     }
 }

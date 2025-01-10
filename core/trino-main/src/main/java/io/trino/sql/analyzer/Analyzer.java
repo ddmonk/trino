@@ -14,14 +14,16 @@
 package io.trino.sql.analyzer;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
 import io.trino.Session;
-import io.trino.cost.StatsCalculator;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.FunctionResolver;
 import io.trino.security.AccessControl;
-import io.trino.spi.security.GroupProvider;
-import io.trino.sql.parser.SqlParser;
 import io.trino.sql.rewrite.StatementRewrite;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
@@ -32,79 +34,88 @@ import io.trino.sql.tree.Statement;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static io.trino.spi.StandardErrorCode.EXPRESSION_NOT_SCALAR;
 import static io.trino.sql.analyzer.ExpressionTreeUtils.extractAggregateFunctions;
 import static io.trino.sql.analyzer.ExpressionTreeUtils.extractExpressions;
-import static io.trino.sql.analyzer.ExpressionTreeUtils.extractWindowFunctions;
+import static io.trino.sql.analyzer.ExpressionTreeUtils.extractWindowExpressions;
+import static io.trino.sql.analyzer.QueryType.OTHERS;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static io.trino.tracing.ScopedSpan.scopedSpan;
 import static java.util.Objects.requireNonNull;
 
 public class Analyzer
 {
-    private final Metadata metadata;
-    private final SqlParser sqlParser;
-    private final AccessControl accessControl;
-    private final GroupProvider groupProvider;
+    private final AnalyzerFactory analyzerFactory;
+    private final StatementAnalyzerFactory statementAnalyzerFactory;
     private final Session session;
-    private final Optional<QueryExplainer> queryExplainer;
     private final List<Expression> parameters;
     private final Map<NodeRef<Parameter>, Expression> parameterLookup;
     private final WarningCollector warningCollector;
-    private final StatsCalculator statsCalculator;
+    private final PlanOptimizersStatsCollector planOptimizersStatsCollector;
+    private final Tracer tracer;
+    private final StatementRewrite statementRewrite;
 
-    public Analyzer(
+    Analyzer(
             Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            GroupProvider groupProvider,
-            AccessControl accessControl,
-            Optional<QueryExplainer> queryExplainer,
+            AnalyzerFactory analyzerFactory,
+            StatementAnalyzerFactory statementAnalyzerFactory,
             List<Expression> parameters,
             Map<NodeRef<Parameter>, Expression> parameterLookup,
             WarningCollector warningCollector,
-            StatsCalculator statsCalculator)
+            PlanOptimizersStatsCollector planOptimizersStatsCollector,
+            Tracer tracer,
+            StatementRewrite statementRewrite)
     {
         this.session = requireNonNull(session, "session is null");
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
-        this.groupProvider = requireNonNull(groupProvider, "groupProvider is null");
-        this.accessControl = requireNonNull(accessControl, "accessControl is null");
-        this.queryExplainer = requireNonNull(queryExplainer, "query explainer is null");
-        this.parameters = parameters;
-        this.parameterLookup = parameterLookup;
+        this.analyzerFactory = requireNonNull(analyzerFactory, "analyzerFactory is null");
+        this.statementAnalyzerFactory = requireNonNull(statementAnalyzerFactory, "statementAnalyzerFactory is null");
+        this.parameters = ImmutableList.copyOf(parameters);
+        this.parameterLookup = ImmutableMap.copyOf(parameterLookup);
         this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
-        this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
+        this.planOptimizersStatsCollector = requireNonNull(planOptimizersStatsCollector, "planOptimizersStatsCollector is null");
+        this.tracer = requireNonNull(tracer, "tracer is null");
+        this.statementRewrite = requireNonNull(statementRewrite, "statementRewrite is null");
     }
 
     public Analysis analyze(Statement statement)
     {
-        return analyze(statement, false);
+        Span span = tracer.spanBuilder("analyzer")
+                .setParent(Context.current().with(session.getQuerySpan()))
+                .startSpan();
+        try (var _ = scopedSpan(span)) {
+            return analyze(statement, OTHERS);
+        }
     }
 
-    public Analysis analyze(Statement statement, boolean isDescribe)
+    public Analysis analyze(Statement statement, QueryType queryType)
     {
-        Statement rewrittenStatement = StatementRewrite.rewrite(session, metadata, sqlParser, queryExplainer, statement, parameters, parameterLookup, groupProvider, accessControl, warningCollector, statsCalculator);
-        Analysis analysis = new Analysis(rewrittenStatement, parameterLookup, isDescribe);
-        StatementAnalyzer analyzer = new StatementAnalyzer(analysis, metadata, sqlParser, groupProvider, accessControl, session, warningCollector, CorrelationSupport.ALLOWED);
-        analyzer.analyze(rewrittenStatement, Optional.empty());
+        Statement rewrittenStatement = statementRewrite.rewrite(analyzerFactory, session, statement, parameters, parameterLookup, warningCollector, planOptimizersStatsCollector);
+        Analysis analysis = new Analysis(rewrittenStatement, parameterLookup, queryType);
+        StatementAnalyzer analyzer = statementAnalyzerFactory.createStatementAnalyzer(analysis, session, warningCollector, CorrelationSupport.ALLOWED);
 
-        // check column access permissions for each table
-        analysis.getTableColumnReferences().forEach((accessControlInfo, tableColumnReferences) ->
-                tableColumnReferences.forEach((tableName, columns) ->
-                        accessControlInfo.getAccessControl().checkCanSelectFromColumns(
-                                accessControlInfo.getSecurityContext(session.getRequiredTransactionId(), session.getQueryId()),
-                                tableName,
-                                columns)));
+        try (var _ = scopedSpan(tracer, "analyze")) {
+            analyzer.analyze(rewrittenStatement);
+        }
+
+        try (var _ = scopedSpan(tracer, "access-control")) {
+            // check column access permissions for each table
+            analysis.getTableColumnReferences().forEach((accessControlInfo, tableColumnReferences) ->
+                    tableColumnReferences.forEach((tableName, columns) ->
+                            accessControlInfo.getAccessControl().checkCanSelectFromColumns(
+                                    accessControlInfo.getSecurityContext(session.getRequiredTransactionId(), session.getQueryId(), session.getStart()),
+                                    tableName,
+                                    columns)));
+        }
+
         return analysis;
     }
 
-    static void verifyNoAggregateWindowOrGroupingFunctions(Metadata metadata, Expression predicate, String clause)
+    static void verifyNoAggregateWindowOrGroupingFunctions(Session session, FunctionResolver functionResolver, AccessControl accessControl, Expression predicate, String clause)
     {
-        List<FunctionCall> aggregates = extractAggregateFunctions(ImmutableList.of(predicate), metadata);
+        List<FunctionCall> aggregates = extractAggregateFunctions(ImmutableList.of(predicate), session, functionResolver, accessControl);
 
-        List<FunctionCall> windowExpressions = extractWindowFunctions(ImmutableList.of(predicate));
+        List<Expression> windowExpressions = extractWindowExpressions(ImmutableList.of(predicate), session, functionResolver, accessControl);
 
         List<GroupingOperation> groupingOperations = extractExpressions(ImmutableList.of(predicate), GroupingOperation.class);
 

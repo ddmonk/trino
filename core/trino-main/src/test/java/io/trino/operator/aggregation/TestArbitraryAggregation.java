@@ -14,13 +14,16 @@
 package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import io.trino.FeaturesConfig;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.metadata.TypeRegistry;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import io.trino.spi.type.TypeOperators;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collection;
 
 import static io.trino.block.BlockAssertions.createArrayBigintBlock;
 import static io.trino.block.BlockAssertions.createBooleansBlock;
@@ -28,7 +31,6 @@ import static io.trino.block.BlockAssertions.createDoublesBlock;
 import static io.trino.block.BlockAssertions.createIntsBlock;
 import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.block.BlockAssertions.createStringsBlock;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.operator.aggregation.AggregationTestUtils.assertAggregation;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -36,26 +38,28 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static org.testng.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestArbitraryAggregation
 {
-    private static final Metadata metadata = createTestMetadataManager();
+    private static final TestingFunctionResolution FUNCTION_RESOLUTION = new TestingFunctionResolution();
 
     @Test
     public void testAllRegistered()
     {
-        for (Type valueType : metadata.getTypes()) {
-            assertNotNull(metadata.getAggregateFunctionImplementation(metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(valueType))));
+        Collection<Type> standardTypes = new TypeRegistry(new TypeOperators(), new FeaturesConfig()).getTypes();
+        for (Type valueType : standardTypes) {
+            assertThat(FUNCTION_RESOLUTION.getAggregateFunction("arbitrary", fromTypes(valueType))).isNotNull();
         }
     }
 
     @Test
     public void testNullBoolean()
     {
-        InternalAggregationFunction booleanAgg = metadata.getAggregateFunctionImplementation(metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(BOOLEAN)));
         assertAggregation(
-                booleanAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(BOOLEAN),
                 null,
                 createBooleansBlock((Boolean) null));
     }
@@ -63,10 +67,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidBoolean()
     {
-        InternalAggregationFunction booleanAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(BOOLEAN)));
         assertAggregation(
-                booleanAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(BOOLEAN),
                 true,
                 createBooleansBlock(true, true));
     }
@@ -74,10 +78,10 @@ public class TestArbitraryAggregation
     @Test
     public void testNullLong()
     {
-        InternalAggregationFunction longAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(BIGINT)));
         assertAggregation(
-                longAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(BIGINT),
                 null,
                 createLongsBlock(null, null));
     }
@@ -85,10 +89,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidLong()
     {
-        InternalAggregationFunction longAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(BIGINT)));
         assertAggregation(
-                longAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(BIGINT),
                 1L,
                 createLongsBlock(1L, null));
     }
@@ -96,10 +100,10 @@ public class TestArbitraryAggregation
     @Test
     public void testNullDouble()
     {
-        InternalAggregationFunction doubleAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(DOUBLE)));
         assertAggregation(
-                doubleAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(DOUBLE),
                 null,
                 createDoublesBlock(null, null));
     }
@@ -107,10 +111,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidDouble()
     {
-        InternalAggregationFunction doubleAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(DOUBLE)));
         assertAggregation(
-                doubleAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(DOUBLE),
                 2.0,
                 createDoublesBlock(null, 2.0));
     }
@@ -118,10 +122,10 @@ public class TestArbitraryAggregation
     @Test
     public void testNullString()
     {
-        InternalAggregationFunction stringAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(VARCHAR)));
         assertAggregation(
-                stringAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(VARCHAR),
                 null,
                 createStringsBlock(null, null));
     }
@@ -129,10 +133,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidString()
     {
-        InternalAggregationFunction stringAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(VARCHAR)));
         assertAggregation(
-                stringAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(VARCHAR),
                 "a",
                 createStringsBlock("a", "a"));
     }
@@ -140,10 +144,10 @@ public class TestArbitraryAggregation
     @Test
     public void testNullArray()
     {
-        InternalAggregationFunction arrayAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(new ArrayType(BIGINT))));
         assertAggregation(
-                arrayAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(new ArrayType(BIGINT)),
                 null,
                 createArrayBigintBlock(Arrays.asList(null, null, null, null)));
     }
@@ -151,10 +155,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidArray()
     {
-        InternalAggregationFunction arrayAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(new ArrayType(BIGINT))));
         assertAggregation(
-                arrayAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(new ArrayType(BIGINT)),
                 ImmutableList.of(23L, 45L),
                 createArrayBigintBlock(ImmutableList.of(ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L))));
     }
@@ -162,10 +166,10 @@ public class TestArbitraryAggregation
     @Test
     public void testValidInt()
     {
-        InternalAggregationFunction arrayAgg = metadata.getAggregateFunctionImplementation(
-                metadata.resolveFunction(QualifiedName.of("arbitrary"), fromTypes(INTEGER)));
         assertAggregation(
-                arrayAgg,
+                FUNCTION_RESOLUTION,
+                "arbitrary",
+                fromTypes(INTEGER),
                 3,
                 createIntsBlock(3, 3, null));
     }

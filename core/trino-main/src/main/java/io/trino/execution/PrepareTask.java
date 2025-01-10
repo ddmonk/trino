@@ -14,8 +14,8 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
+import com.google.inject.Inject;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.spi.TrinoException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.Deallocate;
@@ -23,13 +23,10 @@ import io.trino.sql.tree.Execute;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Prepare;
 import io.trino.sql.tree.Statement;
-import io.trino.transaction.TransactionManager;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.SqlFormatterUtil.getFormattedSql;
 import static java.util.Locale.ENGLISH;
@@ -53,13 +50,11 @@ public class PrepareTask
     }
 
     @Override
-    public String explain(Prepare statement, List<Expression> parameters)
-    {
-        return "PREPARE " + statement.getName();
-    }
-
-    @Override
-    public ListenableFuture<?> execute(Prepare prepare, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            Prepare prepare,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Statement statement = prepare.getStatement();
         if ((statement instanceof Prepare) || (statement instanceof Execute) || (statement instanceof Deallocate)) {
@@ -69,6 +64,6 @@ public class PrepareTask
 
         String sql = getFormattedSql(statement, sqlParser);
         stateMachine.addPreparedStatement(prepare.getName().getValue(), sql);
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

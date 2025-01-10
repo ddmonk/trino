@@ -17,22 +17,26 @@ import com.google.common.io.Resources;
 import io.trino.sql.SqlFormatter;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Statement;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 
-import static com.google.common.base.Strings.repeat;
-import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DOUBLE;
 import static io.trino.sql.testing.TreeAssertions.assertFormattedSql;
-import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStatementBuilder
 {
     private static final SqlParser SQL_PARSER = new SqlParser();
+
+    @Test
+    public void testPreparedGrantWithQuotes()
+    {
+        printStatement("prepare p from grant select on table hive.test.\"case\" to role test");
+        printStatement("prepare p from grant select on hive.test.\"case\" to role test");
+        printStatement("prepare p from grant select on table hive.test.\"case\" to role \"case\"");
+    }
 
     @Test
     public void testStatementBuilder()
@@ -168,6 +172,8 @@ public class TestStatementBuilder
         printStatement("delete from foo");
         printStatement("delete from foo where a = b");
 
+        printStatement("truncate table foo");
+
         printStatement("values ('a', 1, 2.2), ('b', 2, 3.3)");
 
         printStatement("table foo");
@@ -197,6 +203,10 @@ public class TestStatementBuilder
 
         printStatement("alter table a.b.c rename column x to y");
 
+        printStatement("alter table foo set properties a='1'");
+        printStatement("alter table a.b.c set properties a=true, b=123, c='x'");
+        printStatement("alter table a.b.c set properties a=DEFAULT, b=123");
+
         printStatement("alter table a.b.c add column x bigint");
 
         printStatement("alter table a.b.c add column x bigint comment 'large x'");
@@ -204,6 +214,16 @@ public class TestStatementBuilder
         printStatement("alter table a.b.c add column x bigint comment 'xtra' with (compression = 'LZ4', special = true)");
 
         printStatement("alter table a.b.c drop column x");
+
+        printStatement("alter table foo alter column x set data type bigint");
+        printStatement("alter table a.b.c alter column x set data type bigint");
+
+        printStatement("alter table foo alter column x drop not null");
+        printStatement("alter table a.b.c alter column x drop not null");
+
+        printStatement("alter materialized view foo set properties a='1'");
+        printStatement("alter materialized view a.b.c set properties a=true, b=123, c='x'");
+        printStatement("alter materialized view a.b.c set properties a=default, b=123");
 
         printStatement("create schema test");
         printStatement("create schema test authorization alice");
@@ -234,6 +254,7 @@ public class TestStatementBuilder
         printStatement("create table test (a boolean, b bigint) comment 'test' with (a = 'apple')");
         printStatement("create table test (a boolean with (a = 'apple', b = 'banana'), b bigint comment 'bla' with (c = 'cherry')) comment 'test' with (a = 'apple')");
         printStatement("comment on table test is 'test'");
+        printStatement("comment on view test is 'test'");
         printStatement("comment on column test.a is 'test'");
         printStatement("drop table test");
 
@@ -273,6 +294,12 @@ public class TestStatementBuilder
         printStatement("grant select on foo to alice with grant option");
         printStatement("grant all privileges on foo to alice");
         printStatement("grant delete, select on foo to role public");
+        printStatement("deny select on foo to alice");
+        printStatement("deny all privileges on foo to alice");
+        printStatement("deny delete, select on foo to role public");
+        printStatement("deny select on schema foo to alice");
+        printStatement("deny all privileges on schema foo to alice");
+        printStatement("deny delete, select on schema foo to role public");
         printStatement("revoke grant option for select on foo from alice");
         printStatement("revoke all privileges on foo from alice");
         printStatement("revoke insert, delete on foo from role public");
@@ -286,22 +313,41 @@ public class TestStatementBuilder
         printStatement("show role grants");
         printStatement("show role grants from foo");
 
+        printStatement("show create schema abc");
+        printStatement("show create table abc");
+        printStatement("show create view abc");
+        printStatement("show create materialized view abc");
+        printStatement("show create function abc");
+
         printStatement("prepare p from select * from (select * from T) \"A B\"");
 
         printStatement("SELECT * FROM table1 WHERE a >= ALL (VALUES 2, 3, 4)");
         printStatement("SELECT * FROM table1 WHERE a <> ANY (SELECT 2, 3, 4)");
         printStatement("SELECT * FROM table1 WHERE a = SOME (SELECT id FROM table2)");
+
+        printStatement("" +
+                "merge into inventory as i\n" +
+                "using changes as c\n" +
+                "on i.part = c.part\n" +
+                "when matched and c.action = 'mod' then\n" +
+                "update set qty = qty + c.qty\n" +
+                "when matched and c.action = 'del' then delete\n" +
+                "when not matched and c.action = 'new' then\n" +
+                "insert (part, qty) values (c.part, c.qty)");
+
+        printStatement("set session authorization user");
+        printStatement("reset session authorization");
     }
 
     @Test
     public void testStringFormatter()
     {
         assertSqlFormatter("U&'hello\\6d4B\\8Bd5\\+10FFFFworld\\7F16\\7801'",
-                "U&'hello\\6D4B\\8BD5\\+10FFFFworld\\7F16\\7801'");
+                "'hello测试\uDBFF\uDFFFworld编码'");
         assertSqlFormatter("'hello world'", "'hello world'");
-        assertSqlFormatter("U&'!+10FFFF!6d4B!8Bd5ABC!6d4B!8Bd5' UESCAPE '!'", "U&'\\+10FFFF\\6D4B\\8BD5ABC\\6D4B\\8BD5'");
-        assertSqlFormatter("U&'\\+10FFFF\\6D4B\\8BD5\\0041\\0042\\0043\\6D4B\\8BD5'", "U&'\\+10FFFF\\6D4B\\8BD5ABC\\6D4B\\8BD5'");
-        assertSqlFormatter("U&'\\\\abc\\6D4B'''", "U&'\\\\abc\\6D4B'''");
+        assertSqlFormatter("U&'!+10FFFF!6d4B!8Bd5ABC!6d4B!8Bd5' UESCAPE '!'", "'\uDBFF\uDFFF测试ABC测试'");
+        assertSqlFormatter("U&'\\+10FFFF\\6D4B\\8BD5\\0041\\0042\\0043\\6D4B\\8BD5'", "'\uDBFF\uDFFF测试ABC测试'");
+        assertSqlFormatter("U&'\\\\abc\\6D4B'''", "'\\abc测'''");
     }
 
     @Test
@@ -343,8 +389,7 @@ public class TestStatementBuilder
         println(sql.trim());
         println("");
 
-        ParsingOptions parsingOptions = new ParsingOptions(AS_DOUBLE /* anything */);
-        Statement statement = SQL_PARSER.createStatement(sql, parsingOptions);
+        Statement statement = SQL_PARSER.createStatement(sql);
         println(statement.toString());
         println("");
 
@@ -352,15 +397,15 @@ public class TestStatementBuilder
         println("");
         assertFormattedSql(SQL_PARSER, statement);
 
-        println(repeat("=", 60));
+        println("=".repeat(60));
         println("");
     }
 
     private static void assertSqlFormatter(String expression, String formatted)
     {
-        Expression originalExpression = SQL_PARSER.createExpression(expression, new ParsingOptions());
+        Expression originalExpression = SQL_PARSER.createExpression(expression);
         String real = SqlFormatter.formatSql(originalExpression);
-        assertEquals(real, formatted);
+        assertThat(real).isEqualTo(formatted);
     }
 
     private static void println(String s)
@@ -380,10 +425,12 @@ public class TestStatementBuilder
         String sql = getTpchQuery(query);
 
         for (int i = values.length - 1; i >= 0; i--) {
-            sql = sql.replaceAll(format(":%s", i + 1), String.valueOf(values[i]));
+            sql = sql.replaceAll(":%s".formatted(i + 1), String.valueOf(values[i]));
         }
 
-        assertFalse(sql.matches("(?s).*:[0-9].*"), "Not all bind parameters were replaced: " + sql);
+        assertThat(sql.matches("(?s).*:[0-9].*"))
+                .as("Not all bind parameters were replaced: " + sql)
+                .isFalse();
 
         sql = fixTpchQuery(sql);
         printStatement(sql);

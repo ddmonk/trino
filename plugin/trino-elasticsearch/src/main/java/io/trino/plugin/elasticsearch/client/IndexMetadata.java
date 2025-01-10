@@ -17,102 +17,61 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-public class IndexMetadata
+public record IndexMetadata(ObjectType schema)
 {
-    private final ObjectType schema;
-
-    public IndexMetadata(ObjectType schema)
+    public IndexMetadata
     {
-        this.schema = requireNonNull(schema, "schema is null");
+        requireNonNull(schema, "schema is null");
     }
 
-    public ObjectType getSchema()
+    public record Field(boolean asRawJson, boolean isArray, String name, Type type)
     {
-        return schema;
-    }
-
-    public static class Field
-    {
-        private final boolean isArray;
-        private final String name;
-        private final Type type;
-
-        public Field(boolean isArray, String name, Type type)
+        public Field
         {
-            this.isArray = isArray;
-            this.name = requireNonNull(name, "name is null");
-            this.type = requireNonNull(type, "type is null");
-        }
-
-        public boolean isArray()
-        {
-            return isArray;
-        }
-
-        public String getName()
-        {
-            return name;
-        }
-
-        public Type getType()
-        {
-            return type;
+            checkArgument(!asRawJson || !isArray,
+                    format("A column, (%s) cannot be declared as a Trino array and also be rendered as json.", name));
+            requireNonNull(name, "name is null");
+            requireNonNull(type, "type is null");
         }
     }
 
     public interface Type {}
 
-    public static class PrimitiveType
+    public record PrimitiveType(String name)
             implements Type
     {
-        private final String name;
-
-        public PrimitiveType(String name)
+        public PrimitiveType
         {
-            this.name = requireNonNull(name, "name is null");
-        }
-
-        public String getName()
-        {
-            return name;
+            requireNonNull(name, "name is null");
         }
     }
 
-    public static class DateTimeType
+    public record DateTimeType(List<String> formats)
             implements Type
     {
-        private final List<String> formats;
-
-        public DateTimeType(List<String> formats)
+        public DateTimeType
         {
             requireNonNull(formats, "formats is null");
-
-            this.formats = ImmutableList.copyOf(formats);
-        }
-
-        public List<String> getFormats()
-        {
-            return formats;
+            formats = ImmutableList.copyOf(formats);
         }
     }
 
-    public static class ObjectType
+    public record ObjectType(List<Field> fields)
             implements Type
     {
-        private final List<Field> fields;
-
-        public ObjectType(List<Field> fields)
+        public ObjectType
         {
             requireNonNull(fields, "fields is null");
-
-            this.fields = ImmutableList.copyOf(fields);
+            fields = ImmutableList.copyOf(fields);
         }
+    }
 
-        public List<Field> getFields()
-        {
-            return fields;
-        }
+    public record ScaledFloatType(double scale)
+            implements Type
+    {
     }
 }

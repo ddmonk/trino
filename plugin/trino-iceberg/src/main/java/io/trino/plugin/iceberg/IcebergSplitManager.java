@@ -14,23 +14,37 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.inject.Inject;
+import io.airlift.units.Duration;
+import io.trino.filesystem.cache.CachingHostAddressProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitSource;
-import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.metastore.HiveMetastore;
+import io.trino.plugin.iceberg.functions.tablechanges.TableChangesFunctionHandle;
+import io.trino.plugin.iceberg.functions.tablechanges.TableChangesSplitSource;
+import io.trino.plugin.iceberg.functions.tables.IcebergTablesFunction.IcebergTables;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
+import io.trino.spi.type.TypeManager;
+import org.apache.iceberg.CombinedScanTask;
+import org.apache.iceberg.DataOperations;
+import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.Scan;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.TableScan;
+import org.apache.iceberg.util.SnapshotUtil;
 
-import javax.inject.Inject;
+import java.util.concurrent.ExecutorService;
 
-import static io.trino.plugin.iceberg.ExpressionConverter.toIcebergExpression;
-import static io.trino.plugin.iceberg.IcebergUtil.getIcebergTable;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.getDynamicFilteringWaitTimeout;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.getMinimumAssignedSplitWeight;
+import static io.trino.spi.connector.FixedSplitSource.emptySplitSource;
 import static java.util.Objects.requireNonNull;
 
 public class IcebergSplitManager
@@ -39,13 +53,27 @@ public class IcebergSplitManager
     public static final int ICEBERG_DOMAIN_COMPACTION_THRESHOLD = 1000;
 
     private final IcebergTransactionManager transactionManager;
-    private final HdfsEnvironment hdfsEnvironment;
+    private final TypeManager typeManager;
+    private final IcebergFileSystemFactory fileSystemFactory;
+    private final ListeningExecutorService splitSourceExecutor;
+    private final ExecutorService icebergPlanningExecutor;
+    private final CachingHostAddressProvider cachingHostAddressProvider;
 
     @Inject
-    public IcebergSplitManager(IcebergTransactionManager transactionManager, HdfsEnvironment hdfsEnvironment)
+    public IcebergSplitManager(
+            IcebergTransactionManager transactionManager,
+            TypeManager typeManager,
+            IcebergFileSystemFactory fileSystemFactory,
+            @ForIcebergSplitManager ListeningExecutorService splitSourceExecutor,
+            @ForIcebergScanPlanning ExecutorService icebergPlanningExecutor,
+            CachingHostAddressProvider cachingHostAddressProvider)
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.splitSourceExecutor = requireNonNull(splitSourceExecutor, "splitSourceExecutor is null");
+        this.icebergPlanningExecutor = requireNonNull(icebergPlanningExecutor, "icebergPlanningExecutor is null");
+        this.cachingHostAddressProvider = requireNonNull(cachingHostAddressProvider, "cachingHostAddressProvider is null");
     }
 
     @Override
@@ -53,32 +81,87 @@ public class IcebergSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle handle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         IcebergTableHandle table = (IcebergTableHandle) handle;
 
         if (table.getSnapshotId().isEmpty()) {
-            return new FixedSplitSource(ImmutableList.of());
+            if (table.isRecordScannedFiles()) {
+                return new FixedSplitSource(ImmutableList.of(), ImmutableList.of());
+            }
+            return emptySplitSource();
         }
 
-        HiveMetastore metastore = transactionManager.get(transaction).getMetastore();
-        Table icebergTable = getIcebergTable(metastore, hdfsEnvironment, session, table.getSchemaTableName());
+        IcebergMetadata icebergMetadata = transactionManager.get(transaction, session.getIdentity());
+        Table icebergTable = icebergMetadata.getIcebergTable(session, table.getSchemaTableName());
+        Duration dynamicFilteringWaitTimeout = getDynamicFilteringWaitTimeout(session);
 
-        TableScan tableScan = icebergTable.newScan()
-                .filter(toIcebergExpression(
-                        table.getEnforcedPredicate()
-                                // TODO: Remove TupleDomain#simplify once Iceberg supports IN expression. Currently this
-                                // is required for IN predicates on non-partition columns with large value list. Such
-                                // predicates on partition columns are not supported.
-                                // (See AbstractTestIcebergSmoke#testLargeInFailureOnPartitionedColumns)
-                                .intersect(table.getUnenforcedPredicate().simplify(ICEBERG_DOMAIN_COMPACTION_THRESHOLD))))
-                .useSnapshot(table.getSnapshotId().get());
+        Scan scan = getScan(icebergMetadata, icebergTable, table, icebergPlanningExecutor);
 
-        // TODO Use residual. Right now there is no way to propagate residual to Trino but at least we can
-        //      propagate it at split level so the parquet pushdown can leverage it.
-        IcebergSplitSource splitSource = new IcebergSplitSource(tableScan.planTasks());
+        IcebergSplitSource splitSource = new IcebergSplitSource(
+                fileSystemFactory,
+                session,
+                table,
+                icebergTable,
+                scan,
+                table.getMaxScannedFileSize(),
+                dynamicFilter,
+                dynamicFilteringWaitTimeout,
+                constraint,
+                typeManager,
+                table.isRecordScannedFiles(),
+                getMinimumAssignedSplitWeight(session),
+                cachingHostAddressProvider,
+                splitSourceExecutor);
 
-        return new ClassLoaderSafeConnectorSplitSource(splitSource, Thread.currentThread().getContextClassLoader());
+        return new ClassLoaderSafeConnectorSplitSource(splitSource, IcebergSplitManager.class.getClassLoader());
+    }
+
+    private Scan<?, FileScanTask, CombinedScanTask> getScan(IcebergMetadata icebergMetadata, Table icebergTable, IcebergTableHandle table, ExecutorService executor)
+    {
+        Long fromSnapshot = icebergMetadata.getIncrementalRefreshFromSnapshot().orElse(null);
+        if (fromSnapshot != null) {
+            // check if fromSnapshot is still part of the table's snapshot history
+            if (SnapshotUtil.isAncestorOf(icebergTable, fromSnapshot)) {
+                boolean containsModifiedRows = false;
+                for (Snapshot snapshot : SnapshotUtil.ancestorsBetween(icebergTable, icebergTable.currentSnapshot().snapshotId(), fromSnapshot)) {
+                    if (snapshot.operation().equals(DataOperations.OVERWRITE) || snapshot.operation().equals(DataOperations.DELETE)) {
+                        containsModifiedRows = true;
+                        break;
+                    }
+                }
+                if (!containsModifiedRows) {
+                    return icebergTable.newIncrementalAppendScan().fromSnapshotExclusive(fromSnapshot).planWith(executor);
+                }
+            }
+            // fromSnapshot is missing (could be due to snapshot expiration or rollback), or snapshot range contains modifications
+            // (deletes or overwrites), so we cannot perform incremental refresh. Falling back to full refresh.
+            icebergMetadata.disableIncrementalRefresh();
+        }
+        return icebergTable.newScan().useSnapshot(table.getSnapshotId().get()).planWith(executor);
+    }
+
+    @Override
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableFunctionHandle function)
+    {
+        if (function instanceof TableChangesFunctionHandle functionHandle) {
+            Table icebergTable = transactionManager.get(transaction, session.getIdentity()).getIcebergTable(session, functionHandle.schemaTableName());
+
+            TableChangesSplitSource tableChangesSplitSource = new TableChangesSplitSource(
+                    icebergTable,
+                    icebergTable.newIncrementalChangelogScan()
+                            .fromSnapshotExclusive(functionHandle.startSnapshotId())
+                            .toSnapshot(functionHandle.endSnapshotId()));
+            return new ClassLoaderSafeConnectorSplitSource(tableChangesSplitSource, IcebergSplitManager.class.getClassLoader());
+        }
+        if (function instanceof IcebergTables icebergTables) {
+            return new ClassLoaderSafeConnectorSplitSource(new FixedSplitSource(icebergTables), IcebergSplitManager.class.getClassLoader());
+        }
+
+        throw new IllegalStateException("Unknown table function: " + function);
     }
 }

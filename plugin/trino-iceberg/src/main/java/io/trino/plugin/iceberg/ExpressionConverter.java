@@ -14,76 +14,77 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.base.VerifyException;
-import io.airlift.slice.Slice;
 import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.Marker;
 import io.trino.spi.predicate.Range;
-import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
-import io.trino.spi.type.DateType;
-import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Decimals;
-import io.trino.spi.type.IntegerType;
-import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
-import io.trino.spi.type.RealType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.VarbinaryType;
-import io.trino.spi.type.VarcharType;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 
-import java.math.BigDecimal;
-import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.function.BiFunction;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.plugin.iceberg.util.Timestamps.timestampTzToMicros;
-import static io.trino.spi.predicate.Marker.Bound.ABOVE;
-import static io.trino.spi.predicate.Marker.Bound.BELOW;
-import static io.trino.spi.predicate.Marker.Bound.EXACTLY;
-import static io.trino.spi.type.TimeType.TIME_MICROS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
-import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
-import static java.lang.Float.intBitsToFloat;
-import static java.lang.Math.toIntExact;
-import static java.util.Objects.requireNonNull;
+import static io.trino.plugin.hive.util.HiveUtil.isStructuralType;
+import static io.trino.plugin.iceberg.IcebergMetadataColumn.isMetadataColumnId;
+import static io.trino.plugin.iceberg.IcebergTypes.convertTrinoValueToIceberg;
+import static io.trino.spi.type.UuidType.UUID;
+import static java.lang.String.format;
 import static org.apache.iceberg.expressions.Expressions.alwaysFalse;
 import static org.apache.iceberg.expressions.Expressions.alwaysTrue;
-import static org.apache.iceberg.expressions.Expressions.and;
 import static org.apache.iceberg.expressions.Expressions.equal;
 import static org.apache.iceberg.expressions.Expressions.greaterThan;
 import static org.apache.iceberg.expressions.Expressions.greaterThanOrEqual;
+import static org.apache.iceberg.expressions.Expressions.in;
 import static org.apache.iceberg.expressions.Expressions.isNull;
 import static org.apache.iceberg.expressions.Expressions.lessThan;
 import static org.apache.iceberg.expressions.Expressions.lessThanOrEqual;
 import static org.apache.iceberg.expressions.Expressions.not;
-import static org.apache.iceberg.expressions.Expressions.or;
 
 public final class ExpressionConverter
 {
     private ExpressionConverter() {}
+
+    public static boolean isConvertibleToIcebergExpression(Domain domain)
+    {
+        if (isStructuralType(domain.getType())) {
+            // structural types cannot be used to filter a table scan in Iceberg library.
+            return false;
+        }
+
+        if (domain.getType() == UUID) {
+            // Iceberg orders UUID values differently than Trino (perhaps due to https://bugs.openjdk.org/browse/JDK-7025832), so allow only IS NULL / IS NOT NULL checks
+            return domain.isOnlyNull() || domain.getValues().isAll();
+        }
+
+        return true;
+    }
 
     public static Expression toIcebergExpression(TupleDomain<IcebergColumnHandle> tupleDomain)
     {
         if (tupleDomain.isAll()) {
             return alwaysTrue();
         }
-        if (tupleDomain.getDomains().isEmpty()) {
+        if (tupleDomain.isNone()) {
             return alwaysFalse();
         }
         Map<IcebergColumnHandle, Domain> domainMap = tupleDomain.getDomains().get();
-        Expression expression = alwaysTrue();
+        List<Expression> conjuncts = new ArrayList<>();
         for (Map.Entry<IcebergColumnHandle, Domain> entry : domainMap.entrySet()) {
             IcebergColumnHandle columnHandle = entry.getKey();
+            checkArgument(!isMetadataColumnId(columnHandle.getId()), "Constraint on an unexpected column %s", columnHandle);
             Domain domain = entry.getValue();
-            expression = and(expression, toIcebergExpression(columnHandle.getName(), columnHandle.getType(), domain));
+            checkArgument(isConvertibleToIcebergExpression(domain), "Unexpected not convertible domain on column %s: %s", columnHandle, domain);
+            conjuncts.add(toIcebergExpression(columnHandle.getQualifiedName(), columnHandle.getType(), domain));
         }
-        return expression;
+        return and(conjuncts);
     }
 
     private static Expression toIcebergExpression(String columnName, Type type, Domain domain)
@@ -99,118 +100,138 @@ public final class ExpressionConverter
             return domain.isNullAllowed() ? alwaysTrue() : not(isNull(columnName));
         }
 
-        // Skip structural types. TODO: Evaluate Apache Iceberg's support for predicate on structural types
         if (type instanceof ArrayType || type instanceof MapType || type instanceof RowType) {
-            return alwaysTrue();
+            // Fail fast. Ignoring expression could lead to data loss in case of deletions.
+            throw new UnsupportedOperationException("Unsupported type for expression: " + type);
         }
 
-        ValueSet domainValues = domain.getValues();
-        Expression expression = null;
-        if (domain.isNullAllowed()) {
-            expression = isNull(columnName);
-        }
-
-        if (domainValues instanceof SortedRangeSet) {
-            List<Range> orderedRanges = ((SortedRangeSet) domainValues).getOrderedRanges();
-            expression = firstNonNull(expression, alwaysFalse());
-
+        if (type.isOrderable()) {
+            List<Range> orderedRanges = domain.getValues().getRanges().getOrderedRanges();
+            List<Object> icebergValues = new ArrayList<>();
+            List<Expression> rangeExpressions = new ArrayList<>();
             for (Range range : orderedRanges) {
-                Marker low = range.getLow();
-                Marker high = range.getHigh();
-                Marker.Bound lowBound = low.getBound();
-                Marker.Bound highBound = high.getBound();
-
-                // case col <> 'val' is represented as (col < 'val' or col > 'val')
-                if (lowBound == EXACTLY && highBound == EXACTLY) {
-                    // case ==
-                    if (getIcebergLiteralValue(type, low).equals(getIcebergLiteralValue(type, high))) {
-                        expression = or(expression, equal(columnName, getIcebergLiteralValue(type, low)));
-                    }
-                    else { // case between
-                        Expression between = and(
-                                greaterThanOrEqual(columnName, getIcebergLiteralValue(type, low)),
-                                lessThanOrEqual(columnName, getIcebergLiteralValue(type, high)));
-                        expression = or(expression, between);
-                    }
+                if (range.isSingleValue()) {
+                    icebergValues.add(convertTrinoValueToIceberg(type, range.getLowBoundedValue()));
                 }
                 else {
-                    if (lowBound == EXACTLY && low.getValueBlock().isPresent()) {
-                        // case >=
-                        expression = or(expression, greaterThanOrEqual(columnName, getIcebergLiteralValue(type, low)));
-                    }
-                    else if (lowBound == ABOVE && low.getValueBlock().isPresent()) {
-                        // case >
-                        expression = or(expression, greaterThan(columnName, getIcebergLiteralValue(type, low)));
-                    }
-
-                    if (highBound == EXACTLY && high.getValueBlock().isPresent()) {
-                        // case <=
-                        if (low.getValueBlock().isPresent()) {
-                            expression = and(expression, lessThanOrEqual(columnName, getIcebergLiteralValue(type, high)));
-                        }
-                        else {
-                            expression = or(expression, lessThanOrEqual(columnName, getIcebergLiteralValue(type, high)));
-                        }
-                    }
-                    else if (highBound == BELOW && high.getValueBlock().isPresent()) {
-                        // case <
-                        if (low.getValueBlock().isPresent()) {
-                            expression = and(expression, lessThan(columnName, getIcebergLiteralValue(type, high)));
-                        }
-                        else {
-                            expression = or(expression, lessThan(columnName, getIcebergLiteralValue(type, high)));
-                        }
-                    }
+                    rangeExpressions.add(toIcebergExpression(columnName, range));
                 }
             }
-            return expression;
+            Expression ranges = or(rangeExpressions);
+            Expression values = icebergValues.isEmpty() ? alwaysFalse() : in(columnName, icebergValues);
+            Expression nullExpression = domain.isNullAllowed() ? isNull(columnName) : alwaysFalse();
+            return or(nullExpression, or(values, ranges));
         }
 
-        throw new VerifyException("Did not expect a domain value set other than SortedRangeSet but got " + domainValues.getClass().getSimpleName());
+        throw new VerifyException(format("Unsupported type %s with domain values %s", type, domain));
     }
 
-    private static Object getIcebergLiteralValue(Type type, Marker marker)
+    private static Expression toIcebergExpression(String columnName, Range range)
     {
-        if (type instanceof IntegerType) {
-            return toIntExact((long) marker.getValue());
+        Type type = range.getType();
+
+        if (range.isSingleValue()) {
+            Object icebergValue = convertTrinoValueToIceberg(type, range.getSingleValue());
+            return equal(columnName, icebergValue);
         }
 
-        if (type instanceof RealType) {
-            return intBitsToFloat(toIntExact((long) marker.getValue()));
-        }
-
-        // TODO: Remove this conversion once we move to next iceberg version
-        if (type instanceof DateType) {
-            return toIntExact(((Long) marker.getValue()));
-        }
-
-        if (type.equals(TIME_MICROS)) {
-            return ((long) marker.getValue()) / PICOSECONDS_PER_MICROSECOND;
-        }
-
-        if (type.equals(TIMESTAMP_TZ_MICROS)) {
-            return timestampTzToMicros((LongTimestampWithTimeZone) marker.getValue());
-        }
-
-        if (type instanceof VarcharType) {
-            return ((Slice) marker.getValue()).toStringUtf8();
-        }
-
-        if (type instanceof VarbinaryType) {
-            return ByteBuffer.wrap(((Slice) marker.getValue()).getBytes());
-        }
-
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
-            Object value = requireNonNull(marker.getValue(), "The value of the marker must be non-null");
-            if (Decimals.isShortDecimal(decimalType)) {
-                checkArgument(value instanceof Long, "A short decimal should be represented by a Long value but was %s", value.getClass().getName());
-                return BigDecimal.valueOf((long) value).movePointLeft(decimalType.getScale());
+        List<Expression> conjuncts = new ArrayList<>(2);
+        if (!range.isLowUnbounded()) {
+            Object icebergLow = convertTrinoValueToIceberg(type, range.getLowBoundedValue());
+            Expression lowBound;
+            if (range.isLowInclusive()) {
+                lowBound = greaterThanOrEqual(columnName, icebergLow);
             }
-            checkArgument(value instanceof Slice, "A long decimal should be represented by a Slice value but was %s", value.getClass().getName());
-            return new BigDecimal(Decimals.decodeUnscaledValue((Slice) value), decimalType.getScale());
+            else {
+                lowBound = greaterThan(columnName, icebergLow);
+            }
+            conjuncts.add(lowBound);
         }
 
-        return marker.getValue();
+        if (!range.isHighUnbounded()) {
+            Object icebergHigh = convertTrinoValueToIceberg(type, range.getHighBoundedValue());
+            Expression highBound;
+            if (range.isHighInclusive()) {
+                highBound = lessThanOrEqual(columnName, icebergHigh);
+            }
+            else {
+                highBound = lessThan(columnName, icebergHigh);
+            }
+            conjuncts.add(highBound);
+        }
+
+        return and(conjuncts);
+    }
+
+    private static Expression and(List<Expression> expressions)
+    {
+        if (expressions.isEmpty()) {
+            return alwaysTrue();
+        }
+        return combine(expressions, Expressions::and);
+    }
+
+    private static Expression or(Expression left, Expression right)
+    {
+        return Expressions.or(left, right);
+    }
+
+    private static Expression or(List<Expression> expressions)
+    {
+        if (expressions.isEmpty()) {
+            return alwaysFalse();
+        }
+        return combine(expressions, Expressions::or);
+    }
+
+    private static Expression combine(List<Expression> expressions, BiFunction<Expression, Expression, Expression> combiner)
+    {
+        // Build balanced tree that preserves the evaluation order of the input expressions.
+        //
+        // The tree is built bottom up by combining pairs of elements into binary expressions.
+        //
+        // Example:
+        //
+        // Initial state:
+        //  a b c d e
+        //
+        // First iteration:
+        //
+        //  /\    /\   e
+        // a  b  c  d
+        //
+        // Second iteration:
+        //
+        //    / \    e
+        //  /\   /\
+        // a  b c  d
+        //
+        //
+        // Last iteration:
+        //
+        //      / \
+        //    / \  e
+        //  /\   /\
+        // a  b c  d
+
+        Queue<Expression> queue = new ArrayDeque<>(expressions);
+        while (queue.size() > 1) {
+            Queue<Expression> buffer = new ArrayDeque<>();
+
+            // combine pairs of elements
+            while (queue.size() >= 2) {
+                buffer.add(combiner.apply(queue.remove(), queue.remove()));
+            }
+
+            // if there's and odd number of elements, just append the last one
+            if (!queue.isEmpty()) {
+                buffer.add(queue.remove());
+            }
+
+            // continue processing the pairs that were just built
+            queue = buffer;
+        }
+
+        return queue.remove();
     }
 }

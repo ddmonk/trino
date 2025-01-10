@@ -15,15 +15,24 @@ package io.trino.tests.product.launcher.suite.suites;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
-import io.trino.tests.product.launcher.env.environment.Singlenode;
-import io.trino.tests.product.launcher.env.environment.SinglenodeHdfsImpersonation;
-import io.trino.tests.product.launcher.env.environment.SinglenodeKerberosHdfsImpersonation;
-import io.trino.tests.product.launcher.env.environment.SinglenodeKerberosHdfsNoImpersonation;
+import io.trino.tests.product.launcher.env.environment.EnvMultinode;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeHdfsImpersonation;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeKerberosHdfsImpersonation;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeKerberosHdfsNoImpersonation;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeKerberosHiveNoImpersonationWithCredentialCache;
 import io.trino.tests.product.launcher.suite.Suite;
 import io.trino.tests.product.launcher.suite.SuiteTestRun;
 
 import java.util.List;
 
+import static io.trino.tests.product.TestGroups.AUTHORIZATION;
+import static io.trino.tests.product.TestGroups.CLI;
+import static io.trino.tests.product.TestGroups.CONFIGURED_FEATURES;
+import static io.trino.tests.product.TestGroups.HDFS_IMPERSONATION;
+import static io.trino.tests.product.TestGroups.HDFS_NO_IMPERSONATION;
+import static io.trino.tests.product.TestGroups.HIVE_FILE_HEADER;
+import static io.trino.tests.product.TestGroups.HIVE_KERBEROS;
+import static io.trino.tests.product.TestGroups.STORAGE_FORMATS;
 import static io.trino.tests.product.launcher.suite.SuiteTestRun.testOnEnvironment;
 
 public class Suite2
@@ -33,10 +42,23 @@ public class Suite2
     public List<SuiteTestRun> getTestRuns(EnvironmentConfig config)
     {
         return ImmutableList.of(
-                testOnEnvironment(Singlenode.class).withGroups("hdfs_no_impersonation", "hive_compression").build(),
-                testOnEnvironment(SinglenodeKerberosHdfsNoImpersonation.class).withGroups("storage_formats", "hdfs_no_impersonation").build(),
-                testOnEnvironment(SinglenodeHdfsImpersonation.class).withGroups("storage_formats", "cli", "hdfs_impersonation").build(),
-                testOnEnvironment(SinglenodeKerberosHdfsImpersonation.class).withGroups("storage_formats", "cli", "hdfs_impersonation", "authorization", "hive_file_header").build(),
-                testOnEnvironment(Singlenode.class).withGroups("hive_with_external_writes").build());
+                testOnEnvironment(EnvMultinode.class)
+                        .withGroups(CONFIGURED_FEATURES, HDFS_NO_IMPERSONATION)
+                        // hive.non-managed-table-writes-enabled is mandatory for this test,
+                        // setting up this property will break other tests
+                        .withExcludedTests("io.trino.tests.product.TestImpersonation.testExternalLocationTableCreationSuccess")
+                        .build(),
+                testOnEnvironment(EnvSinglenodeKerberosHdfsNoImpersonation.class)
+                        .withGroups(CONFIGURED_FEATURES, STORAGE_FORMATS, HDFS_NO_IMPERSONATION, HIVE_KERBEROS)
+                        .build(),
+                testOnEnvironment(EnvSinglenodeKerberosHiveNoImpersonationWithCredentialCache.class)
+                        .withGroups(CONFIGURED_FEATURES, STORAGE_FORMATS, HDFS_NO_IMPERSONATION)
+                        .build(),
+                testOnEnvironment(EnvSinglenodeHdfsImpersonation.class)
+                        .withGroups(CONFIGURED_FEATURES, STORAGE_FORMATS, CLI, HDFS_IMPERSONATION)
+                        .build(),
+                testOnEnvironment(EnvSinglenodeKerberosHdfsImpersonation.class)
+                        .withGroups(CONFIGURED_FEATURES, STORAGE_FORMATS, CLI, HDFS_IMPERSONATION, AUTHORIZATION, HIVE_FILE_HEADER, HIVE_KERBEROS)
+                        .build());
     }
 }

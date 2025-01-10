@@ -31,12 +31,12 @@ import static java.util.Objects.requireNonNull;
 class GenericRecordRowDecoder
         implements RowDecoder
 {
-    private List<Map.Entry<DecoderColumnHandle, AvroColumnDecoder>> columnDecoders;
+    private final List<Map.Entry<DecoderColumnHandle, AvroColumnDecoder>> columnDecoders;
     private final AvroDeserializer<GenericRecord> deserializer;
 
     public GenericRecordRowDecoder(AvroDeserializer<GenericRecord> deserializer, Set<DecoderColumnHandle> columns)
     {
-        this.deserializer = requireNonNull(deserializer, "dataReader is null");
+        this.deserializer = requireNonNull(deserializer, "deserializer is null");
         requireNonNull(columns, "columns is null");
         this.columnDecoders = columns.stream()
                 .map(column -> new AbstractMap.SimpleImmutableEntry<>(column, new AvroColumnDecoder(column)))
@@ -44,9 +44,15 @@ class GenericRecordRowDecoder
     }
 
     @Override
-    public Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodeRow(byte[] data, Map<String, String> dataMap)
+    public Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodeRow(byte[] data)
     {
-        GenericRecord avroRecord = deserializer.deserialize(data);
+        GenericRecord avroRecord;
+        try {
+            avroRecord = deserializer.deserialize(data);
+        }
+        catch (RuntimeException e) {
+            return Optional.empty();
+        }
         return Optional.of(columnDecoders.stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().decodeField(avroRecord))));
     }

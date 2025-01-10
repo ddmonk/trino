@@ -15,27 +15,26 @@ package io.trino.operator.exchange;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import jakarta.annotation.Nullable;
 
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 
 @ThreadSafe
 public class LocalExchangeMemoryManager
 {
-    private static final ListenableFuture<?> NOT_BLOCKED = immediateFuture(null);
+    private static final ListenableFuture<Void> NOT_BLOCKED = immediateVoidFuture();
 
     private final long maxBufferedBytes;
     private final AtomicLong bufferedBytes = new AtomicLong();
 
     @Nullable
     @GuardedBy("this")
-    private SettableFuture<?> notFullFuture; // null represents "no callback registered"
+    private SettableFuture<Void> notFullFuture; // null represents "no callback registered"
 
     public LocalExchangeMemoryManager(long maxBufferedBytes)
     {
@@ -48,7 +47,7 @@ public class LocalExchangeMemoryManager
         long bufferedBytes = this.bufferedBytes.addAndGet(bytesAdded);
         // detect the transition from above to below the full boundary
         if (bufferedBytes <= maxBufferedBytes && (bufferedBytes - bytesAdded) > maxBufferedBytes) {
-            SettableFuture<?> future;
+            SettableFuture<Void> future;
             synchronized (this) {
                 // if we have no callback waiting, return early
                 if (notFullFuture == null) {
@@ -62,7 +61,7 @@ public class LocalExchangeMemoryManager
         }
     }
 
-    public ListenableFuture<?> getNotFullFuture()
+    public ListenableFuture<Void> getNotFullFuture()
     {
         if (bufferedBytes.get() <= maxBufferedBytes) {
             return NOT_BLOCKED;

@@ -13,36 +13,20 @@
  */
 package io.trino.sql.relational;
 
-import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
-import io.trino.spi.TrinoException;
 
-import static java.util.Objects.requireNonNull;
-
-public class DeterminismEvaluator
+public final class DeterminismEvaluator
 {
-    private final Metadata metadata;
+    private DeterminismEvaluator() {}
 
-    public DeterminismEvaluator(Metadata metadata)
+    public static boolean isDeterministic(RowExpression expression)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-    }
-
-    public boolean isDeterministic(RowExpression expression)
-    {
-        return expression.accept(new Visitor(metadata), null);
+        return expression.accept(new Visitor(), null);
     }
 
     private static class Visitor
             implements RowExpressionVisitor<Boolean, Void>
     {
-        private final Metadata metadata;
-
-        public Visitor(Metadata metadata)
-        {
-            this.metadata = metadata;
-        }
-
         @Override
         public Boolean visitInputReference(InputReferenceExpression reference, Void context)
         {
@@ -58,37 +42,26 @@ public class DeterminismEvaluator
         @Override
         public Boolean visitCall(CallExpression call, Void context)
         {
-            ResolvedFunction resolvedFunction = call.getResolvedFunction();
-            if (!isDeterministic(resolvedFunction)) {
+            ResolvedFunction resolvedFunction = call.resolvedFunction();
+            if (!resolvedFunction.deterministic()) {
                 return false;
             }
 
-            return call.getArguments().stream()
+            return call.arguments().stream()
                     .allMatch(expression -> expression.accept(this, context));
-        }
-
-        private boolean isDeterministic(ResolvedFunction resolvedFunction)
-        {
-            try {
-                return metadata.getFunctionMetadata(resolvedFunction).isDeterministic();
-            }
-            catch (TrinoException ignored) {
-                // unknown functions are typically special forms and are deterministic
-                return true;
-            }
         }
 
         @Override
         public Boolean visitSpecialForm(SpecialForm specialForm, Void context)
         {
-            return specialForm.getArguments().stream()
+            return specialForm.arguments().stream()
                     .allMatch(expression -> expression.accept(this, context));
         }
 
         @Override
         public Boolean visitLambda(LambdaDefinitionExpression lambda, Void context)
         {
-            return lambda.getBody().accept(this, context);
+            return lambda.body().accept(this, context);
         }
 
         @Override

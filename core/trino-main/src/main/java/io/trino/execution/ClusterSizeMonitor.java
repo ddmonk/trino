@@ -17,18 +17,18 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
 import io.trino.metadata.AllNodes;
 import io.trino.metadata.InternalNodeManager;
 import io.trino.spi.TrinoException;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Managed;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import javax.annotation.concurrent.GuardedBy;
-import javax.inject.Inject;
-
+import java.util.List;
 import java.util.PriorityQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -36,8 +36,8 @@ import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
-import static io.airlift.concurrent.Threads.threadsNamed;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static java.lang.String.format;
 import static java.util.Comparator.comparing;
@@ -57,14 +57,14 @@ public class ClusterSizeMonitor
     private int currentCount;
 
     @GuardedBy("this")
-    private final PriorityQueue<MinNodesFuture> futuresQueue = new PriorityQueue<>(comparing(MinNodesFuture::getExecutionMinCount));
+    private final PriorityQueue<MinNodesFuture> futuresQueue = new PriorityQueue<>(comparing(MinNodesFuture::executionMinCount));
 
     @Inject
     public ClusterSizeMonitor(InternalNodeManager nodeManager, NodeSchedulerConfig nodeSchedulerConfig)
     {
         this(
                 nodeManager,
-                requireNonNull(nodeSchedulerConfig, "nodeSchedulerConfig is null").isIncludeCoordinator());
+                nodeSchedulerConfig.isIncludeCoordinator());
     }
 
     public ClusterSizeMonitor(
@@ -73,7 +73,7 @@ public class ClusterSizeMonitor
     {
         this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
         this.includeCoordinator = includeCoordinator;
-        this.executor = newSingleThreadScheduledExecutor(threadsNamed("node-monitor-%s"));
+        this.executor = newSingleThreadScheduledExecutor(daemonThreadsNamed("node-monitor-%s"));
     }
 
     @PostConstruct
@@ -87,6 +87,7 @@ public class ClusterSizeMonitor
     public void stop()
     {
         nodeManager.removeNodeChangeListener(listener);
+        executor.shutdown();
     }
 
     /**
@@ -94,16 +95,16 @@ public class ClusterSizeMonitor
      * Note: caller should not add a listener using the direct executor, as this can delay the
      * notifications for other listeners.
      */
-    public synchronized ListenableFuture<?> waitForMinimumWorkers(int executionMinCount, Duration executionMaxWait)
+    public synchronized ListenableFuture<Void> waitForMinimumWorkers(int executionMinCount, Duration executionMaxWait)
     {
         checkArgument(executionMinCount > 0, "executionMinCount should be greater than 0");
         requireNonNull(executionMaxWait, "executionMaxWait is null");
 
         if (currentCount >= executionMinCount) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
 
-        SettableFuture<?> future = SettableFuture.create();
+        SettableFuture<Void> future = SettableFuture.create();
         MinNodesFuture minNodesFuture = new MinNodesFuture(executionMinCount, future);
         futuresQueue.add(minNodesFuture);
 
@@ -142,17 +143,17 @@ public class ClusterSizeMonitor
             currentCount = Sets.difference(allNodes.getActiveNodes(), allNodes.getActiveCoordinators()).size();
         }
 
-        ImmutableList.Builder<SettableFuture<?>> listenersBuilder = new ImmutableList.Builder<>();
+        ImmutableList.Builder<SettableFuture<Void>> listenersBuilder = ImmutableList.builder();
         while (!futuresQueue.isEmpty()) {
             MinNodesFuture minNodesFuture = futuresQueue.peek();
-            if (minNodesFuture == null || minNodesFuture.getExecutionMinCount() > currentCount) {
+            if (minNodesFuture.executionMinCount() > currentCount) {
                 break;
             }
-            listenersBuilder.add(minNodesFuture.getFuture());
+            listenersBuilder.add(minNodesFuture.future());
             // this should not happen since we have a lock
             checkState(futuresQueue.poll() == minNodesFuture, "Unexpected modifications to MinNodesFuture queue");
         }
-        ImmutableList<SettableFuture<?>> listeners = listenersBuilder.build();
+        List<SettableFuture<Void>> listeners = listenersBuilder.build();
         executor.submit(() -> listeners.forEach(listener -> listener.set(null)));
     }
 
@@ -160,30 +161,16 @@ public class ClusterSizeMonitor
     public synchronized int getRequiredWorkers()
     {
         return futuresQueue.stream()
-                .map(MinNodesFuture::getExecutionMinCount)
+                .map(MinNodesFuture::executionMinCount)
                 .max(Integer::compareTo)
                 .orElse(0);
     }
 
-    private static class MinNodesFuture
+    private record MinNodesFuture(int executionMinCount, SettableFuture<Void> future)
     {
-        private final int executionMinCount;
-        private final SettableFuture<?> future;
-
-        MinNodesFuture(int executionMinCount, SettableFuture<?> future)
+        MinNodesFuture
         {
-            this.executionMinCount = executionMinCount;
-            this.future = future;
-        }
-
-        int getExecutionMinCount()
-        {
-            return executionMinCount;
-        }
-
-        SettableFuture<?> getFuture()
-        {
-            return future;
+            requireNonNull(future, "future is null");
         }
     }
 }

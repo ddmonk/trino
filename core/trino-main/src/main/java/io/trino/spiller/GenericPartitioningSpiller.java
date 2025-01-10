@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.io.Closer;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.errorprone.annotations.ThreadSafe;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.operator.PartitionFunction;
 import io.trino.operator.SpillContext;
@@ -25,8 +26,6 @@ import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,6 +40,8 @@ import java.util.function.Predicate;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static java.util.Objects.requireNonNull;
 
@@ -78,7 +79,7 @@ public class GenericPartitioningSpiller
         requireNonNull(memoryContext, "memoryContext is null");
         closer.register(memoryContext::close);
         this.memoryContext = memoryContext;
-        int partitionCount = partitionFunction.getPartitionCount();
+        int partitionCount = partitionFunction.partitionCount();
 
         ImmutableList.Builder<PageBuilder> pageBuilders = ImmutableList.builder();
         spillers = new ArrayList<>(partitionCount);
@@ -113,7 +114,7 @@ public class GenericPartitioningSpiller
 
         checkState(!readingStarted, "reading already started");
         IntArrayList unspilledPositions = partitionPage(page, spillPartitionMask);
-        ListenableFuture<?> future = flushFullBuilders();
+        ListenableFuture<Void> future = flushFullBuilders();
 
         return new PartitioningSpillResult(future, page.getPositions(unspilledPositions.elements(), 0, unspilledPositions.size()));
     }
@@ -142,21 +143,21 @@ public class GenericPartitioningSpiller
         return unspilledPositions;
     }
 
-    private ListenableFuture<?> flushFullBuilders()
+    private ListenableFuture<Void> flushFullBuilders()
     {
         return flush(PageBuilder::isFull);
     }
 
     @VisibleForTesting
-    ListenableFuture<?> flush()
+    ListenableFuture<Void> flush()
     {
         return flush(pageBuilder -> true);
     }
 
-    private synchronized ListenableFuture<?> flush(Predicate<PageBuilder> flushCondition)
+    private synchronized ListenableFuture<Void> flush(Predicate<PageBuilder> flushCondition)
     {
         requireNonNull(flushCondition, "flushCondition is null");
-        ImmutableList.Builder<ListenableFuture<?>> futures = ImmutableList.builder();
+        ImmutableList.Builder<ListenableFuture<Void>> futures = ImmutableList.builder();
 
         for (int partition = 0; partition < spillers.size(); partition++) {
             PageBuilder pageBuilder = pageBuilders.get(partition);
@@ -165,14 +166,19 @@ public class GenericPartitioningSpiller
             }
         }
 
-        return Futures.allAsList(futures.build());
+        return asVoid(Futures.allAsList(futures.build()));
     }
 
-    private synchronized ListenableFuture<?> flush(int partition)
+    private static <T> ListenableFuture<Void> asVoid(ListenableFuture<T> future)
+    {
+        return Futures.transform(future, v -> null, directExecutor());
+    }
+
+    private synchronized ListenableFuture<Void> flush(int partition)
     {
         PageBuilder pageBuilder = pageBuilders.get(partition);
         if (pageBuilder.isEmpty()) {
-            return Futures.immediateFuture(null);
+            return immediateVoidFuture();
         }
         Page page = pageBuilder.build();
         pageBuilder.reset();

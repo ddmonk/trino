@@ -15,7 +15,6 @@ package io.trino.operator.scalar;
 
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -25,17 +24,14 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.scalar.StringFunctions.leftTrim;
 import static io.trino.operator.scalar.StringFunctions.length;
 import static io.trino.operator.scalar.StringFunctions.lower;
@@ -214,11 +210,11 @@ public class BenchmarkStringFunctions
         public void setup()
         {
             Slice whitespace = createRandomUtf8Slice(ascii ? ASCII_WHITESPACE : ALL_WHITESPACE, length + 1);
-            leftWhitespace = Slices.copyOf(whitespace);
+            leftWhitespace = whitespace.copy();
             leftWhitespace.setByte(leftWhitespace.length() - 1, 'X');
-            rightWhitespace = Slices.copyOf(whitespace);
+            rightWhitespace = whitespace.copy();
             rightWhitespace.setByte(0, 'X');
-            bothWhitespace = Slices.copyOf(whitespace);
+            bothWhitespace = whitespace.copy();
             bothWhitespace.setByte(length / 2, 'X');
         }
 
@@ -257,11 +253,6 @@ public class BenchmarkStringFunctions
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkStringFunctions.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkStringFunctions.class).run();
     }
 }

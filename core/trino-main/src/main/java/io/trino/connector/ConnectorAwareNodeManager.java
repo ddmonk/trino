@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.metadata.InternalNodeManager;
 import io.trino.spi.Node;
 import io.trino.spi.NodeManager;
+import io.trino.spi.connector.CatalogHandle;
 
 import java.util.Set;
 
@@ -27,28 +28,43 @@ public class ConnectorAwareNodeManager
 {
     private final InternalNodeManager nodeManager;
     private final String environment;
-    private final CatalogName catalogName;
+    private final CatalogHandle catalogHandle;
+    private final boolean schedulerIncludeCoordinator;
 
-    public ConnectorAwareNodeManager(InternalNodeManager nodeManager, String environment, CatalogName catalogName)
+    public ConnectorAwareNodeManager(InternalNodeManager nodeManager, String environment, CatalogHandle catalogHandle, boolean schedulerIncludeCoordinator)
     {
         this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
         this.environment = requireNonNull(environment, "environment is null");
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
+        this.schedulerIncludeCoordinator = schedulerIncludeCoordinator;
     }
 
     @Override
     public Set<Node> getAllNodes()
     {
         return ImmutableSet.<Node>builder()
-                .addAll(getWorkerNodes())
-                .addAll(nodeManager.getCoordinators())
+                .addAll(nodeManager.getActiveCatalogNodes(catalogHandle))
+                // append current node (before connector is registered with the node
+                // in the discovery service) since current node should have connector always loaded
+                .add(nodeManager.getCurrentNode())
                 .build();
     }
 
     @Override
     public Set<Node> getWorkerNodes()
     {
-        return ImmutableSet.copyOf(nodeManager.getActiveConnectorNodes(catalogName));
+        ImmutableSet.Builder<Node> nodes = ImmutableSet.builder();
+        // getActiveConnectorNodes returns all nodes (including coordinators)
+        // that have connector registered
+        nodeManager.getActiveCatalogNodes(catalogHandle).stream()
+                .filter(node -> !node.isCoordinator() || schedulerIncludeCoordinator)
+                .forEach(nodes::add);
+        if (!nodeManager.getCurrentNode().isCoordinator() || schedulerIncludeCoordinator) {
+            // append current node (before connector is registered with the node
+            // in discovery service) since current node should have connector always loaded
+            nodes.add(getCurrentNode());
+        }
+        return nodes.build();
     }
 
     @Override

@@ -14,15 +14,16 @@
 package io.trino.sql.gen;
 
 import io.trino.spi.block.Block;
+import jakarta.annotation.Nullable;
 
-import javax.annotation.Nullable;
-
+import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 
-// This methods are statically bound by the compiler
-@SuppressWarnings("UnusedDeclaration")
+// These methods are statically bound by the compiler
 public final class CompilerOperations
 {
     private CompilerOperations() {}
@@ -71,5 +72,17 @@ public final class CompilerOperations
             return BOOLEAN.getBoolean(masks, index);
         }
         return true;
+    }
+
+    public static int optionalChannelToIntOrNegative(Optional<Integer> channel)
+    {
+        return channel.orElse(-1);
+    }
+
+    public static void validateChannelsListLength(List<Integer> channels, int requiredSize)
+    {
+        int channelsSize = channels.size();
+        // empty channels is allowed for intermediate aggregations
+        checkArgument(channelsSize == 0 || requiredSize == 0 || channelsSize == requiredSize, "Invalid channels length, expected %s but found: %s", requiredSize, channelsSize);
     }
 }

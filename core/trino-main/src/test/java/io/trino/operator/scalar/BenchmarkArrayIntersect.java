@@ -15,19 +15,18 @@ package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -40,19 +39,14 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
-import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -119,13 +113,13 @@ public class BenchmarkArrayIntersect
                     throw new UnsupportedOperationException();
             }
 
-            Metadata metadata = createTestMetadataManager();
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution();
             ArrayType arrayType = new ArrayType(elementType);
             ImmutableList<RowExpression> projections = ImmutableList.of(new CallExpression(
-                    metadata.resolveFunction(QualifiedName.of(name), fromTypes(arrayType, arrayType)),
+                    functionResolution.resolveFunction(name, fromTypes(arrayType, arrayType)),
                     ImmutableList.of(field(0, arrayType), field(1, arrayType))));
 
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+            ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
             pageProcessor = compiler.compilePageProcessor(Optional.empty(), projections).get();
 
             page = new Page(createChannel(POSITIONS, arraySize, elementType), createChannel(POSITIONS, arraySize, elementType));
@@ -134,28 +128,28 @@ public class BenchmarkArrayIntersect
         private static Block createChannel(int positionCount, int arraySize, Type elementType)
         {
             ArrayType arrayType = new ArrayType(elementType);
-            BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-                for (int i = 0; i < arraySize; i++) {
-                    if (elementType.getJavaType() == long.class) {
-                        elementType.writeLong(entryBuilder, ThreadLocalRandom.current().nextLong() % arraySize);
+                blockBuilder.buildEntry(elementBuilder -> {
+                    for (int i = 0; i < arraySize; i++) {
+                        if (elementType.getJavaType() == long.class) {
+                            elementType.writeLong(elementBuilder, ThreadLocalRandom.current().nextLong() % arraySize);
+                        }
+                        else if (elementType.getJavaType() == double.class) {
+                            elementType.writeDouble(elementBuilder, ThreadLocalRandom.current().nextDouble() % arraySize);
+                        }
+                        else if (elementType.getJavaType() == boolean.class) {
+                            elementType.writeBoolean(elementBuilder, ThreadLocalRandom.current().nextBoolean());
+                        }
+                        else if (elementType.equals(VARCHAR)) {
+                            // make sure the size of a varchar is rather small; otherwise the aggregated slice may overflow
+                            elementType.writeSlice(elementBuilder, Slices.utf8Slice(Long.toString(ThreadLocalRandom.current().nextLong() % arraySize)));
+                        }
+                        else {
+                            throw new UnsupportedOperationException();
+                        }
                     }
-                    else if (elementType.getJavaType() == double.class) {
-                        elementType.writeDouble(entryBuilder, ThreadLocalRandom.current().nextDouble() % arraySize);
-                    }
-                    else if (elementType.getJavaType() == boolean.class) {
-                        elementType.writeBoolean(entryBuilder, ThreadLocalRandom.current().nextBoolean());
-                    }
-                    else if (elementType.equals(VARCHAR)) {
-                        // make sure the size of a varchar is rather small; otherwise the aggregated slice may overflow
-                        elementType.writeSlice(entryBuilder, Slices.utf8Slice(Long.toString(ThreadLocalRandom.current().nextLong() % arraySize)));
-                    }
-                    else {
-                        throw new UnsupportedOperationException();
-                    }
-                }
-                blockBuilder.closeEntry();
+                });
             }
             return blockBuilder.build();
         }
@@ -187,10 +181,6 @@ public class BenchmarkArrayIntersect
         data.setup();
         new BenchmarkArrayIntersect().arrayIntersect(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkArrayIntersect.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkArrayIntersect.class).run();
     }
 }

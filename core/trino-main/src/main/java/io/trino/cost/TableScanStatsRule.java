@@ -13,25 +13,22 @@
  */
 package io.trino.cost;
 
-import io.trino.Session;
+import io.trino.cost.StatsCalculator.Context;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.connector.Constraint;
 import io.trino.spi.statistics.ColumnStatistics;
+import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.FixedWidthType;
 import io.trino.spi.type.Type;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.plan.TableScanNode;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.base.Verify.verifyNotNull;
+import static io.trino.SystemSessionProperties.isStatisticsPrecalculationForPushdownEnabled;
 import static io.trino.sql.planner.plan.Patterns.tableScan;
 import static java.lang.Double.NaN;
 import static java.util.Objects.requireNonNull;
@@ -39,14 +36,12 @@ import static java.util.Objects.requireNonNull;
 public class TableScanStatsRule
         extends SimpleStatsRule<TableScanNode>
 {
+    private static final double UNKNOWN_NULLS_FRACTION = 0.1;
     private static final Pattern<TableScanNode> PATTERN = tableScan();
 
-    private final Metadata metadata;
-
-    public TableScanStatsRule(Metadata metadata, StatsNormalizer normalizer)
+    public TableScanStatsRule(StatsNormalizer normalizer)
     {
         super(normalizer); // Use stats normalization since connector can return inconsistent stats values
-        this.metadata = requireNonNull(metadata, "metadata is null");
     }
 
     @Override
@@ -56,20 +51,21 @@ public class TableScanStatsRule
     }
 
     @Override
-    protected Optional<PlanNodeStatsEstimate> doCalculate(TableScanNode node, StatsProvider sourceStats, Lookup lookup, Session session, TypeProvider types)
+    protected Optional<PlanNodeStatsEstimate> doCalculate(TableScanNode node, Context context)
     {
-        // TODO Construct predicate like AddExchanges's LayoutConstraintEvaluator
-        Constraint constraint = new Constraint(metadata.getTableProperties(session, node.getTable()).getPredicate());
+        if (isStatisticsPrecalculationForPushdownEnabled(context.session()) && node.getStatistics().isPresent()) {
+            return node.getStatistics();
+        }
 
-        TableStatistics tableStatistics = metadata.getTableStatistics(session, node.getTable(), constraint);
-        verifyNotNull(tableStatistics, "tableStatistics is null for %s", node);
+        TableStatistics tableStatistics = context.tableStatsProvider().getTableStatistics(node.getTable());
+
         Map<Symbol, SymbolStatsEstimate> outputSymbolStats = new HashMap<>();
 
         for (Map.Entry<Symbol, ColumnHandle> entry : node.getAssignments().entrySet()) {
             Symbol symbol = entry.getKey();
             Optional<ColumnStatistics> columnStatistics = Optional.ofNullable(tableStatistics.getColumnStatistics().get(entry.getValue()));
             SymbolStatsEstimate symbolStatistics = columnStatistics
-                    .map(statistics -> toSymbolStatistics(tableStatistics, statistics, types.get(symbol)))
+                    .map(statistics -> toSymbolStatistics(tableStatistics, statistics, symbol.type()))
                     .orElse(SymbolStatsEstimate.unknown());
             outputSymbolStats.put(symbol, symbolStatistics);
         }
@@ -86,7 +82,7 @@ public class TableScanStatsRule
         requireNonNull(columnStatistics, "columnStatistics is null");
         requireNonNull(type, "type is null");
 
-        double nullsFraction = columnStatistics.getNullsFraction().getValue();
+        double nullsFraction = getNullsFraction(columnStatistics, tableStatistics.getRowCount());
         double nonNullRowsCount = tableStatistics.getRowCount().getValue() * (1.0 - nullsFraction);
         double averageRowSize;
         if (nonNullRowsCount == 0) {
@@ -108,5 +104,26 @@ public class TableScanStatsRule
             result.setHighValue(range.getMax());
         });
         return result.build();
+    }
+
+    private static double getNullsFraction(ColumnStatistics columnStatistics, Estimate rowCount)
+    {
+        if (!columnStatistics.getNullsFraction().isUnknown()
+                || columnStatistics.getDistinctValuesCount().isUnknown()
+                || rowCount.isUnknown()) {
+            return columnStatistics.getNullsFraction().getValue();
+        }
+        // When NDV is greater than or equal to row count, there are no nulls
+        if (columnStatistics.getDistinctValuesCount().getValue() >= rowCount.getValue()) {
+            return 0;
+        }
+
+        double maxPossibleNulls = rowCount.getValue() - columnStatistics.getDistinctValuesCount().getValue();
+
+        // If a connector provides NDV but is missing nulls fraction statistic for a column
+        // (e.g. Delta Lake after "delta.dataSkippingNumIndexedCols" columns and MySql), populate a
+        // 10% guess value so that the CBO can still produce some estimates rather failing to make
+        // any estimates due to lack of nulls fraction.
+        return Math.min(UNKNOWN_NULLS_FRACTION, maxPossibleNulls / rowCount.getValue());
     }
 }

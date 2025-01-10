@@ -28,21 +28,9 @@ public class StringApproximateMostFrequentStateFactory
     }
 
     @Override
-    public Class<? extends VarcharApproximateMostFrequent.State> getSingleStateClass()
-    {
-        return StringApproximateMostFrequentStateFactory.SingleLongApproximateMostFrequentState.class;
-    }
-
-    @Override
     public VarcharApproximateMostFrequent.State createGroupedState()
     {
         return new StringApproximateMostFrequentStateFactory.GroupedLongApproximateMostFrequentState();
-    }
-
-    @Override
-    public Class<? extends VarcharApproximateMostFrequent.State> getGroupedStateClass()
-    {
-        return StringApproximateMostFrequentStateFactory.GroupedLongApproximateMostFrequentState.class;
     }
 
     public static class SingleLongApproximateMostFrequentState
@@ -87,17 +75,15 @@ public class StringApproximateMostFrequentStateFactory
         @Override
         public void set(ApproximateMostFrequentHistogram<Slice> histogram)
         {
-            ApproximateMostFrequentHistogram<Slice> previous = get();
+            ApproximateMostFrequentHistogram<Slice> previous = histograms.getAndSet(getGroupId(), histogram);
+            size += histogram.estimatedInMemorySize();
             if (previous != null) {
                 size -= previous.estimatedInMemorySize();
             }
-
-            histograms.set(getGroupId(), histogram);
-            this.size = histogram.estimatedInMemorySize();
         }
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             histograms.ensureCapacity(size);
         }

@@ -18,15 +18,14 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.UnnestNode;
-import io.trino.sql.tree.DereferenceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.Map;
 import java.util.Set;
@@ -35,12 +34,11 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.ExpressionNodeInliner.replaceExpression;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.iterative.rule.DereferencePushdown.getBase;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.unnest;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Transforms:
@@ -63,12 +61,6 @@ public class PushDownDereferenceThroughUnnest
         implements Rule<ProjectNode>
 {
     private static final Capture<UnnestNode> CHILD = newCapture();
-    private final TypeAnalyzer typeAnalyzer;
-
-    public PushDownDereferenceThroughUnnest(TypeAnalyzer typeAnalyzer)
-    {
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-    }
 
     @Override
     public Pattern<ProjectNode> getPattern()
@@ -82,13 +74,8 @@ public class PushDownDereferenceThroughUnnest
     {
         UnnestNode unnestNode = captures.get(CHILD);
 
-        // Extract dereferences from project node's assignments and unnest node's filter
-        ImmutableList.Builder<Expression> expressionsBuilder = ImmutableList.builder();
-        expressionsBuilder.addAll(projectNode.getAssignments().getExpressions());
-        unnestNode.getFilter().ifPresent(expressionsBuilder::add);
-
-        // Extract dereferences for pushdown
-        Set<DereferenceExpression> dereferences = extractDereferences(expressionsBuilder.build(), false);
+        // Extract dereferences for pushdown from project node's assignments
+        Set<FieldReference> dereferences = extractRowSubscripts(projectNode.getAssignments().getExpressions(), false);
 
         // Only retain dereferences on replicate symbols
         dereferences = dereferences.stream()
@@ -100,10 +87,10 @@ public class PushDownDereferenceThroughUnnest
         }
 
         // Create new symbols for dereference expressions
-        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSession(), context.getSymbolAllocator(), typeAnalyzer);
+        Assignments dereferenceAssignments = Assignments.of(dereferences, context.getSymbolAllocator());
 
         // Rewrite project node assignments using new symbols for dereference expressions
-        Map<Expression, SymbolReference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
+        Map<Expression, Reference> mappings = HashBiMap.create(dereferenceAssignments.getMap())
                 .inverse()
                 .entrySet().stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().toSymbolReference()));
@@ -131,8 +118,7 @@ public class PushDownDereferenceThroughUnnest
                                         .build(),
                                 unnestNode.getMappings(),
                                 unnestNode.getOrdinalitySymbol(),
-                                unnestNode.getJoinType(),
-                                unnestNode.getFilter().map(filter -> replaceExpression(filter, mappings))),
+                                unnestNode.getJoinType()),
                         newAssignments));
     }
 }

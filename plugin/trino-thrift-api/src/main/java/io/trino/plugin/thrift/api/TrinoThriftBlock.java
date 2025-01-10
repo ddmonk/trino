@@ -30,6 +30,7 @@ import io.trino.plugin.thrift.api.datatypes.TrinoThriftTimestamp;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftVarchar;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.ArrayType;
@@ -41,8 +42,7 @@ import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.Objects;
 
@@ -51,6 +51,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.drift.annotations.ThriftField.Requiredness.OPTIONAL;
+import static io.trino.spi.predicate.Utils.nativeValueToBlock;
 import static io.trino.spi.type.StandardTypes.HYPER_LOG_LOG;
 import static io.trino.spi.type.StandardTypes.JSON;
 
@@ -178,7 +179,7 @@ public final class TrinoThriftBlock
         return bigintArrayData;
     }
 
-    public Block toBlock(Type desiredType)
+    public ValueBlock toBlock(Type desiredType)
     {
         return dataReference.toBlock(desiredType);
     }
@@ -266,6 +267,11 @@ public final class TrinoThriftBlock
         return new TrinoThriftBlock(null, null, null, null, null, null, null, null, null, bigintArrayData);
     }
 
+    public static TrinoThriftBlock fromNativeValue(Object trinoNativeValue, Type type)
+    {
+        return fromBlock(nativeValueToBlock(type, trinoNativeValue), type);
+    }
+
     public static TrinoThriftBlock fromBlock(Block block, Type type)
     {
         if (type instanceof IntegerType) {
@@ -294,9 +300,7 @@ public final class TrinoThriftBlock
             if (BigintType.BIGINT.equals(elementType)) {
                 return TrinoThriftBigintArray.fromBlock(block);
             }
-            else {
-                throw new IllegalArgumentException("Unsupported array block type: " + type);
-            }
+            throw new IllegalArgumentException("Unsupported array block type: " + type);
         }
         if (type.getBaseName().equals(JSON)) {
             return TrinoThriftJson.fromBlock(block, type);

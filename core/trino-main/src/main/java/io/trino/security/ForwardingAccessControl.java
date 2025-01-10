@@ -14,17 +14,23 @@
 package io.trino.security;
 
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.spi.QueryId;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.connector.ColumnSchema;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
-import io.trino.spi.type.Type;
 
 import java.security.Principal;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -75,39 +81,51 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanExecuteQuery(Identity identity)
+    public void checkCanExecuteQuery(Identity identity, QueryId queryId)
     {
-        delegate().checkCanExecuteQuery(identity);
+        delegate().checkCanExecuteQuery(identity, queryId);
     }
 
     @Override
-    public void checkCanViewQueryOwnedBy(Identity identity, String queryOwner)
+    public void checkCanViewQueryOwnedBy(Identity identity, Identity queryOwner)
     {
         delegate().checkCanViewQueryOwnedBy(identity, queryOwner);
     }
 
     @Override
-    public Set<String> filterQueriesOwnedBy(Identity identity, Set<String> queryOwners)
+    public Collection<Identity> filterQueriesOwnedBy(Identity identity, Collection<Identity> queryOwners)
     {
         return delegate().filterQueriesOwnedBy(identity, queryOwners);
     }
 
     @Override
-    public void checkCanKillQueryOwnedBy(Identity identity, String queryOwner)
+    public void checkCanKillQueryOwnedBy(Identity identity, Identity queryOwner)
     {
         delegate().checkCanKillQueryOwnedBy(identity, queryOwner);
     }
 
     @Override
-    public Set<String> filterCatalogs(Identity identity, Set<String> catalogs)
+    public void checkCanCreateCatalog(SecurityContext context, String catalog)
     {
-        return delegate().filterCatalogs(identity, catalogs);
+        delegate().checkCanCreateCatalog(context, catalog);
     }
 
     @Override
-    public void checkCanCreateSchema(SecurityContext context, CatalogSchemaName schemaName)
+    public void checkCanDropCatalog(SecurityContext context, String catalog)
     {
-        delegate().checkCanCreateSchema(context, schemaName);
+        delegate().checkCanDropCatalog(context, catalog);
+    }
+
+    @Override
+    public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+    {
+        return delegate().filterCatalogs(context, catalogs);
+    }
+
+    @Override
+    public void checkCanCreateSchema(SecurityContext context, CatalogSchemaName schemaName, Map<String, Object> properties)
+    {
+        delegate().checkCanCreateSchema(context, schemaName, properties);
     }
 
     @Override
@@ -153,9 +171,9 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanCreateTable(SecurityContext context, QualifiedObjectName tableName)
+    public void checkCanCreateTable(SecurityContext context, QualifiedObjectName tableName, Map<String, Object> properties)
     {
-        delegate().checkCanCreateTable(context, tableName);
+        delegate().checkCanCreateTable(context, tableName, properties);
     }
 
     @Override
@@ -165,15 +183,33 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
+    public void checkCanTruncateTable(SecurityContext context, QualifiedObjectName tableName)
+    {
+        delegate().checkCanTruncateTable(context, tableName);
+    }
+
+    @Override
     public void checkCanRenameTable(SecurityContext context, QualifiedObjectName tableName, QualifiedObjectName newTableName)
     {
         delegate().checkCanRenameTable(context, tableName, newTableName);
     }
 
     @Override
+    public void checkCanSetTableProperties(SecurityContext context, QualifiedObjectName tableName, Map<String, Optional<Object>> properties)
+    {
+        delegate().checkCanSetTableProperties(context, tableName, properties);
+    }
+
+    @Override
     public void checkCanSetTableComment(SecurityContext context, QualifiedObjectName tableName)
     {
         delegate().checkCanSetTableComment(context, tableName);
+    }
+
+    @Override
+    public void checkCanSetViewComment(SecurityContext context, QualifiedObjectName viewName)
+    {
+        delegate().checkCanSetViewComment(context, viewName);
     }
 
     @Override
@@ -201,15 +237,21 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public Set<String> filterColumns(SecurityContext context, CatalogSchemaTableName tableName, Set<String> columns)
+    public Map<SchemaTableName, Set<String>> filterColumns(SecurityContext context, String catalogName, Map<SchemaTableName, Set<String>> tableColumns)
     {
-        return delegate().filterColumns(context, tableName, columns);
+        return delegate().filterColumns(context, catalogName, tableColumns);
     }
 
     @Override
     public void checkCanAddColumns(SecurityContext context, QualifiedObjectName tableName)
     {
         delegate().checkCanAddColumns(context, tableName);
+    }
+
+    @Override
+    public void checkCanAlterColumn(SecurityContext context, QualifiedObjectName tableName)
+    {
+        delegate().checkCanAlterColumn(context, tableName);
     }
 
     @Override
@@ -279,15 +321,45 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanGrantExecuteFunctionPrivilege(SecurityContext context, String functionName, Identity grantee, boolean grantOption)
+    public void checkCanCreateMaterializedView(SecurityContext context, QualifiedObjectName materializedViewName, Map<String, Object> properties)
     {
-        delegate().checkCanGrantExecuteFunctionPrivilege(context, functionName, grantee, grantOption);
+        delegate().checkCanCreateMaterializedView(context, materializedViewName, properties);
+    }
+
+    @Override
+    public void checkCanRefreshMaterializedView(SecurityContext context, QualifiedObjectName materializedViewName)
+    {
+        delegate().checkCanRefreshMaterializedView(context, materializedViewName);
+    }
+
+    @Override
+    public void checkCanDropMaterializedView(SecurityContext context, QualifiedObjectName materializedViewName)
+    {
+        delegate().checkCanDropMaterializedView(context, materializedViewName);
+    }
+
+    @Override
+    public void checkCanRenameMaterializedView(SecurityContext context, QualifiedObjectName viewName, QualifiedObjectName newViewName)
+    {
+        delegate().checkCanRenameMaterializedView(context, viewName, newViewName);
+    }
+
+    @Override
+    public void checkCanSetMaterializedViewProperties(SecurityContext context, QualifiedObjectName materializedViewName, Map<String, Optional<Object>> properties)
+    {
+        delegate().checkCanSetMaterializedViewProperties(context, materializedViewName, properties);
     }
 
     @Override
     public void checkCanGrantSchemaPrivilege(SecurityContext context, Privilege privilege, CatalogSchemaName schemaName, TrinoPrincipal grantee, boolean grantOption)
     {
         delegate().checkCanGrantSchemaPrivilege(context, privilege, schemaName, grantee, grantOption);
+    }
+
+    @Override
+    public void checkCanDenySchemaPrivilege(SecurityContext context, Privilege privilege, CatalogSchemaName schemaName, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenySchemaPrivilege(context, privilege, schemaName, grantee);
     }
 
     @Override
@@ -303,15 +375,39 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
+    public void checkCanDenyTablePrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenyTablePrivilege(context, privilege, tableName, grantee);
+    }
+
+    @Override
     public void checkCanRevokeTablePrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, TrinoPrincipal revokee, boolean grantOption)
     {
         delegate().checkCanRevokeTablePrivilege(context, privilege, tableName, revokee, grantOption);
     }
 
     @Override
-    public void checkCanSetSystemSessionProperty(Identity identity, String propertyName)
+    public void checkCanGrantEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee, boolean grantOption)
     {
-        delegate().checkCanSetSystemSessionProperty(identity, propertyName);
+        delegate().checkCanGrantEntityPrivilege(context, privilege, entity, grantee, grantOption);
+    }
+
+    @Override
+    public void checkCanDenyEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee)
+    {
+        delegate().checkCanDenyEntityPrivilege(context, privilege, entity, grantee);
+    }
+
+    @Override
+    public void checkCanRevokeEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal revokee, boolean grantOption)
+    {
+        delegate().checkCanRevokeEntityPrivilege(context, privilege, entity, revokee, grantOption);
+    }
+
+    @Override
+    public void checkCanSetSystemSessionProperty(Identity identity, QueryId queryId, String propertyName)
+    {
+        delegate().checkCanSetSystemSessionProperty(identity, queryId, propertyName);
     }
 
     @Override
@@ -327,55 +423,49 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanCreateRole(SecurityContext context, String role, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanCreateRole(SecurityContext context, String role, Optional<TrinoPrincipal> grantor, Optional<String> catalogName)
     {
         delegate().checkCanCreateRole(context, role, grantor, catalogName);
     }
 
     @Override
-    public void checkCanDropRole(SecurityContext context, String role, String catalogName)
+    public void checkCanDropRole(SecurityContext context, String role, Optional<String> catalogName)
     {
         delegate().checkCanDropRole(context, role, catalogName);
     }
 
     @Override
-    public void checkCanGrantRoles(SecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanGrantRoles(SecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, Optional<String> catalogName)
     {
         delegate().checkCanGrantRoles(context, roles, grantees, adminOption, grantor, catalogName);
     }
 
     @Override
-    public void checkCanRevokeRoles(SecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, String catalogName)
+    public void checkCanRevokeRoles(SecurityContext context, Set<String> roles, Set<TrinoPrincipal> grantees, boolean adminOption, Optional<TrinoPrincipal> grantor, Optional<String> catalogName)
     {
         delegate().checkCanRevokeRoles(context, roles, grantees, adminOption, grantor, catalogName);
     }
 
     @Override
-    public void checkCanSetRole(SecurityContext context, String role, String catalogName)
+    public void checkCanSetCatalogRole(SecurityContext context, String role, String catalogName)
     {
-        delegate().checkCanSetRole(context, role, catalogName);
+        delegate().checkCanSetCatalogRole(context, role, catalogName);
     }
 
     @Override
-    public void checkCanShowRoleAuthorizationDescriptors(SecurityContext context, String catalogName)
-    {
-        delegate().checkCanShowRoleAuthorizationDescriptors(context, catalogName);
-    }
-
-    @Override
-    public void checkCanShowRoles(SecurityContext context, String catalogName)
+    public void checkCanShowRoles(SecurityContext context, Optional<String> catalogName)
     {
         delegate().checkCanShowRoles(context, catalogName);
     }
 
     @Override
-    public void checkCanShowCurrentRoles(SecurityContext context, String catalogName)
+    public void checkCanShowCurrentRoles(SecurityContext context, Optional<String> catalogName)
     {
         delegate().checkCanShowCurrentRoles(context, catalogName);
     }
 
     @Override
-    public void checkCanShowRoleGrants(SecurityContext context, String catalogName)
+    public void checkCanShowRoleGrants(SecurityContext context, Optional<String> catalogName)
     {
         delegate().checkCanShowRoleGrants(context, catalogName);
     }
@@ -387,9 +477,51 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public void checkCanExecuteFunction(SecurityContext context, String functionName)
+    public boolean canExecuteFunction(SecurityContext context, QualifiedObjectName functionName)
     {
-        delegate().checkCanExecuteFunction(context, functionName);
+        return delegate().canExecuteFunction(context, functionName);
+    }
+
+    @Override
+    public boolean canCreateViewWithExecuteFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        return delegate().canCreateViewWithExecuteFunction(context, functionName);
+    }
+
+    @Override
+    public void checkCanExecuteTableProcedure(SecurityContext context, QualifiedObjectName tableName, String procedureName)
+    {
+        delegate().checkCanExecuteTableProcedure(context, tableName, procedureName);
+    }
+
+    @Override
+    public void checkCanShowFunctions(SecurityContext context, CatalogSchemaName schema)
+    {
+        delegate().checkCanShowFunctions(context, schema);
+    }
+
+    @Override
+    public Set<SchemaFunctionName> filterFunctions(SecurityContext context, String catalogName, Set<SchemaFunctionName> functionNames)
+    {
+        return delegate().filterFunctions(context, catalogName, functionNames);
+    }
+
+    @Override
+    public void checkCanCreateFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        delegate().checkCanCreateFunction(context, functionName);
+    }
+
+    @Override
+    public void checkCanDropFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        delegate().checkCanDropFunction(context, functionName);
+    }
+
+    @Override
+    public void checkCanShowCreateFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        delegate().checkCanShowCreateFunction(context, functionName);
     }
 
     @Override
@@ -399,8 +531,8 @@ public abstract class ForwardingAccessControl
     }
 
     @Override
-    public List<ViewExpression> getColumnMasks(SecurityContext context, QualifiedObjectName tableName, String columnName, Type type)
+    public Map<ColumnSchema, ViewExpression> getColumnMasks(SecurityContext context, QualifiedObjectName tableName, List<ColumnSchema> columns)
     {
-        return delegate().getColumnMasks(context, tableName, columnName, type);
+        return delegate().getColumnMasks(context, tableName, columns);
     }
 }

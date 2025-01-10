@@ -18,16 +18,15 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.sql.planner.TypeAnalyzer;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.FieldReference;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
-import io.trino.sql.tree.DereferenceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.Map;
 import java.util.Set;
@@ -35,11 +34,10 @@ import java.util.Set;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.ExpressionNodeInliner.replaceExpression;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.plan.Patterns.filter;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.tableScan;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Transforms:
@@ -69,12 +67,6 @@ public class ExtractDereferencesFromFilterAboveScan
         implements Rule<FilterNode>
 {
     private static final Capture<TableScanNode> CHILD = newCapture();
-    private final TypeAnalyzer typeAnalyzer;
-
-    public ExtractDereferencesFromFilterAboveScan(TypeAnalyzer typeAnalyzer)
-    {
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
-    }
 
     @Override
     public Pattern<FilterNode> getPattern()
@@ -86,13 +78,13 @@ public class ExtractDereferencesFromFilterAboveScan
     @Override
     public Result apply(FilterNode node, Captures captures, Context context)
     {
-        Set<DereferenceExpression> dereferences = extractDereferences(ImmutableList.of(node.getPredicate()), true);
+        Set<FieldReference> dereferences = extractRowSubscripts(ImmutableList.of(node.getPredicate()), true);
         if (dereferences.isEmpty()) {
             return Result.empty();
         }
 
-        Assignments assignments = Assignments.of(dereferences, context.getSession(), context.getSymbolAllocator(), typeAnalyzer);
-        Map<Expression, SymbolReference> mappings = HashBiMap.create(assignments.getMap())
+        Assignments assignments = Assignments.of(dereferences, context.getSymbolAllocator());
+        Map<Expression, Reference> mappings = HashBiMap.create(assignments.getMap())
                 .inverse()
                 .entrySet().stream()
                 .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().toSymbolReference()));

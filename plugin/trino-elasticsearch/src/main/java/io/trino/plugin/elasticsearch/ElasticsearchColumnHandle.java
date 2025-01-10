@@ -13,76 +13,28 @@
  */
 package io.trino.plugin.elasticsearch;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.type.Type;
 
-import java.util.Objects;
-
 import static java.util.Objects.requireNonNull;
 
-public final class ElasticsearchColumnHandle
+public record ElasticsearchColumnHandle(
+        String name,
+        Type type,
+        DecoderDescriptor decoderDescriptor,
+        boolean supportsPredicates)
         implements ColumnHandle
 {
-    private final String name;
-    private final Type type;
-    private final boolean supportsPredicates;
-
-    @JsonCreator
-    public ElasticsearchColumnHandle(
-            @JsonProperty("name") String name,
-            @JsonProperty("type") Type type,
-            @JsonProperty("supportsPredicates") boolean supportsPredicates)
+    public ElasticsearchColumnHandle
     {
-        this.name = requireNonNull(name, "name is null");
-        this.type = requireNonNull(type, "type is null");
-        this.supportsPredicates = supportsPredicates;
-    }
-
-    @JsonProperty
-    public String getName()
-    {
-        return name;
-    }
-
-    @JsonProperty
-    public Type getType()
-    {
-        return type;
-    }
-
-    @JsonProperty
-    public boolean isSupportsPredicates()
-    {
-        return supportsPredicates;
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(name, type, supportsPredicates);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if ((obj == null) || (getClass() != obj.getClass())) {
-            return false;
-        }
-
-        ElasticsearchColumnHandle other = (ElasticsearchColumnHandle) obj;
-        return this.supportsPredicates == other.supportsPredicates &&
-                Objects.equals(this.getName(), other.getName()) &&
-                Objects.equals(this.getType(), other.getType());
+        requireNonNull(name, "name is null");
+        requireNonNull(type, "type is null");
+        requireNonNull(decoderDescriptor, "decoderDescriptor is null");
     }
 
     @Override
     public String toString()
     {
-        return getName() + "::" + getType();
+        return name() + "::" + type();
     }
 }

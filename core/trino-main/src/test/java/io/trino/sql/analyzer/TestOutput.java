@@ -13,10 +13,18 @@
  */
 package io.trino.sql.analyzer;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import io.airlift.json.JsonCodec;
-import org.testng.annotations.Test;
+import io.trino.execution.Column;
+import io.trino.metadata.QualifiedObjectName;
+import io.trino.spi.connector.CatalogHandle.CatalogVersion;
+import io.trino.sql.analyzer.Analysis.SourceColumn;
+import org.junit.jupiter.api.Test;
 
-import static org.testng.Assert.assertEquals;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestOutput
 {
@@ -25,11 +33,42 @@ public class TestOutput
     @Test
     public void testRoundTrip()
     {
-        Output expected = new Output("connectorId", "schema", "table");
+        Output expected = new Output(
+                "connectorId",
+                new CatalogVersion("default"),
+                "schema",
+                "table",
+                Optional.of(
+                        ImmutableList.of(
+                                new OutputColumn(
+                                        new Column("column", "type"),
+                                        ImmutableSet.of(
+                                                new SourceColumn(QualifiedObjectName.valueOf("catalog.schema.table"), "column"))))));
 
         String json = codec.toJson(expected);
         Output actual = codec.fromJson(json);
 
-        assertEquals(actual, expected);
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    public void testRoundWithComplexIdentifiers()
+    {
+        Output expected = new Output(
+                "catalog.Mój",
+                new CatalogVersion("default"),
+                "ści.e-Ma",
+                "ta.b-Elką go",
+                Optional.of(
+                        ImmutableList.of(
+                                new OutputColumn(
+                                        new Column("ko.LU-mieńka", "type"),
+                                        ImmutableSet.of(
+                                                new SourceColumn(new QualifiedObjectName("catalog.twój", "schema.ściema", "tabel.tabelkówna"), "co-lumn.słodziak\""))))));
+
+        String json = codec.toJson(expected);
+        Output actual = codec.fromJson(json);
+
+        assertThat(actual).isEqualTo(expected);
     }
 }

@@ -13,26 +13,22 @@
  */
 package io.trino.plugin.kafka.encoder.avro;
 
-import io.trino.plugin.kafka.encoder.EncoderColumnHandle;
 import io.trino.plugin.kafka.encoder.RowEncoder;
 import io.trino.plugin.kafka.encoder.RowEncoderFactory;
+import io.trino.plugin.kafka.encoder.RowEncoderSpec;
 import io.trino.spi.connector.ConnectorSession;
 import org.apache.avro.Schema;
 
-import java.util.List;
-import java.util.Optional;
-
 import static com.google.common.base.Preconditions.checkArgument;
-import static java.util.Objects.requireNonNull;
 
 public class AvroRowEncoderFactory
         implements RowEncoderFactory
 {
     @Override
-    public RowEncoder create(ConnectorSession session, Optional<String> dataSchema, List<EncoderColumnHandle> columnHandles)
+    public RowEncoder create(ConnectorSession session, RowEncoderSpec rowEncoderSpec)
     {
-        checkArgument(dataSchema.isPresent(), "dataSchema for Avro format is not present");
-        Schema parsedSchema = new Schema.Parser().parse(requireNonNull(dataSchema.get(), "dataSchema is null"));
-        return new AvroRowEncoder(session, columnHandles, parsedSchema);
+        checkArgument(rowEncoderSpec.dataSchema().isPresent(), "dataSchema for Avro format is not present");
+        Schema parsedSchema = new Schema.Parser().parse(rowEncoderSpec.dataSchema().get());
+        return new AvroRowEncoder(session, rowEncoderSpec.columnHandles(), parsedSchema);
     }
 }

@@ -13,8 +13,6 @@
  */
 package io.trino.spi.type;
 
-import com.fasterxml.jackson.annotation.JsonValue;
-
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
@@ -26,8 +24,10 @@ import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.Timestamps.formatTimestamp;
 import static io.trino.spi.type.Timestamps.round;
 import static io.trino.spi.type.Timestamps.roundDiv;
+import static java.lang.Math.addExact;
 import static java.lang.Math.floorDiv;
 import static java.lang.Math.floorMod;
+import static java.lang.Math.multiplyExact;
 import static java.lang.String.format;
 
 public final class SqlTimestamp
@@ -41,8 +41,19 @@ public final class SqlTimestamp
         return newInstanceWithRounding(precision, millis * 1000, 0);
     }
 
+    public static SqlTimestamp fromSeconds(int precision, long seconds, long nanosOfSecond)
+    {
+        long fractionInPicos = nanosOfSecond * PICOSECONDS_PER_NANOSECOND;
+        long epochMicros = addExact(multiplyExact(seconds, MICROSECONDS_PER_SECOND), fractionInPicos / PICOSECONDS_PER_MICROSECOND);
+        int picosOfMicro = (int) (fractionInPicos % PICOSECONDS_PER_MICROSECOND);
+        return newInstanceWithRounding(precision, epochMicros, picosOfMicro);
+    }
+
     public static SqlTimestamp newInstance(int precision, long epochMicros, int picosOfMicro)
     {
+        if (precision < 0 || precision > 12) {
+            throw new IllegalArgumentException("Invalid precision: " + precision);
+        }
         if (precision <= 6) {
             if (picosOfMicro != 0) {
                 throw new IllegalArgumentException(format("Expected picosOfMicro to be 0 for precision %s: %s", precision, picosOfMicro));
@@ -136,7 +147,6 @@ public final class SqlTimestamp
         return Objects.hash(epochMicros, picosOfMicros, precision);
     }
 
-    @JsonValue
     @Override
     public String toString()
     {

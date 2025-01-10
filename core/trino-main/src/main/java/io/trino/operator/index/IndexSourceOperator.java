@@ -13,6 +13,7 @@
  */
 package io.trino.operator.index;
 
+import com.google.common.base.Suppliers;
 import io.trino.metadata.Split;
 import io.trino.operator.DriverContext;
 import io.trino.operator.FinishedOperator;
@@ -26,12 +27,10 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorIndex;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.RecordSet;
-import io.trino.spi.connector.UpdatablePageSource;
 import io.trino.sql.planner.plan.PlanNodeId;
 
-import java.util.Optional;
+import java.util.Map;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
@@ -117,7 +116,7 @@ public class IndexSourceOperator
     }
 
     @Override
-    public Supplier<Optional<UpdatablePageSource>> addSplit(Split split)
+    public void addSplit(Split split)
     {
         requireNonNull(split, "split is null");
         checkState(source == null, "Index source split already set");
@@ -129,12 +128,10 @@ public class IndexSourceOperator
         ConnectorPageSource result = index.lookup(normalizedRecordSet);
         source = new PageSourceOperator(result, operatorContext);
 
-        Object splitInfo = split.getInfo();
-        if (splitInfo != null) {
-            operatorContext.setInfoSupplier(() -> new SplitOperatorInfo(split.getCatalogName(), splitInfo));
+        Map<String, String> splitInfo = split.getInfo();
+        if (!splitInfo.isEmpty()) {
+            operatorContext.setInfoSupplier(Suppliers.ofInstance(new SplitOperatorInfo(split.getCatalogHandle(), splitInfo)));
         }
-
-        return Optional::empty;
     }
 
     @Override

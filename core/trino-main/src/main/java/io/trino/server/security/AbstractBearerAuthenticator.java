@@ -13,65 +13,66 @@
  */
 package io.trino.server.security;
 
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.JwtException;
-import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
+import jakarta.ws.rs.container.ContainerRequestContext;
 
-import javax.ws.rs.container.ContainerRequestContext;
+import java.util.List;
+import java.util.Optional;
 
-import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.net.HttpHeaders.AUTHORIZATION;
-import static java.util.Objects.requireNonNull;
+import static java.lang.String.format;
 
 public abstract class AbstractBearerAuthenticator
         implements Authenticator
 {
-    private final String principalField;
-    private final UserMapping userMapping;
-
-    protected AbstractBearerAuthenticator(String principalField, UserMapping userMapping)
-    {
-        this.principalField = requireNonNull(principalField, "principalField is null");
-        this.userMapping = requireNonNull(userMapping, "userMapping is null");
-    }
-
     @Override
     public Identity authenticate(ContainerRequestContext request)
             throws AuthenticationException
     {
-        String header = nullToEmpty(request.getHeaders().getFirst(AUTHORIZATION));
+        return authenticate(request, extractToken(request));
+    }
 
-        int space = header.indexOf(' ');
-        if ((space < 0) || !header.substring(0, space).equalsIgnoreCase("bearer")) {
-            throw needAuthentication(request, null);
-        }
-        String token = header.substring(space + 1).trim();
-        if (token.isEmpty()) {
-            throw needAuthentication(request, null);
-        }
-
+    public Identity authenticate(ContainerRequestContext request, String token)
+            throws AuthenticationException
+    {
         try {
-            Jws<Claims> claimsJws = parseClaimsJws(token);
-            String principal = claimsJws.getBody().get(principalField, String.class);
-            if (principal == null) {
-                throw needAuthentication(request, "Invalid credentials");
-            }
-            String authenticatedUser = userMapping.mapUser(principal);
-            return Identity.forUser(authenticatedUser)
-                    .withPrincipal(new BasicPrincipal(principal))
-                    .build();
+            return createIdentity(token).orElseThrow(() -> needAuthentication(request, Optional.of(token), "Invalid credentials"));
         }
         catch (JwtException | UserMappingException e) {
-            throw needAuthentication(request, e.getMessage());
+            throw needAuthentication(request, Optional.empty(), e.getMessage());
         }
         catch (RuntimeException e) {
             throw new RuntimeException("Authentication error", e);
         }
     }
 
-    protected abstract Jws<Claims> parseClaimsJws(String jws);
+    public String extractToken(ContainerRequestContext request)
+            throws AuthenticationException
+    {
+        List<String> headers = request.getHeaders().get(AUTHORIZATION);
+        if (headers == null || headers.isEmpty()) {
+            throw needAuthentication(request, Optional.empty(), null);
+        }
+        if (headers.size() > 1) {
+            throw new IllegalArgumentException(format("Multiple %s headers detected: %s, where only single %s header is supported", AUTHORIZATION, headers, AUTHORIZATION));
+        }
 
-    protected abstract AuthenticationException needAuthentication(ContainerRequestContext request, String message);
+        String header = getOnlyElement(headers);
+        int space = header.indexOf(' ');
+        if ((space < 0) || !header.substring(0, space).equalsIgnoreCase("bearer")) {
+            throw needAuthentication(request, Optional.empty(), null);
+        }
+        String token = header.substring(space + 1).trim();
+        if (token.isEmpty()) {
+            throw needAuthentication(request, Optional.empty(), null);
+        }
+        return token;
+    }
+
+    protected abstract Optional<Identity> createIdentity(String token)
+            throws UserMappingException;
+
+    protected abstract AuthenticationException needAuthentication(ContainerRequestContext request, Optional<String> currentToken, String message);
 }

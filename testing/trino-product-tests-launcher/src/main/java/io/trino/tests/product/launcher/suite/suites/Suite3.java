@@ -15,15 +15,28 @@ package io.trino.tests.product.launcher.suite.suites;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
-import io.trino.tests.product.launcher.env.environment.MultinodeTls;
-import io.trino.tests.product.launcher.env.environment.MultinodeTlsKerberos;
-import io.trino.tests.product.launcher.env.environment.SinglenodeKerberosHdfsImpersonationWithDataProtection;
-import io.trino.tests.product.launcher.env.environment.SinglenodeKerberosHdfsImpersonationWithWireEncryption;
+import io.trino.tests.product.launcher.env.environment.EnvMultinodeTls;
+import io.trino.tests.product.launcher.env.environment.EnvMultinodeTlsKerberos;
+import io.trino.tests.product.launcher.env.environment.EnvMultinodeTlsKerberosDelegation;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeKerberosHdfsImpersonationWithDataProtection;
+import io.trino.tests.product.launcher.env.environment.EnvSinglenodeKerberosHdfsImpersonationWithWireEncryption;
 import io.trino.tests.product.launcher.suite.Suite;
 import io.trino.tests.product.launcher.suite.SuiteTestRun;
 
 import java.util.List;
 
+import static io.trino.tests.product.TestGroups.AUTHORIZATION;
+import static io.trino.tests.product.TestGroups.AZURE;
+import static io.trino.tests.product.TestGroups.CLI;
+import static io.trino.tests.product.TestGroups.CONFIGURED_FEATURES;
+import static io.trino.tests.product.TestGroups.GROUP_BY;
+import static io.trino.tests.product.TestGroups.HDFS_IMPERSONATION;
+import static io.trino.tests.product.TestGroups.JDBC;
+import static io.trino.tests.product.TestGroups.JDBC_KERBEROS_CONSTRAINED_DELEGATION;
+import static io.trino.tests.product.TestGroups.JOIN;
+import static io.trino.tests.product.TestGroups.SMOKE;
+import static io.trino.tests.product.TestGroups.STORAGE_FORMATS;
+import static io.trino.tests.product.TestGroups.TLS;
 import static io.trino.tests.product.launcher.suite.SuiteTestRun.testOnEnvironment;
 
 public class Suite3
@@ -33,17 +46,22 @@ public class Suite3
     public List<SuiteTestRun> getTestRuns(EnvironmentConfig config)
     {
         return ImmutableList.of(
-                testOnEnvironment(MultinodeTls.class)
-                        .withGroups("smoke", "cli", "group-by", "join", "tls")
+                testOnEnvironment(EnvMultinodeTls.class)
+                        .withGroups(CONFIGURED_FEATURES, SMOKE, CLI, GROUP_BY, JOIN, TLS)
+                        .withExcludedGroups(AZURE)
                         .build(),
-                testOnEnvironment(MultinodeTlsKerberos.class)
-                        .withGroups("cli", "group-by", "join", "tls")
+                testOnEnvironment(EnvMultinodeTlsKerberos.class)
+                        .withGroups(CONFIGURED_FEATURES, CLI, GROUP_BY, JOIN, TLS)
                         .build(),
-                testOnEnvironment(SinglenodeKerberosHdfsImpersonationWithWireEncryption.class)
-                        .withGroups("storage_formats", "cli", "hdfs_impersonation", "authorization")
+                testOnEnvironment(EnvSinglenodeKerberosHdfsImpersonationWithWireEncryption.class)
+                        .withGroups(CONFIGURED_FEATURES, STORAGE_FORMATS, CLI, HDFS_IMPERSONATION, AUTHORIZATION)
                         .build(),
-                testOnEnvironment(SinglenodeKerberosHdfsImpersonationWithDataProtection.class)
+                testOnEnvironment(EnvSinglenodeKerberosHdfsImpersonationWithDataProtection.class)
+                        .withGroups(CONFIGURED_FEATURES)
                         .withTests("TestHiveStorageFormats.testOrcTableCreatedInTrino", "TestHiveCreateTable.testCreateTable")
+                        .build(),
+                testOnEnvironment(EnvMultinodeTlsKerberosDelegation.class)
+                        .withGroups(CONFIGURED_FEATURES, JDBC, JDBC_KERBEROS_CONSTRAINED_DELEGATION)
                         .build());
     }
 }

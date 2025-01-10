@@ -16,10 +16,9 @@ package io.trino.execution;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableMap;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.spi.predicate.Domain;
 import io.trino.sql.planner.plan.DynamicFilterId;
-
-import javax.annotation.concurrent.GuardedBy;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -73,10 +72,20 @@ public class DynamicFiltersCollector
 
     public synchronized VersionedDynamicFilterDomains acknowledgeAndGetNewDomains(long callersCurrentVersion)
     {
+        acknowledge(callersCurrentVersion);
+
+        return getCurrentDynamicFilterDomains();
+    }
+
+    public synchronized void acknowledge(long callersCurrentVersion)
+    {
         // Remove dynamic filter domains that are already received by caller.
         // This assumes there is only one dynamic filters consumer.
         dynamicFilterDomains.values().removeIf(domain -> domain.getVersion() <= callersCurrentVersion);
+    }
 
+    public synchronized VersionedDynamicFilterDomains getCurrentDynamicFilterDomains()
+    {
         return new VersionedDynamicFilterDomains(
                 currentVersion,
                 dynamicFilterDomains.entrySet().stream()

@@ -15,50 +15,34 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.metadata.MetadataManager;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.assertions.ExpectedValueProvider;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.SymbolReference;
-import io.trino.sql.tree.WindowFrame;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.functionCall;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.specification;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.window;
-import static io.trino.sql.tree.FrameBound.Type.CURRENT_ROW;
-import static io.trino.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.windowFunction;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestSwapAdjacentWindowsBySpecifications
         extends BaseRuleTest
 {
-    private final MetadataManager metadata = createTestMetadataManager();
-    private WindowNode.Frame frame;
-    private ResolvedFunction resolvedFunction;
+    private final ResolvedFunction resolvedFunction;
 
     public TestSwapAdjacentWindowsBySpecifications()
     {
-        frame = new WindowNode.Frame(
-                WindowFrame.Type.RANGE,
-                UNBOUNDED_PRECEDING,
-                Optional.empty(),
-                Optional.empty(),
-                CURRENT_ROW,
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty());
-
-        resolvedFunction = metadata.resolveFunction(QualifiedName.of("avg"), fromTypes(BIGINT));
+        resolvedFunction = new TestingFunctionResolution().resolveFunction("avg", fromTypes(BIGINT));
     }
 
     @Test
@@ -73,11 +57,11 @@ public class TestSwapAdjacentWindowsBySpecifications
     public void doesNotFireOnPlanWithSingleWindowNode()
     {
         tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
-                .on(p -> p.window(new WindowNode.Specification(
+                .on(p -> p.window(new DataOrganizationSpecification(
                                 ImmutableList.of(p.symbol("a")),
                                 Optional.empty()),
                         ImmutableMap.of(p.symbol("avg_1"),
-                                new WindowNode.Function(resolvedFunction, ImmutableList.of(), frame, false)),
+                                new WindowNode.Function(resolvedFunction, ImmutableList.of(), Optional.empty(), DEFAULT_FRAME, false, false)),
                         p.values(p.symbol("a"))))
                 .doesNotFire();
     }
@@ -88,29 +72,29 @@ public class TestSwapAdjacentWindowsBySpecifications
         String columnAAlias = "ALIAS_A";
         String columnBAlias = "ALIAS_B";
 
-        ExpectedValueProvider<WindowNode.Specification> specificationA = specification(ImmutableList.of(columnAAlias), ImmutableList.of(), ImmutableMap.of());
-        ExpectedValueProvider<WindowNode.Specification> specificationAB = specification(ImmutableList.of(columnAAlias, columnBAlias), ImmutableList.of(), ImmutableMap.of());
+        ExpectedValueProvider<DataOrganizationSpecification> specificationA = specification(ImmutableList.of(columnAAlias), ImmutableList.of(), ImmutableMap.of());
+        ExpectedValueProvider<DataOrganizationSpecification> specificationAB = specification(ImmutableList.of(columnAAlias, columnBAlias), ImmutableList.of(), ImmutableMap.of());
 
         tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
                 .on(p ->
-                        p.window(new WindowNode.Specification(
+                        p.window(new DataOrganizationSpecification(
                                         ImmutableList.of(p.symbol("a")),
                                         Optional.empty()),
                                 ImmutableMap.of(p.symbol("avg_1", DOUBLE),
-                                        new WindowNode.Function(resolvedFunction, ImmutableList.of(new SymbolReference("a")), frame, false)),
-                                p.window(new WindowNode.Specification(
+                                        new WindowNode.Function(resolvedFunction, ImmutableList.of(new Reference(BIGINT, "a")), Optional.empty(), DEFAULT_FRAME, false, false)),
+                                p.window(new DataOrganizationSpecification(
                                                 ImmutableList.of(p.symbol("a"), p.symbol("b")),
                                                 Optional.empty()),
                                         ImmutableMap.of(p.symbol("avg_2", DOUBLE),
-                                                new WindowNode.Function(resolvedFunction, ImmutableList.of(new SymbolReference("b")), frame, false)),
+                                                new WindowNode.Function(resolvedFunction, ImmutableList.of(new Reference(BIGINT, "b")), Optional.empty(), DEFAULT_FRAME, false, false)),
                                         p.values(p.symbol("a"), p.symbol("b")))))
                 .matches(
                         window(windowMatcherBuilder -> windowMatcherBuilder
                                         .specification(specificationAB)
-                                        .addFunction(functionCall("avg", Optional.empty(), ImmutableList.of(columnBAlias))),
+                                        .addFunction(windowFunction("avg", ImmutableList.of(columnBAlias), DEFAULT_FRAME)),
                                 window(windowMatcherBuilder -> windowMatcherBuilder
                                                 .specification(specificationA)
-                                                .addFunction(functionCall("avg", Optional.empty(), ImmutableList.of(columnAAlias))),
+                                                .addFunction(windowFunction("avg", ImmutableList.of(columnAAlias), DEFAULT_FRAME)),
                                         values(ImmutableMap.of(columnAAlias, 0, columnBAlias, 1)))));
     }
 
@@ -119,17 +103,17 @@ public class TestSwapAdjacentWindowsBySpecifications
     {
         tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
                 .on(p ->
-                        p.window(new WindowNode.Specification(
-                                        ImmutableList.of(p.symbol("a")),
+                        p.window(new DataOrganizationSpecification(
+                                        ImmutableList.of(p.symbol("a", BIGINT)),
                                         Optional.empty()),
-                                ImmutableMap.of(p.symbol("avg_1"),
-                                        new WindowNode.Function(resolvedFunction, ImmutableList.of(new SymbolReference("avg_2")), frame, false)),
-                                p.window(new WindowNode.Specification(
-                                                ImmutableList.of(p.symbol("a"), p.symbol("b")),
+                                ImmutableMap.of(p.symbol("avg_1", DOUBLE),
+                                        new WindowNode.Function(resolvedFunction, ImmutableList.of(new Reference(DOUBLE, "avg_2")), Optional.empty(), DEFAULT_FRAME, false, false)),
+                                p.window(new DataOrganizationSpecification(
+                                                ImmutableList.of(p.symbol("a", BIGINT), p.symbol("b", BIGINT)),
                                                 Optional.empty()),
-                                        ImmutableMap.of(p.symbol("avg_2"),
-                                                new WindowNode.Function(resolvedFunction, ImmutableList.of(new SymbolReference("a")), frame, false)),
-                                        p.values(p.symbol("a"), p.symbol("b")))))
+                                        ImmutableMap.of(p.symbol("avg_2", DOUBLE),
+                                                new WindowNode.Function(resolvedFunction, ImmutableList.of(new Reference(BIGINT, "a")), Optional.empty(), DEFAULT_FRAME, false, false)),
+                                        p.values(p.symbol("a", BIGINT), p.symbol("b", BIGINT)))))
                 .doesNotFire();
     }
 }

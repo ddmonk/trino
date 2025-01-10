@@ -16,11 +16,10 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.spi.connector.LocalProperty;
 import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.Symbol;
-
-import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Objects;
@@ -100,14 +99,6 @@ class PreferredProperties
     {
         return builder()
                 .global(Global.distributed(PartitioningProperties.partitioned(columns)))
-                .local(localProperties)
-                .build();
-    }
-
-    public static PreferredProperties undistributedWithLocal(List<? extends LocalProperty<Symbol>> localProperties)
-    {
-        return builder()
-                .global(Global.undistributed())
                 .local(localProperties)
                 .build();
     }
@@ -286,7 +277,7 @@ class PreferredProperties
                 return false;
             }
             Global other = (Global) obj;
-            return Objects.equals(this.distributed, other.distributed)
+            return this.distributed == other.distributed
                     && Objects.equals(this.partitioningProperties, other.partitioningProperties);
         }
 
@@ -310,7 +301,7 @@ class PreferredProperties
         private PartitioningProperties(Set<Symbol> partitioningColumns, Optional<Partitioning> partitioning, boolean nullsAndAnyReplicated)
         {
             this.partitioningColumns = ImmutableSet.copyOf(requireNonNull(partitioningColumns, "partitioningColumns is null"));
-            this.partitioning = requireNonNull(partitioning, "function is null");
+            this.partitioning = requireNonNull(partitioning, "partitioning is null");
             this.nullsAndAnyReplicated = nullsAndAnyReplicated;
 
             checkArgument(partitioning.isEmpty() || partitioning.get().getColumns().equals(partitioningColumns), "Partitioning input must match partitioningColumns");

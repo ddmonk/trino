@@ -18,14 +18,19 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import io.trino.plugin.hive.HiveBucketHandle;
-import io.trino.plugin.hive.HiveBucketProperty;
+import io.trino.metastore.Column;
+import io.trino.metastore.HiveBucketProperty;
+import io.trino.metastore.HiveType;
+import io.trino.metastore.Table;
+import io.trino.metastore.type.ListTypeInfo;
+import io.trino.metastore.type.MapTypeInfo;
+import io.trino.metastore.type.PrimitiveCategory;
+import io.trino.metastore.type.PrimitiveTypeInfo;
+import io.trino.metastore.type.TypeInfo;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HiveTableHandle;
+import io.trino.plugin.hive.HiveTablePartitioning;
 import io.trino.plugin.hive.HiveTimestampPrecision;
-import io.trino.plugin.hive.HiveType;
-import io.trino.plugin.hive.metastore.Column;
-import io.trino.plugin.hive.metastore.Table;
 import io.trino.spi.Page;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
@@ -36,10 +41,6 @@ import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.TypeManager;
-import org.apache.hadoop.hive.serde2.typeinfo.ListTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.MapTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.PrimitiveTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -52,17 +53,18 @@ import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Lists.cartesianProduct;
+import static io.trino.hive.thrift.metastore.hive_metastoreConstants.TABLE_BUCKETING_VERSION;
 import static io.trino.plugin.hive.HiveColumnHandle.BUCKET_COLUMN_NAME;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static io.trino.plugin.hive.HiveSessionProperties.getTimestampPrecision;
+import static io.trino.plugin.hive.HiveSessionProperties.isParallelPartitionedBucketedWrites;
 import static io.trino.plugin.hive.util.HiveBucketing.BucketingVersion.BUCKETING_V1;
 import static io.trino.plugin.hive.util.HiveBucketing.BucketingVersion.BUCKETING_V2;
+import static io.trino.plugin.hive.util.HiveUtil.SPARK_TABLE_PROVIDER_KEY;
 import static io.trino.plugin.hive.util.HiveUtil.getRegularColumnHandles;
 import static java.lang.String.format;
 import static java.util.Map.Entry;
 import static java.util.function.Function.identity;
-import static org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.TABLE_BUCKETING_VERSION;
-import static org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector.PrimitiveCategory.TIMESTAMP;
 
 public final class HiveBucketing
 {
@@ -116,24 +118,11 @@ public final class HiveBucketing
     private static final long BUCKETS_EXPLORATION_LIMIT_FACTOR = 4;
     private static final long BUCKETS_EXPLORATION_GUARANTEED_LIMIT = 1000;
 
-    private static final Set<HiveType> SUPPORTED_TYPES_FOR_BUCKET_FILTER = ImmutableSet.of(
-            HiveType.HIVE_BYTE,
-            HiveType.HIVE_SHORT,
-            HiveType.HIVE_INT,
-            HiveType.HIVE_LONG,
-            HiveType.HIVE_BOOLEAN,
-            HiveType.HIVE_STRING);
-
     private HiveBucketing() {}
 
     public static int getHiveBucket(BucketingVersion bucketingVersion, int bucketCount, List<TypeInfo> types, Page page, int position)
     {
         return getBucketNumber(bucketingVersion.getBucketHashCode(types, page, position), bucketCount);
-    }
-
-    public static int getHiveBucket(BucketingVersion bucketingVersion, int bucketCount, List<TypeInfo> types, Object[] values)
-    {
-        return getBucketNumber(bucketingVersion.getBucketHashCode(types, values), bucketCount);
     }
 
     @VisibleForTesting
@@ -178,10 +167,28 @@ public final class HiveBucketing
         return (hashCode & Integer.MAX_VALUE) % bucketCount;
     }
 
-    public static Optional<HiveBucketHandle> getHiveBucketHandle(ConnectorSession session, Table table, TypeManager typeManager)
+    public static Optional<HiveTablePartitioning> getHiveTablePartitioningForRead(ConnectorSession session, Table table, TypeManager typeManager)
     {
+        return getHiveTablePartitioning(false, session, table, typeManager);
+    }
+
+    public static Optional<HiveTablePartitioning> getHiveTablePartitioningForWrite(ConnectorSession session, Table table, TypeManager typeManager)
+    {
+        return getHiveTablePartitioning(true, session, table, typeManager);
+    }
+
+    private static Optional<HiveTablePartitioning> getHiveTablePartitioning(boolean forWrite, ConnectorSession session, Table table, TypeManager typeManager)
+    {
+        if (table.getParameters().containsKey(SPARK_TABLE_PROVIDER_KEY)) {
+            return Optional.empty();
+        }
+
         Optional<HiveBucketProperty> hiveBucketProperty = table.getStorage().getBucketProperty();
         if (hiveBucketProperty.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (!isSupportedBucketing(table)) {
             return Optional.empty();
         }
 
@@ -190,7 +197,7 @@ public final class HiveBucketing
                 .collect(Collectors.toMap(HiveColumnHandle::getName, identity()));
 
         ImmutableList.Builder<HiveColumnHandle> bucketColumns = ImmutableList.builder();
-        for (String bucketColumnName : hiveBucketProperty.get().getBucketedBy()) {
+        for (String bucketColumnName : hiveBucketProperty.get().bucketedBy()) {
             HiveColumnHandle bucketColumnHandle = map.get(bucketColumnName);
             if (bucketColumnHandle == null) {
                 throw new TrinoException(
@@ -200,30 +207,32 @@ public final class HiveBucketing
             bucketColumns.add(bucketColumnHandle);
         }
 
-        BucketingVersion bucketingVersion = hiveBucketProperty.get().getBucketingVersion();
-        int bucketCount = hiveBucketProperty.get().getBucketCount();
-        return Optional.of(new HiveBucketHandle(bucketColumns.build(), bucketingVersion, bucketCount, bucketCount));
+        return Optional.of(new HiveTablePartitioning(
+                forWrite,
+                getBucketingVersion(table.getParameters()),
+                hiveBucketProperty.get().bucketCount(),
+                bucketColumns.build(),
+                forWrite && !table.getPartitionColumns().isEmpty() && isParallelPartitionedBucketedWrites(session),
+                hiveBucketProperty.get().sortedBy(),
+                forWrite));
     }
 
     public static Optional<HiveBucketFilter> getHiveBucketFilter(HiveTableHandle hiveTable, TupleDomain<ColumnHandle> effectivePredicate)
     {
-        if (hiveTable.getBucketHandle().isEmpty()) {
+        if (hiveTable.getTablePartitioning().isEmpty()) {
             return Optional.empty();
         }
 
-        HiveBucketProperty hiveBucketProperty = hiveTable.getBucketHandle().get().toTableBucketProperty();
-        List<Column> dataColumns = hiveTable.getDataColumns().stream()
-                .map(HiveColumnHandle::toMetastoreColumn)
+        HiveBucketProperty hiveBucketProperty = hiveTable.getTablePartitioning().get().toTableBucketProperty();
+        List<HiveColumnHandle> dataColumns = hiveTable.getDataColumns().stream()
                 .collect(toImmutableList());
-        if (bucketedOnTimestamp(hiveBucketProperty, dataColumns, hiveTable.getTableName())) {
-            return Optional.empty();
-        }
 
         Optional<Map<ColumnHandle, List<NullableValue>>> bindings = TupleDomain.extractDiscreteValues(effectivePredicate);
         if (bindings.isEmpty()) {
             return Optional.empty();
         }
-        Optional<Set<Integer>> buckets = getHiveBuckets(hiveBucketProperty, dataColumns, bindings.get());
+        BucketingVersion bucketingVersion = hiveTable.getTablePartitioning().get().partitioningHandle().getBucketingVersion();
+        Optional<Set<Integer>> buckets = getHiveBuckets(bucketingVersion, hiveBucketProperty, dataColumns, bindings.get());
         if (buckets.isPresent()) {
             return Optional.of(new HiveBucketFilter(buckets.get()));
         }
@@ -238,7 +247,7 @@ public final class HiveBucketing
         }
         ValueSet values = domain.get().getValues();
         ImmutableSet.Builder<Integer> builder = ImmutableSet.builder();
-        int bucketCount = hiveBucketProperty.getBucketCount();
+        int bucketCount = hiveBucketProperty.bucketCount();
         for (int i = 0; i < bucketCount; i++) {
             if (values.containsValue((long) i)) {
                 builder.add(i);
@@ -247,22 +256,22 @@ public final class HiveBucketing
         return Optional.of(new HiveBucketFilter(builder.build()));
     }
 
-    private static Optional<Set<Integer>> getHiveBuckets(HiveBucketProperty hiveBucketProperty, List<Column> dataColumns, Map<ColumnHandle, List<NullableValue>> bindings)
+    private static Optional<Set<Integer>> getHiveBuckets(BucketingVersion bucketingVersion, HiveBucketProperty hiveBucketProperty, List<HiveColumnHandle> dataColumns, Map<ColumnHandle, List<NullableValue>> bindings)
     {
         if (bindings.isEmpty()) {
             return Optional.empty();
         }
 
         // Get bucket columns names
-        List<String> bucketColumns = hiveBucketProperty.getBucketedBy();
+        List<String> bucketColumns = hiveBucketProperty.bucketedBy();
 
         // Verify the bucket column types are supported
         Map<String, HiveType> hiveTypes = new HashMap<>();
-        for (Column column : dataColumns) {
-            hiveTypes.put(column.getName(), column.getType());
+        for (HiveColumnHandle column : dataColumns) {
+            hiveTypes.put(column.getName(), column.getHiveType());
         }
         for (String column : bucketColumns) {
-            if (!SUPPORTED_TYPES_FOR_BUCKET_FILTER.contains(hiveTypes.get(column))) {
+            if (!isTypeSupportedForBucketing(hiveTypes.get(column).getTypeInfo())) {
                 return Optional.empty();
             }
         }
@@ -292,8 +301,8 @@ public final class HiveBucketing
                 .collect(toImmutableList());
 
         return getHiveBuckets(
-                hiveBucketProperty.getBucketingVersion(),
-                hiveBucketProperty.getBucketCount(),
+                bucketingVersion,
+                hiveBucketProperty.bucketCount(),
                 typeInfos,
                 orderedBindings);
     }
@@ -301,47 +310,50 @@ public final class HiveBucketing
     public static BucketingVersion getBucketingVersion(Map<String, String> tableProperties)
     {
         String bucketingVersion = tableProperties.getOrDefault(TABLE_BUCKETING_VERSION, "1");
-        switch (bucketingVersion) {
-            case "1":
-                return BUCKETING_V1;
-            case "2":
-                return BUCKETING_V2;
-            default:
-                // org.apache.hadoop.hive.ql.exec.Utilities.getBucketingVersion is more permissive and treats any non-number as "1"
-                throw new TrinoException(StandardErrorCode.NOT_SUPPORTED, format("Unsupported bucketing version: '%s'", bucketingVersion));
-        }
+        return switch (bucketingVersion) {
+            case "1" -> BUCKETING_V1;
+            case "2" -> BUCKETING_V2;
+            // org.apache.hadoop.hive.ql.exec.Utilities.getBucketingVersion is more permissive and treats any non-number as "1"
+            default -> throw new TrinoException(StandardErrorCode.NOT_SUPPORTED, format("Unsupported bucketing version: '%s'", bucketingVersion));
+        };
     }
 
-    public static boolean bucketedOnTimestamp(HiveBucketProperty bucketProperty, Table table)
+    public static boolean isSupportedBucketing(Table table)
     {
-        return bucketedOnTimestamp(bucketProperty, table.getDataColumns(), table.getTableName());
+        return isSupportedBucketing(table.getStorage().getBucketProperty().orElseThrow().bucketedBy(), table.getDataColumns(), table.getTableName());
     }
 
-    public static boolean bucketedOnTimestamp(HiveBucketProperty bucketProperty, List<Column> dataColumns, String tableName)
+    public static boolean isSupportedBucketing(List<String> bucketedBy, List<Column> dataColumns, String tableName)
     {
-        return bucketProperty.getBucketedBy().stream()
+        return bucketedBy.stream()
                 .map(columnName -> dataColumns.stream().filter(column -> column.getName().equals(columnName)).findFirst()
                         .orElseThrow(() -> new IllegalArgumentException(format("Cannot find column '%s' in %s", columnName, tableName))))
                 .map(Column::getType)
                 .map(HiveType::getTypeInfo)
-                .anyMatch(HiveBucketing::bucketedOnTimestamp);
+                .allMatch(HiveBucketing::isTypeSupportedForBucketing);
     }
 
-    private static boolean bucketedOnTimestamp(TypeInfo type)
+    private static boolean isTypeSupportedForBucketing(TypeInfo type)
     {
         switch (type.getCategory()) {
             case PRIMITIVE:
-                return ((PrimitiveTypeInfo) type).getPrimitiveCategory() == TIMESTAMP;
+                PrimitiveTypeInfo typeInfo = (PrimitiveTypeInfo) type;
+                PrimitiveCategory primitiveCategory = typeInfo.getPrimitiveCategory();
+                return switch (primitiveCategory) {
+                    case BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, STRING, VARCHAR, DATE -> true;
+                    case BINARY, TIMESTAMP, DECIMAL, CHAR -> false;
+                    default -> throw new UnsupportedOperationException("Unknown type " + type);
+                };
             case LIST:
-                return bucketedOnTimestamp(((ListTypeInfo) type).getListElementTypeInfo());
+                return isTypeSupportedForBucketing(((ListTypeInfo) type).getListElementTypeInfo());
             case MAP:
                 MapTypeInfo mapTypeInfo = (MapTypeInfo) type;
-                return bucketedOnTimestamp(mapTypeInfo.getMapKeyTypeInfo()) ||
-                        bucketedOnTimestamp(mapTypeInfo.getMapValueTypeInfo());
-            default:
-                // TODO: support more types, e.g. ROW
-                throw new UnsupportedOperationException("Computation of Hive bucket hashCode is not supported for Hive category: " + type.getCategory());
+                return isTypeSupportedForBucketing(mapTypeInfo.getMapKeyTypeInfo()) && isTypeSupportedForBucketing(mapTypeInfo.getMapValueTypeInfo());
+            case STRUCT:
+            case UNION:
+                return false;
         }
+        throw new UnsupportedOperationException("Unknown type " + type);
     }
 
     public static class HiveBucketFilter

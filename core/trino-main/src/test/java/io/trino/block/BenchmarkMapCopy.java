@@ -15,7 +15,7 @@ package io.trino.block;
 
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.type.MapType;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -29,14 +29,11 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.util.StructuralTestUtil.mapType;
@@ -75,8 +72,7 @@ public class BenchmarkMapCopy
         private int mapSize;
 
         private Block dataBlock;
-        private BlockBuilder blockBuilder;
-        private BlockBuilderStatus status;
+        private MapBlockBuilder blockBuilder;
 
         @Setup
         public void setup()
@@ -84,12 +80,12 @@ public class BenchmarkMapCopy
             MapType mapType = mapType(VARCHAR, BIGINT);
             blockBuilder = mapType.createBlockBuilder(null, POSITIONS);
             for (int position = 0; position < POSITIONS; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-                for (int i = 0; i < mapSize; i++) {
-                    VARCHAR.writeString(entryBuilder, String.valueOf(ThreadLocalRandom.current().nextInt()));
-                    BIGINT.writeLong(entryBuilder, ThreadLocalRandom.current().nextInt());
-                }
-                blockBuilder.closeEntry();
+                blockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
+                    for (int i = 0; i < mapSize; i++) {
+                        VARCHAR.writeString(keyBuilder, String.valueOf(ThreadLocalRandom.current().nextInt()));
+                        BIGINT.writeLong(valueBuilder, ThreadLocalRandom.current().nextInt());
+                    }
+                });
             }
 
             dataBlock = blockBuilder.build();
@@ -102,7 +98,7 @@ public class BenchmarkMapCopy
 
         public BlockBuilder getBlockBuilder()
         {
-            return blockBuilder.newBlockBuilderLike(status);
+            return blockBuilder.newBlockBuilderLike(null);
         }
     }
 
@@ -114,10 +110,6 @@ public class BenchmarkMapCopy
         data.setup();
         new BenchmarkMapCopy().benchmarkMapCopy(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkMapCopy.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkMapCopy.class).run();
     }
 }

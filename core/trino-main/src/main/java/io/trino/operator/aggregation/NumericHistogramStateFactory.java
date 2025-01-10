@@ -29,21 +29,9 @@ public class NumericHistogramStateFactory
     }
 
     @Override
-    public Class<? extends DoubleHistogramAggregation.State> getSingleStateClass()
-    {
-        return SingleState.class;
-    }
-
-    @Override
     public DoubleHistogramAggregation.State createGroupedState()
     {
         return new GroupedState();
-    }
-
-    @Override
-    public Class<? extends DoubleHistogramAggregation.State> getGroupedStateClass()
-    {
-        return GroupedState.class;
     }
 
     public static class GroupedState
@@ -54,7 +42,7 @@ public class NumericHistogramStateFactory
         private long size;
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             histograms.ensureCapacity(size);
         }
@@ -70,13 +58,11 @@ public class NumericHistogramStateFactory
         {
             requireNonNull(value, "value is null");
 
-            NumericHistogram previous = get();
+            NumericHistogram previous = histograms.getAndSet(getGroupId(), value);
+            size += value.estimatedInMemorySize();
             if (previous != null) {
                 size -= previous.estimatedInMemorySize();
             }
-
-            histograms.set(getGroupId(), value);
-            size += value.estimatedInMemorySize();
         }
 
         @Override

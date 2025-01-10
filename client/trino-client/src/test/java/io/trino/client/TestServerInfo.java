@@ -15,13 +15,14 @@ package io.trino.client;
 
 import io.airlift.json.JsonCodec;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
 import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.trino.client.NodeVersion.UNKNOWN;
-import static org.testng.Assert.assertEquals;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestServerInfo
 {
@@ -30,7 +31,7 @@ public class TestServerInfo
     @Test
     public void testJsonRoundTrip()
     {
-        assertJsonRoundTrip(new ServerInfo(UNKNOWN, "test", true, false, Optional.of(Duration.valueOf("2m"))));
+        assertJsonRoundTrip(new ServerInfo(UNKNOWN, "test", true, false, Optional.of(new Duration(2, MINUTES))));
         assertJsonRoundTrip(new ServerInfo(UNKNOWN, "test", true, false, Optional.empty()));
     }
 
@@ -39,13 +40,13 @@ public class TestServerInfo
     {
         ServerInfo newServerInfo = new ServerInfo(UNKNOWN, "test", true, false, Optional.empty());
         ServerInfo legacyServerInfo = SERVER_INFO_CODEC.fromJson("{\"nodeVersion\":{\"version\":\"<unknown>\"},\"environment\":\"test\",\"coordinator\":true}");
-        assertEquals(newServerInfo, legacyServerInfo);
+        assertThat(newServerInfo).isEqualTo(legacyServerInfo);
     }
 
     private static void assertJsonRoundTrip(ServerInfo serverInfo)
     {
         String json = SERVER_INFO_CODEC.toJson(serverInfo);
         ServerInfo copy = SERVER_INFO_CODEC.fromJson(json);
-        assertEquals(copy, serverInfo);
+        assertThat(copy).isEqualTo(serverInfo);
     }
 }

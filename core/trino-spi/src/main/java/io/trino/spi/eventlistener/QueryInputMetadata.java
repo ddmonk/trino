@@ -13,7 +13,11 @@
  */
 package io.trino.spi.eventlistener;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.spi.Unstable;
+import io.trino.spi.connector.CatalogHandle.CatalogVersion;
+import io.trino.spi.metrics.Metrics;
 
 import java.util.List;
 import java.util.Optional;
@@ -21,29 +25,41 @@ import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * This class is JSON serializable for convenience and serialization compatibility is not guaranteed across versions.
+ */
 public class QueryInputMetadata
 {
     private final String catalogName;
+    private final CatalogVersion catalogVersion;
     private final String schema;
     private final String table;
     private final List<String> columns;
     private final Optional<Object> connectorInfo;
+    private final Metrics connectorMetrics;
     private final OptionalLong physicalInputBytes;
     private final OptionalLong physicalInputRows;
 
-    public QueryInputMetadata(String catalogName,
+    @JsonCreator
+    @Unstable
+    public QueryInputMetadata(
+            String catalogName,
+            CatalogVersion catalogVersion,
             String schema,
             String table,
             List<String> columns,
             Optional<Object> connectorInfo,
+            Metrics connectorMetrics,
             OptionalLong physicalInputBytes,
             OptionalLong physicalInputRows)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.catalogVersion = requireNonNull(catalogVersion, "catalogVersion is null");
         this.schema = requireNonNull(schema, "schema is null");
         this.table = requireNonNull(table, "table is null");
         this.columns = requireNonNull(columns, "columns is null");
         this.connectorInfo = requireNonNull(connectorInfo, "connectorInfo is null");
+        this.connectorMetrics = requireNonNull(connectorMetrics, "connectorMetrics is null");
         this.physicalInputBytes = requireNonNull(physicalInputBytes, "physicalInputBytes is null");
         this.physicalInputRows = requireNonNull(physicalInputRows, "physicalInputRows is null");
     }
@@ -52,6 +68,12 @@ public class QueryInputMetadata
     public String getCatalogName()
     {
         return catalogName;
+    }
+
+    @JsonProperty
+    public CatalogVersion getCatalogVersion()
+    {
+        return catalogVersion;
     }
 
     @JsonProperty
@@ -76,6 +98,12 @@ public class QueryInputMetadata
     public Optional<Object> getConnectorInfo()
     {
         return connectorInfo;
+    }
+
+    @JsonProperty
+    public Metrics getConnectorMetrics()
+    {
+        return connectorMetrics;
     }
 
     @JsonProperty

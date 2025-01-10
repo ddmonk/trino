@@ -17,8 +17,13 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.predicate.DiscreteValues;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Ranges;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.CharType;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+
+import java.util.Collection;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.getDomainCompactionThreshold;
@@ -41,21 +46,38 @@ public interface PredicatePushdownController
     PredicatePushdownController CASE_INSENSITIVE_CHARACTER_PUSHDOWN = (session, domain) -> {
         checkArgument(
                 domain.getType() instanceof VarcharType || domain.getType() instanceof CharType,
-                "CASE_SENSITIVE_PUSHDOWN can be used only for chars and varchars");
+                "CASE_INSENSITIVE_CHARACTER_PUSHDOWN can be used only for chars and varchars");
 
         if (domain.isOnlyNull()) {
             return FULL_PUSHDOWN.apply(session, domain);
         }
 
-        if (domain.getValues().isDiscreteSet()) {
-            return new DomainPushdownResult(
-                    domain.simplify(getDomainCompactionThreshold(session)),
-                    domain);
+        if (!domain.getValues().isDiscreteSet()) {
+            // case insensitive predicate pushdown could return incorrect results for operators like `!=`, `<` or `>`
+            return DISABLE_PUSHDOWN.apply(session, domain);
         }
 
-        // case insensitive predicate pushdown could return incorrect results for operators like `!=`, `<` or `>`
-        return DISABLE_PUSHDOWN.apply(session, domain);
+        Domain simplifiedDomain = domain.simplify(getDomainCompactionThreshold(session));
+        if (!simplifiedDomain.getValues().isDiscreteSet()) {
+            // Domain#simplify can turn a discrete set into a range predicate
+            // Push down of range predicate for varchar/char types could lead to incorrect results
+            // when the remote database is case insensitive
+            return DISABLE_PUSHDOWN.apply(session, domain);
+        }
+        return new DomainPushdownResult(simplifiedDomain, domain);
     };
+
+    static PredicatePushdownController pushdownDiscreteValues(Type type)
+    {
+        return (session, domain) -> {
+            Optional<Collection<Object>> expandedRange = domain.getValues().tryExpandRanges(getDomainCompactionThreshold(session));
+            if (expandedRange.isPresent()) {
+                Domain convertedDiscreteDomain = Domain.create(ValueSet.copyOf(type, expandedRange.get()), domain.isNullAllowed());
+                return new DomainPushdownResult(convertedDiscreteDomain, Domain.all(domain.getType()));
+            }
+            return FULL_PUSHDOWN.apply(session, domain);
+        };
+    }
 
     DomainPushdownResult apply(ConnectorSession session, Domain domain);
 
@@ -87,6 +109,6 @@ public interface PredicatePushdownController
         return domain.getValues().getValuesProcessor().transform(
                 Ranges::getRangeCount,
                 DiscreteValues::getValuesCount,
-                ignored -> 0);
+                _ -> 0);
     }
 }

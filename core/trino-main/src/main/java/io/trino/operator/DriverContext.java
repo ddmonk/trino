@@ -20,7 +20,6 @@ import io.airlift.stats.CounterStat;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
-import io.trino.execution.Lifespan;
 import io.trino.execution.TaskId;
 import io.trino.memory.QueryContextVisitor;
 import io.trino.memory.context.MemoryTrackingContext;
@@ -29,6 +28,7 @@ import io.trino.sql.planner.plan.PlanNodeId;
 import org.joda.time.DateTime;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -55,6 +55,7 @@ public class DriverContext
     private final PipelineContext pipelineContext;
     private final Executor notificationExecutor;
     private final ScheduledExecutorService yieldExecutor;
+    private final ScheduledExecutorService timeoutExecutor;
 
     private final AtomicBoolean finished = new AtomicBoolean();
 
@@ -71,32 +72,41 @@ public class DriverContext
 
     private final AtomicReference<DateTime> executionStartTime = new AtomicReference<>();
     private final AtomicReference<DateTime> executionEndTime = new AtomicReference<>();
+    private final AtomicReference<Optional<Duration>> blockedTimeout = new AtomicReference<>(Optional.empty());
 
     private final MemoryTrackingContext driverMemoryContext;
 
     private final DriverYieldSignal yieldSignal;
 
     private final List<OperatorContext> operatorContexts = new CopyOnWriteArrayList<>();
-    private final Lifespan lifespan;
+    private final long splitWeight;
 
     public DriverContext(
             PipelineContext pipelineContext,
             Executor notificationExecutor,
             ScheduledExecutorService yieldExecutor,
+            ScheduledExecutorService timeoutExecutor,
             MemoryTrackingContext driverMemoryContext,
-            Lifespan lifespan)
+            long splitWeight)
     {
         this.pipelineContext = requireNonNull(pipelineContext, "pipelineContext is null");
         this.notificationExecutor = requireNonNull(notificationExecutor, "notificationExecutor is null");
-        this.yieldExecutor = requireNonNull(yieldExecutor, "scheduler is null");
+        this.yieldExecutor = requireNonNull(yieldExecutor, "yieldExecutor is null");
+        this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.driverMemoryContext = requireNonNull(driverMemoryContext, "driverMemoryContext is null");
-        this.lifespan = requireNonNull(lifespan, "lifespan is null");
         this.yieldSignal = new DriverYieldSignal();
+        this.splitWeight = splitWeight;
+        checkArgument(splitWeight >= 0, "splitWeight must be >= 0, found: %s", splitWeight);
     }
 
     public TaskId getTaskId()
     {
         return pipelineContext.getTaskId();
+    }
+
+    public long getSplitWeight()
+    {
+        return splitWeight;
     }
 
     public OperatorContext addOperatorContext(int operatorId, PlanNodeId planNodeId, String operatorType)
@@ -135,9 +145,10 @@ public class DriverContext
 
     public void startProcessTimer()
     {
-        if (startNanos.compareAndSet(0, System.nanoTime())) {
-            pipelineContext.start();
+        // Must update startNanos first so that the value is valid once executionStartTime is not null
+        if (executionStartTime.get() == null && startNanos.compareAndSet(0, System.nanoTime())) {
             executionStartTime.set(DateTime.now());
+            pipelineContext.start();
         }
     }
 
@@ -146,7 +157,7 @@ public class DriverContext
         operationTimer.end(overallTiming);
     }
 
-    public void recordBlocked(ListenableFuture<?> blocked)
+    public void recordBlocked(ListenableFuture<Void> blocked)
     {
         requireNonNull(blocked, "blocked is null");
 
@@ -166,24 +177,26 @@ public class DriverContext
             // already finished
             return;
         }
-        executionEndTime.set(DateTime.now());
+        // Must update endNanos first, so that the value is valid after executionEndTime is not null
         endNanos.set(System.nanoTime());
+        executionEndTime.set(DateTime.now());
 
         pipelineContext.driverFinished(this);
     }
 
     public void failed(Throwable cause)
     {
-        pipelineContext.failed(cause);
-        finished.set(true);
+        if (finished.compareAndSet(false, true)) {
+            pipelineContext.driverFailed(cause);
+        }
     }
 
-    public boolean isDone()
+    public boolean isTerminatingOrDone()
     {
-        return finished.get() || pipelineContext.isDone();
+        return finished.get() || pipelineContext.isTerminatingOrDone();
     }
 
-    public ListenableFuture<?> reserveSpill(long bytes)
+    public ListenableFuture<Void> reserveSpill(long bytes)
     {
         return pipelineContext.reserveSpill(bytes);
     }
@@ -202,11 +215,6 @@ public class DriverContext
         return yieldSignal;
     }
 
-    public long getSystemMemoryUsage()
-    {
-        return driverMemoryContext.getSystemMemory();
-    }
-
     public long getMemoryUsage()
     {
         return driverMemoryContext.getUserMemory();
@@ -215,11 +223,6 @@ public class DriverContext
     public long getRevocableMemoryUsage()
     {
         return driverMemoryContext.getRevocableMemory();
-    }
-
-    public void moreMemoryAvailable()
-    {
-        operatorContexts.forEach(OperatorContext::moreMemoryAvailable);
     }
 
     public boolean isPerOperatorCpuTimerEnabled()
@@ -238,9 +241,7 @@ public class DriverContext
         if (inputOperator != null) {
             return inputOperator.getInputDataSize();
         }
-        else {
-            return new CounterStat();
-        }
+        return new CounterStat();
     }
 
     public CounterStat getInputPositions()
@@ -249,9 +250,7 @@ public class DriverContext
         if (inputOperator != null) {
             return inputOperator.getInputPositions();
         }
-        else {
-            return new CounterStat();
-        }
+        return new CounterStat();
     }
 
     public CounterStat getOutputDataSize()
@@ -260,9 +259,7 @@ public class DriverContext
         if (inputOperator != null) {
             return inputOperator.getOutputDataSize();
         }
-        else {
-            return new CounterStat();
-        }
+        return new CounterStat();
     }
 
     public CounterStat getOutputPositions()
@@ -271,16 +268,27 @@ public class DriverContext
         if (inputOperator != null) {
             return inputOperator.getOutputPositions();
         }
-        else {
-            return new CounterStat();
+        return new CounterStat();
+    }
+
+    public long getWriterInputDataSize()
+    {
+        // Avoid using stream api for performance reasons
+        long writerInputDataSize = 0;
+        for (OperatorContext context : operatorContexts) {
+            writerInputDataSize += context.getWriterInputDataSize();
         }
+        return writerInputDataSize;
     }
 
     public long getPhysicalWrittenDataSize()
     {
-        return operatorContexts.stream()
-                .mapToLong(OperatorContext::getPhysicalWrittenDataSize)
-                .sum();
+        // Avoid using stream api for performance reasons
+        long physicalWrittenBytes = 0;
+        for (OperatorContext context : operatorContexts) {
+            physicalWrittenBytes += context.getPhysicalWrittenDataSize();
+        }
+        return physicalWrittenBytes;
     }
 
     public boolean isExecutionStarted()
@@ -296,9 +304,7 @@ public class DriverContext
     public List<OperatorStats> getOperatorStats()
     {
         return operatorContexts.stream()
-                .flatMap(operatorContext -> operatorContext
-                        .getNestedOperatorStats()
-                        .stream())
+                .map(OperatorContext::getOperatorStats)
                 .collect(toImmutableList());
     }
 
@@ -313,6 +319,14 @@ public class DriverContext
             totalBlockedTime += blockedMonitor.getBlockedTime();
         }
 
+        // startNanos is always valid once executionStartTime is not null
+        DateTime executionStartTime = this.executionStartTime.get();
+        Duration queuedTime = new Duration(nanosBetween(createNanos, executionStartTime == null ? System.nanoTime() : startNanos.get()), NANOSECONDS);
+
+        // endNanos is always valid once executionStartTime is not null
+        DateTime executionEndTime = this.executionEndTime.get();
+        Duration elapsedTime = new Duration(nanosBetween(createNanos, executionEndTime == null ? System.nanoTime() : endNanos.get()), NANOSECONDS);
+
         List<OperatorStats> operators = getOperatorStats();
         OperatorStats inputOperator = getFirst(operators, null);
 
@@ -322,7 +336,6 @@ public class DriverContext
 
         DataSize internalNetworkInputDataSize;
         long internalNetworkInputPositions;
-        Duration internalNetworkInputReadTime;
 
         DataSize rawInputDataSize;
         long rawInputPositions;
@@ -330,16 +343,17 @@ public class DriverContext
 
         DataSize processedInputDataSize;
         long processedInputPositions;
+        Duration inputBlockedTime;
         DataSize outputDataSize;
         long outputPositions;
+        Duration outputBlockedTime;
         if (inputOperator != null) {
             physicalInputDataSize = inputOperator.getPhysicalInputDataSize();
             physicalInputPositions = inputOperator.getPhysicalInputPositions();
-            physicalInputReadTime = inputOperator.getAddInputWall();
+            physicalInputReadTime = inputOperator.getPhysicalInputReadTime();
 
             internalNetworkInputDataSize = inputOperator.getInternalNetworkInputDataSize();
             internalNetworkInputPositions = inputOperator.getInternalNetworkInputPositions();
-            internalNetworkInputReadTime = inputOperator.getAddInputWall();
 
             rawInputDataSize = inputOperator.getRawInputDataSize();
             rawInputPositions = inputOperator.getInputPositions();
@@ -348,9 +362,13 @@ public class DriverContext
             processedInputDataSize = inputOperator.getInputDataSize();
             processedInputPositions = inputOperator.getInputPositions();
 
+            inputBlockedTime = inputOperator.getBlockedWall();
+
             OperatorStats outputOperator = requireNonNull(getLast(operators, null));
             outputDataSize = outputOperator.getOutputDataSize();
             outputPositions = outputOperator.getOutputPositions();
+
+            outputBlockedTime = outputOperator.getBlockedWall();
         }
         else {
             physicalInputDataSize = DataSize.ofBytes(0);
@@ -359,7 +377,6 @@ public class DriverContext
 
             internalNetworkInputDataSize = DataSize.ofBytes(0);
             internalNetworkInputPositions = 0;
-            internalNetworkInputReadTime = new Duration(0, MILLISECONDS);
 
             rawInputDataSize = DataSize.ofBytes(0);
             rawInputPositions = 0;
@@ -368,48 +385,31 @@ public class DriverContext
             processedInputDataSize = DataSize.ofBytes(0);
             processedInputPositions = 0;
 
+            inputBlockedTime = new Duration(0, MILLISECONDS);
+
             outputDataSize = DataSize.ofBytes(0);
             outputPositions = 0;
-        }
 
-        long physicalWrittenDataSize = operators.stream()
-                .map(OperatorStats::getPhysicalWrittenDataSize)
-                .mapToLong(DataSize::toBytes)
-                .sum();
-
-        long startNanos = this.startNanos.get();
-        if (startNanos < createNanos) {
-            startNanos = System.nanoTime();
-        }
-        Duration queuedTime = new Duration(startNanos - createNanos, NANOSECONDS);
-
-        long endNanos = this.endNanos.get();
-        Duration elapsedTime;
-        if (endNanos >= startNanos) {
-            elapsedTime = new Duration(endNanos - createNanos, NANOSECONDS);
-        }
-        else {
-            elapsedTime = new Duration(System.nanoTime() - createNanos, NANOSECONDS);
+            outputBlockedTime = new Duration(0, MILLISECONDS);
         }
 
         ImmutableSet.Builder<BlockedReason> builder = ImmutableSet.builder();
-
+        long physicalWrittenDataSize = 0;
         for (OperatorStats operator : operators) {
+            physicalWrittenDataSize += operator.getPhysicalWrittenDataSize().toBytes();
             if (operator.getBlockedReason().isPresent()) {
                 builder.add(operator.getBlockedReason().get());
             }
         }
 
         return new DriverStats(
-                lifespan,
                 createdTime,
-                executionStartTime.get(),
-                executionEndTime.get(),
+                executionStartTime,
+                executionEndTime,
                 queuedTime.convertToMostSuccinctTimeUnit(),
                 elapsedTime.convertToMostSuccinctTimeUnit(),
                 succinctBytes(driverMemoryContext.getUserMemory()),
                 succinctBytes(driverMemoryContext.getRevocableMemory()),
-                succinctBytes(driverMemoryContext.getSystemMemory()),
                 new Duration(totalScheduledTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalCpuTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
@@ -420,14 +420,15 @@ public class DriverContext
                 physicalInputReadTime,
                 internalNetworkInputDataSize.succinct(),
                 internalNetworkInputPositions,
-                internalNetworkInputReadTime,
                 rawInputDataSize.succinct(),
                 rawInputPositions,
                 rawInputReadTime,
                 processedInputDataSize.succinct(),
                 processedInputPositions,
+                inputBlockedTime,
                 outputDataSize.succinct(),
                 outputPositions,
+                outputBlockedTime,
                 succinctBytes(physicalWrittenDataSize),
                 operators);
     }
@@ -444,14 +445,24 @@ public class DriverContext
                 .collect(toList());
     }
 
-    public Lifespan getLifespan()
-    {
-        return lifespan;
-    }
-
     public ScheduledExecutorService getYieldExecutor()
     {
         return yieldExecutor;
+    }
+
+    public ScheduledExecutorService getTimeoutExecutor()
+    {
+        return timeoutExecutor;
+    }
+
+    public void setBlockedTimeout(Duration duration)
+    {
+        this.blockedTimeout.set(Optional.of(duration));
+    }
+
+    public Optional<Duration> getBlockedTimeout()
+    {
+        return blockedTimeout.get();
     }
 
     private static long nanosBetween(long start, long end)

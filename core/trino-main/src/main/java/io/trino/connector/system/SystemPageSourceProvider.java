@@ -14,6 +14,9 @@
 package io.trino.connector.system;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import io.trino.plugin.base.MappedPageSource;
+import io.trino.plugin.base.MappedRecordSet;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -23,6 +26,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordPageSource;
@@ -31,12 +35,11 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import io.trino.split.MappedPageSource;
-import io.trino.split.MappedRecordSet;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -61,12 +64,12 @@ public class SystemPageSourceProvider
             ConnectorSplit split,
             ConnectorTableHandle table,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter)
     {
         requireNonNull(columns, "columns is null");
         SystemTransactionHandle systemTransaction = (SystemTransactionHandle) transaction;
         SystemSplit systemSplit = (SystemSplit) split;
-        SchemaTableName tableName = ((SystemTableHandle) table).getSchemaTableName();
+        SchemaTableName tableName = ((SystemTableHandle) table).schemaTableName();
         SystemTable systemTable = tables.getSystemTable(session, tableName)
                 // table might disappear in the meantime
                 .orElseThrow(() -> new TrinoException(NOT_FOUND, format("Table '%s' not found", tableName)));
@@ -82,8 +85,9 @@ public class SystemPageSourceProvider
         }
 
         ImmutableList.Builder<Integer> userToSystemFieldIndex = ImmutableList.builder();
+        ImmutableSet.Builder<Integer> requiredColumns = ImmutableSet.builder();
         for (ColumnHandle column : columns) {
-            String columnName = ((SystemColumnHandle) column).getColumnName();
+            String columnName = ((SystemColumnHandle) column).columnName();
 
             Integer index = columnsByName.get(columnName);
             if (index == null) {
@@ -91,24 +95,39 @@ public class SystemPageSourceProvider
             }
 
             userToSystemFieldIndex.add(index);
+            requiredColumns.add(index);
         }
 
         TupleDomain<ColumnHandle> constraint = systemSplit.getConstraint();
         if (constraint.isNone()) {
             return new EmptyPageSource();
         }
-        TupleDomain<Integer> newConstraint = systemSplit.getConstraint().transform(columnHandle ->
-                columnsByName.get(((SystemColumnHandle) columnHandle).getColumnName()));
+        TupleDomain<Integer> newConstraint = systemSplit.getConstraint().transformKeys(columnHandle ->
+                columnsByName.get(((SystemColumnHandle) columnHandle).columnName()));
 
         try {
             return new MappedPageSource(systemTable.pageSource(systemTransaction.getConnectorTransactionHandle(), session, newConstraint), userToSystemFieldIndex.build());
         }
         catch (UnsupportedOperationException e) {
-            return new RecordPageSource(new MappedRecordSet(toRecordSet(systemTransaction.getConnectorTransactionHandle(), systemTable, session, newConstraint), userToSystemFieldIndex.build()));
+            return new RecordPageSource(new MappedRecordSet(
+                    toRecordSet(
+                            systemTransaction.getConnectorTransactionHandle(),
+                            systemTable,
+                            session,
+                            newConstraint,
+                            requiredColumns.build(),
+                            systemSplit),
+                    userToSystemFieldIndex.build()));
         }
     }
 
-    private static RecordSet toRecordSet(ConnectorTransactionHandle sourceTransaction, SystemTable table, ConnectorSession session, TupleDomain<Integer> constraint)
+    private static RecordSet toRecordSet(
+            ConnectorTransactionHandle sourceTransaction,
+            SystemTable table,
+            ConnectorSession session,
+            TupleDomain<Integer> constraint,
+            Set<Integer> requiredColumns,
+            ConnectorSplit split)
     {
         return new RecordSet()
         {
@@ -125,7 +144,7 @@ public class SystemPageSourceProvider
             @Override
             public RecordCursor cursor()
             {
-                return table.cursor(sourceTransaction, session, constraint);
+                return table.cursor(sourceTransaction, session, constraint, requiredColumns, split);
             }
         };
     }

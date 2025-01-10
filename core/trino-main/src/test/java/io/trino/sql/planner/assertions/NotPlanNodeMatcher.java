@@ -30,13 +30,13 @@ final class NotPlanNodeMatcher
 
     NotPlanNodeMatcher(Class<? extends PlanNode> excludedNodeClass)
     {
-        this.excludedNodeClass = requireNonNull(excludedNodeClass, "functionCalls is null");
+        this.excludedNodeClass = requireNonNull(excludedNodeClass, "excludedNodeClass is null");
     }
 
     @Override
     public boolean shapeMatches(PlanNode node)
     {
-        return (!node.getClass().equals(excludedNodeClass));
+        return !node.getClass().equals(excludedNodeClass);
     }
 
     @Override

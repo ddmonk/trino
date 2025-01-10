@@ -16,12 +16,11 @@ package io.trino.plugin.jdbc.credential;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.Singleton;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.airlift.configuration.ConfigurationFactory;
 import io.trino.plugin.jdbc.credential.file.ConfigFileBasedCredentialProviderConfig;
 import io.trino.plugin.jdbc.credential.keystore.KeyStoreBasedCredentialProviderConfig;
-
-import javax.inject.Singleton;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
@@ -30,7 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.google.inject.Scopes.SINGLETON;
-import static io.airlift.configuration.ConditionalModule.installModuleIf;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.configuration.ConfigurationLoader.loadPropertiesFrom;
 import static io.trino.plugin.jdbc.credential.CredentialProviderType.FILE;
@@ -55,7 +54,7 @@ public class CredentialProviderModule
 
     private void bindCredentialProviderModule(CredentialProviderType name, Module module)
     {
-        install(installModuleIf(
+        install(conditionalModule(
                 CredentialProviderTypeConfig.class,
                 config -> name == config.getCredentialProviderType(),
                 module));

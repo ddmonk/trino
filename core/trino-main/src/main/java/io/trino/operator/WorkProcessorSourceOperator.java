@@ -15,10 +15,7 @@ package io.trino.operator;
 
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import io.trino.spi.connector.UpdatablePageSource;
-
-import java.util.Optional;
-import java.util.function.Supplier;
+import io.trino.spi.metrics.Metrics;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
@@ -26,8 +23,6 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 public interface WorkProcessorSourceOperator
         extends WorkProcessorOperator
 {
-    Supplier<Optional<UpdatablePageSource>> getUpdatablePageSourceSupplier();
-
     default DataSize getPhysicalInputDataSize()
     {
         return DataSize.ofBytes(0);
@@ -67,4 +62,6 @@ public interface WorkProcessorSourceOperator
     {
         return 0;
     }
+
+    Metrics getConnectorMetrics();
 }

@@ -16,42 +16,51 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.cost.PlanNodeStatsEstimate;
+import io.trino.cost.ScalarStatsCalculator;
+import io.trino.cost.SymbolStatsEstimate;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
+import io.trino.metadata.TableProperties.TablePartitioning;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Variable;
+import io.trino.spi.predicate.TupleDomain;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.NodeRef;
 import io.trino.sql.planner.ConnectorExpressionTranslator;
-import io.trino.sql.planner.LiteralEncoder;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.NodeRef;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.SystemSessionProperties.isAllowPushdownIntoConnectors;
 import static io.trino.matching.Capture.newCapture;
+import static io.trino.sql.ir.optimizer.IrExpressionOptimizer.newOptimizer;
 import static io.trino.sql.planner.PartialTranslator.extractPartialTranslations;
 import static io.trino.sql.planner.ReferenceAwareExpressionNodeInliner.replaceExpression;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.tableScan;
+import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
 
 public class PushProjectionIntoTableScan
         implements Rule<ProjectNode>
@@ -60,13 +69,13 @@ public class PushProjectionIntoTableScan
     private static final Pattern<ProjectNode> PATTERN = project().with(source().matching(
             tableScan().capturedAs(TABLE_SCAN)));
 
-    private final Metadata metadata;
-    private final TypeAnalyzer typeAnalyzer;
+    private final PlannerContext plannerContext;
+    private final ScalarStatsCalculator scalarStatsCalculator;
 
-    public PushProjectionIntoTableScan(Metadata metadata, TypeAnalyzer typeAnalyzer)
+    public PushProjectionIntoTableScan(PlannerContext plannerContext, ScalarStatsCalculator scalarStatsCalculator)
     {
-        this.metadata = metadata;
-        this.typeAnalyzer = typeAnalyzer;
+        this.plannerContext = plannerContext;
+        this.scalarStatsCalculator = requireNonNull(scalarStatsCalculator, "scalarStatsCalculator is null");
     }
 
     @Override
@@ -86,34 +95,30 @@ public class PushProjectionIntoTableScan
     {
         TableScanNode tableScan = captures.get(TABLE_SCAN);
 
-        Map<Symbol, Expression> inputExpressions = project.getAssignments().getMap();
-
-        ImmutableList.Builder<NodeRef<Expression>> nodeReferencesBuilder = ImmutableList.builder();
-        ImmutableList.Builder<ConnectorExpression> partialProjectionsBuilder = ImmutableList.builder();
+        Session session = context.getSession();
 
         // Extract translatable components from projection expressions. Prepare a mapping from these internal
         // expression nodes to corresponding ConnectorExpression translations.
-        for (Map.Entry<Symbol, Expression> expression : inputExpressions.entrySet()) {
-            Map<NodeRef<Expression>, ConnectorExpression> partialTranslations = extractPartialTranslations(
-                    expression.getValue(),
-                    context.getSession(),
-                    typeAnalyzer,
-                    context.getSymbolAllocator().getTypes());
+        Map<NodeRef<Expression>, ConnectorExpression> partialTranslations = project.getAssignments().getMap().entrySet().stream()
+                .flatMap(expression ->
+                        extractPartialTranslations(
+                                expression.getValue(),
+                                session
+                        ).entrySet().stream())
+                // Filter out constant expressions. Constant expressions should not be pushed to the connector.
+                .filter(entry -> !(entry.getValue() instanceof io.trino.spi.expression.Constant))
+                // Avoid duplicates
+                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue, (first, ignore) -> first));
 
-            partialTranslations.forEach((nodeRef, expr) -> {
-                nodeReferencesBuilder.add(nodeRef);
-                partialProjectionsBuilder.add(expr);
-            });
-        }
+        List<NodeRef<Expression>> nodesForPartialProjections = ImmutableList.copyOf(partialTranslations.keySet());
+        List<ConnectorExpression> connectorPartialProjections = ImmutableList.copyOf(partialTranslations.values());
 
-        List<NodeRef<Expression>> nodesForPartialProjections = nodeReferencesBuilder.build();
-        List<ConnectorExpression> connectorPartialProjections = partialProjectionsBuilder.build();
+        Map<String, Symbol> inputVariableMappings = tableScan.getAssignments().keySet().stream()
+                .collect(toImmutableMap(Symbol::name, identity()));
+        Map<String, ColumnHandle> assignments = inputVariableMappings.entrySet().stream()
+                .collect(toImmutableMap(Entry::getKey, entry -> tableScan.getAssignments().get(entry.getValue())));
 
-        Map<String, ColumnHandle> assignments = tableScan.getAssignments()
-                .entrySet().stream()
-                .collect(toImmutableMap(entry -> entry.getKey().getName(), Map.Entry::getValue));
-
-        Optional<ProjectionApplicationResult<TableHandle>> result = metadata.applyProjection(context.getSession(), tableScan.getTable(), connectorPartialProjections, assignments);
+        Optional<ProjectionApplicationResult<TableHandle>> result = plannerContext.getMetadata().applyProjection(session, tableScan.getTable(), connectorPartialProjections, assignments);
 
         if (result.isEmpty()) {
             return Result.empty();
@@ -138,7 +143,12 @@ public class PushProjectionIntoTableScan
 
         // Translate partial connector projections back to new partial projections
         List<Expression> newPartialProjections = newConnectorPartialProjections.stream()
-                .map(expression -> ConnectorExpressionTranslator.translate(expression, variableMappings, new LiteralEncoder(metadata)))
+                .map(expression -> {
+                    Expression translated = ConnectorExpressionTranslator.translate(session, expression, plannerContext, variableMappings);
+                    // ConnectorExpressionTranslator may or may not preserve optimized form of expressions during round-trip. Avoid potential optimizer loop
+                    // by ensuring expression is optimized.
+                    return newOptimizer(plannerContext).process(translated, session, ImmutableMap.of()).orElse(translated);
+                })
                 .collect(toImmutableList());
 
         // Map internal node references to new partial projections
@@ -146,7 +156,7 @@ public class PushProjectionIntoTableScan
         for (int i = 0; i < nodesForPartialProjections.size(); i++) {
             nodesToNewPartialProjectionsBuilder.put(nodesForPartialProjections.get(i), newPartialProjections.get(i));
         }
-        Map<NodeRef<Expression>, Expression> nodesToNewPartialProjections = nodesToNewPartialProjectionsBuilder.build();
+        Map<NodeRef<Expression>, Expression> nodesToNewPartialProjections = nodesToNewPartialProjectionsBuilder.buildOrThrow();
 
         // Stitch partial translations to form new complete projections
         Assignments.Builder newProjectionAssignments = Assignments.builder();
@@ -154,15 +164,55 @@ public class PushProjectionIntoTableScan
             newProjectionAssignments.put(entry.getKey(), replaceExpression(entry.getValue(), nodesToNewPartialProjections));
         });
 
+        Optional<PlanNodeStatsEstimate> newStatistics = tableScan.getStatistics().map(statistics -> {
+            PlanNodeStatsEstimate.Builder builder = PlanNodeStatsEstimate.builder();
+            builder.setOutputRowCount(statistics.getOutputRowCount());
+
+            for (int i = 0; i < connectorPartialProjections.size(); i++) {
+                ConnectorExpression inputConnectorExpression = connectorPartialProjections.get(i);
+                ConnectorExpression resultConnectorExpression = newConnectorPartialProjections.get(i);
+                if (!(resultConnectorExpression instanceof Variable)) {
+                    continue;
+                }
+                String resultVariableName = ((Variable) resultConnectorExpression).getName();
+                Expression inputExpression = ConnectorExpressionTranslator.translate(session, inputConnectorExpression, plannerContext, inputVariableMappings);
+                SymbolStatsEstimate symbolStatistics = scalarStatsCalculator.calculate(inputExpression, statistics, session);
+                builder.addSymbolStatistics(variableMappings.get(resultVariableName), symbolStatistics);
+            }
+            return builder.build();
+        });
+
+        verifyTablePartitioning(context, tableScan, result.get().getHandle());
         return Result.ofPlanNode(
                 new ProjectNode(
                         context.getIdAllocator().getNextId(),
-                        TableScanNode.newInstance(
+                        new TableScanNode(
                                 tableScan.getId(),
                                 result.get().getHandle(),
                                 newScanOutputs,
                                 newScanAssignments,
-                                tableScan.isForDelete()),
+                                TupleDomain.all(),
+                                newStatistics,
+                                tableScan.isUpdateTarget(),
+                                tableScan.getUseConnectorNodePartitioning()),
                         newProjectionAssignments.build()));
+    }
+
+    // PushProjectionIntoTableScan might be executed after AddExchanges and DetermineTableScanNodePartitioning.
+    // In that case, table scan node partitioning (if present) was used to fragment plan with ExchangeNodes.
+    // Therefore table scan node partitioning should not change after AddExchanges is executed since it would
+    // make plan with ExchangeNodes invalid.
+    private void verifyTablePartitioning(
+            Context context,
+            TableScanNode oldTableScan,
+            TableHandle newTable)
+    {
+        if (oldTableScan.getUseConnectorNodePartitioning().isEmpty()) {
+            return;
+        }
+
+        Optional<TablePartitioning> oldTablePartitioning = plannerContext.getMetadata().getTableProperties(context.getSession(), oldTableScan.getTable()).getTablePartitioning();
+        Optional<TablePartitioning> newTablePartitioning = plannerContext.getMetadata().getTableProperties(context.getSession(), newTable).getTablePartitioning();
+        verify(newTablePartitioning.equals(oldTablePartitioning), "Partitioning must not change after projection is pushed down");
     }
 }

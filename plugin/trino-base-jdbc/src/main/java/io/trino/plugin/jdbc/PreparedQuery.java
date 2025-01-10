@@ -13,8 +13,6 @@
  */
 package io.trino.plugin.jdbc;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
@@ -22,28 +20,14 @@ import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
 
-public final class PreparedQuery
+public record PreparedQuery(
+        String query,
+        List<QueryParameter> parameters)
 {
-    private final String query;
-    private final List<QueryParameter> parameters;
-
-    @JsonCreator
-    public PreparedQuery(String query, List<QueryParameter> parameters)
+    public PreparedQuery
     {
-        this.query = requireNonNull(query, "query is null");
-        this.parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
-    }
-
-    @JsonProperty
-    public String getQuery()
-    {
-        return query;
-    }
-
-    @JsonProperty
-    public List<QueryParameter> getParameters()
-    {
-        return parameters;
+        requireNonNull(query, "query is null");
+        parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
     }
 
     public PreparedQuery transformQuery(Function<String, String> sqlFunction)

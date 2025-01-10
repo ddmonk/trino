@@ -15,11 +15,12 @@
 package io.trino.transaction;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.Duration;
-import io.trino.connector.CatalogName;
+import io.trino.metadata.CatalogInfo;
 import io.trino.metadata.CatalogMetadata;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
 import org.joda.time.DateTime;
@@ -27,12 +28,13 @@ import org.joda.time.DateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 
 public class TestingTransactionManager
         implements TransactionManager
@@ -57,7 +59,17 @@ public class TestingTransactionManager
                 DateTime.now(), // created
                 Duration.succinctNanos(0), // idle
                 ImmutableList.of(), // catalogs
-                Optional.empty()); // write catalog
+                Optional.empty(),  // write catalog
+                ImmutableSet.of());
+    }
+
+    @Override
+    public Optional<TransactionInfo> getTransactionInfoIfExist(TransactionId transactionId)
+    {
+        if (transactions.containsKey(transactionId)) {
+            return Optional.of(getTransactionInfo(transactionId));
+        }
+        return Optional.empty();
     }
 
     @Override
@@ -66,6 +78,12 @@ public class TestingTransactionManager
         return transactions.keySet().stream()
                 .map(this::getTransactionInfo)
                 .collect(toImmutableList());
+    }
+
+    @Override
+    public Set<TransactionId> getTransactionsUsingCatalog(CatalogHandle catalogHandle)
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -83,9 +101,21 @@ public class TestingTransactionManager
     }
 
     @Override
-    public Map<String, CatalogName> getCatalogNames(TransactionId transactionId)
+    public List<CatalogInfo> getCatalogs(TransactionId transactionId)
     {
-        return ImmutableMap.of();
+        return ImmutableList.of();
+    }
+
+    @Override
+    public List<CatalogInfo> getActiveCatalogs(TransactionId transactionId)
+    {
+        return ImmutableList.of();
+    }
+
+    @Override
+    public Optional<CatalogHandle> getCatalogHandle(TransactionId transactionId, String catalogName)
+    {
+        return Optional.empty();
     }
 
     @Override
@@ -95,13 +125,13 @@ public class TestingTransactionManager
     }
 
     @Override
-    public CatalogMetadata getCatalogMetadata(TransactionId transactionId, CatalogName catalogName)
+    public CatalogMetadata getCatalogMetadata(TransactionId transactionId, CatalogHandle catalogHandle)
     {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public CatalogMetadata getCatalogMetadataForWrite(TransactionId transactionId, CatalogName catalogName)
+    public CatalogMetadata getCatalogMetadataForWrite(TransactionId transactionId, CatalogHandle catalogHandle)
     {
         throw new UnsupportedOperationException();
     }
@@ -113,7 +143,13 @@ public class TestingTransactionManager
     }
 
     @Override
-    public ConnectorTransactionHandle getConnectorTransaction(TransactionId transactionId, CatalogName catalogName)
+    public ConnectorTransactionHandle getConnectorTransaction(TransactionId transactionId, String catalogName)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ConnectorTransactionHandle getConnectorTransaction(TransactionId transactionId, CatalogHandle catalogHandle)
     {
         throw new UnsupportedOperationException();
     }
@@ -137,17 +173,23 @@ public class TestingTransactionManager
     }
 
     @Override
-    public ListenableFuture<?> asyncCommit(TransactionId transactionId)
+    public ListenableFuture<Void> asyncCommit(TransactionId transactionId)
     {
         checkState(transactions.remove(transactionId) != null, "Transaction is already finished");
-        return immediateFuture(new Object());
+        return immediateVoidFuture();
     }
 
     @Override
-    public ListenableFuture<?> asyncAbort(TransactionId transactionId)
+    public ListenableFuture<Void> asyncAbort(TransactionId transactionId)
     {
         checkState(transactions.remove(transactionId) != null, "Transaction is already finished");
-        return immediateFuture(new Object());
+        return immediateVoidFuture();
+    }
+
+    @Override
+    public void blockCommit(TransactionId transactionId, String reason)
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override

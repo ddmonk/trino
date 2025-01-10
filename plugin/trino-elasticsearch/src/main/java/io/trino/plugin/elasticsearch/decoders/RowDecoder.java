@@ -13,14 +13,19 @@
  */
 package io.trino.plugin.elasticsearch.decoders;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.elasticsearch.DecoderDescriptor;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
 import org.elasticsearch.search.SearchHit;
 
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.elasticsearch.ScanQueryPageSource.getField;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static java.lang.String.format;
@@ -49,15 +54,79 @@ public class RowDecoder
             output.appendNull();
         }
         else if (data instanceof Map) {
-            BlockBuilder row = output.beginBlockEntry();
-            for (int i = 0; i < decoders.size(); i++) {
-                String field = fieldNames.get(i);
-                decoders.get(i).decode(hit, () -> getField((Map<String, Object>) data, field), row);
-            }
-            output.closeEntry();
+            ((RowBlockBuilder) output).buildEntry(fieldBuilders -> {
+                for (int i = 0; i < decoders.size(); i++) {
+                    String field = fieldNames.get(i);
+                    decoders.get(i).decode(hit, () -> getField((Map<String, Object>) data, field), fieldBuilders.get(i));
+                }
+            });
         }
         else {
             throw new TrinoException(TYPE_MISMATCH, format("Expected object for field '%s' of type ROW: %s [%s]", path, data, data.getClass().getSimpleName()));
+        }
+    }
+
+    public static class Descriptor
+            implements DecoderDescriptor
+    {
+        private final String path;
+        private final List<NameAndDescriptor> fields;
+
+        @JsonCreator
+        public Descriptor(String path, List<NameAndDescriptor> fields)
+        {
+            this.path = path;
+            this.fields = fields;
+        }
+
+        @JsonProperty
+        public String getPath()
+        {
+            return path;
+        }
+
+        @JsonProperty
+        public List<NameAndDescriptor> getFields()
+        {
+            return fields;
+        }
+
+        @Override
+        public Decoder createDecoder()
+        {
+            return new RowDecoder(
+                    path,
+                    fields.stream()
+                            .map(NameAndDescriptor::getName)
+                            .collect(toImmutableList()),
+                    fields.stream()
+                            .map(field -> field.getDescriptor().createDecoder())
+                            .collect(toImmutableList()));
+        }
+    }
+
+    public static class NameAndDescriptor
+    {
+        private final String name;
+        private final DecoderDescriptor descriptor;
+
+        @JsonCreator
+        public NameAndDescriptor(String name, DecoderDescriptor descriptor)
+        {
+            this.name = name;
+            this.descriptor = descriptor;
+        }
+
+        @JsonProperty
+        public String getName()
+        {
+            return name;
+        }
+
+        @JsonProperty
+        public DecoderDescriptor getDescriptor()
+        {
+            return descriptor;
         }
     }
 }

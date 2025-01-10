@@ -13,23 +13,21 @@
  */
 package io.trino.server.remotetask;
 
-import com.google.common.collect.ObjectArrays;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListenableFutureTask;
-import io.airlift.event.client.ServiceUnavailableException;
+import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.execution.TaskId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
-
-import javax.annotation.concurrent.ThreadSafe;
+import jakarta.ws.rs.ServiceUnavailableException;
 
 import java.io.EOFException;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.nio.channels.ClosedChannelException;
 import java.util.Queue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -37,6 +35,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.spi.HostAddress.fromUri;
 import static io.trino.spi.StandardErrorCode.REMOTE_TASK_ERROR;
 import static io.trino.spi.StandardErrorCode.TOO_MANY_REQUESTS_FAILED;
@@ -68,17 +67,15 @@ class RequestErrorTracker
         this.jobDescription = requireNonNull(jobDescription, "jobDescription is null");
     }
 
-    public ListenableFuture<?> acquireRequestPermit()
+    public ListenableFuture<Void> acquireRequestPermit()
     {
         long delayNanos = backoff.getBackoffDelayNanos();
 
         if (delayNanos == 0) {
-            return Futures.immediateFuture(null);
+            return immediateVoidFuture();
         }
 
-        ListenableFutureTask<Object> futureTask = ListenableFutureTask.create(() -> null);
-        scheduledExecutor.schedule(futureTask, delayNanos, NANOSECONDS);
-        return futureTask;
+        return Futures.scheduleAsync(Futures::immediateVoidFuture, delayNanos, NANOSECONDS, scheduledExecutor);
     }
 
     public void startRequest()
@@ -112,10 +109,10 @@ class RequestErrorTracker
         // log failure message
         if (isExpectedError(reason)) {
             // don't print a stack for a known errors
-            log.warn("Error " + jobDescription + " %s: %s: %s", taskId, reason.getMessage(), taskUri);
+            log.warn("Error %s %s: %s: %s", jobDescription, taskId, reason.getMessage(), taskUri);
         }
         else {
-            log.warn(reason, "Error " + jobDescription + " %s: %s", taskId, taskUri);
+            log.warn(reason, "Error %s %s: %s", jobDescription, taskId, taskUri);
         }
 
         // remember the first 10 errors
@@ -140,13 +137,14 @@ class RequestErrorTracker
         }
     }
 
-    static void logError(Throwable t, String format, Object... args)
+    @SuppressWarnings("FormatStringAnnotation") // we manipulate the format string and there's no way to make Error Prone accept the result
+    static void logError(Throwable t, String message)
     {
         if (isExpectedError(t)) {
-            log.error(format + ": %s", ObjectArrays.concat(args, t));
+            log.error("%s: %s", message, t);
         }
         else {
-            log.error(t, format, args);
+            log.error(t, message);
         }
     }
 
@@ -157,6 +155,8 @@ class RequestErrorTracker
                     (t instanceof SocketTimeoutException) ||
                     (t instanceof EOFException) ||
                     (t instanceof TimeoutException) ||
+                    (t instanceof CancellationException) ||
+                    (t instanceof ClosedChannelException) ||
                     (t instanceof ServiceUnavailableException)) {
                 return true;
             }

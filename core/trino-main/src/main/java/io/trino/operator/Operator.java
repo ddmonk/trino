@@ -13,14 +13,15 @@
  */
 package io.trino.operator;
 
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.trino.spi.Page;
+
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 
 public interface Operator
         extends AutoCloseable
 {
-    ListenableFuture<?> NOT_BLOCKED = Futures.immediateFuture(null);
+    ListenableFuture<Void> NOT_BLOCKED = immediateVoidFuture();
 
     OperatorContext getOperatorContext();
 
@@ -29,7 +30,7 @@ public interface Operator
      * unblocked.  If the operator is not blocked, this method should return
      * {@code NOT_BLOCKED}.
      */
-    default ListenableFuture<?> isBlocked()
+    default ListenableFuture<Void> isBlocked()
     {
         return NOT_BLOCKED;
     }
@@ -61,11 +62,14 @@ public interface Operator
      * Since memory revoking signal is delivered asynchronously to the Operator, implementation
      * must gracefully handle the case when there no longer is any revocable memory allocated.
      * <p>
-     * After this method is called on Operator the Driver is disallowed to call any
-     * processing methods on it (isBlocked/needsInput/addInput/getOutput) until
-     * {@link #finishMemoryRevoke()} is called.
+     * After this method is called on Operator the Driver is disallowed to call most of
+     * processing methods on it
+     * ({@link #isBlocked()}/{@link #needsInput()}/{@link #addInput(Page)}/{@link #getOutput()})
+     * until {@link #finishMemoryRevoke()} is called. {@link #finish()} is the only processing
+     * method that can be called during that time and {@link #close()} remains callable
+     * at any time.
      */
-    default ListenableFuture<?> startMemoryRevoke()
+    default ListenableFuture<Void> startMemoryRevoke()
     {
         return NOT_BLOCKED;
     }
@@ -74,9 +78,7 @@ public interface Operator
      * Clean up and release resources after completed memory revoking. Called by driver
      * once future returned by startMemoryRevoke is completed.
      */
-    default void finishMemoryRevoke()
-    {
-    }
+    default void finishMemoryRevoke() {}
 
     /**
      * Notifies the operator that no more pages will be added and the

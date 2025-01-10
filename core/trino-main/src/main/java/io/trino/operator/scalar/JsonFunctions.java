@@ -46,6 +46,7 @@ import static com.fasterxml.jackson.core.JsonToken.VALUE_NUMBER_INT;
 import static com.fasterxml.jackson.core.JsonToken.VALUE_STRING;
 import static com.fasterxml.jackson.core.JsonToken.VALUE_TRUE;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.base.util.JsonUtils.jsonFactoryBuilder;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.Chars.padSpaces;
 import static io.trino.util.JsonUtil.createJsonParser;
@@ -53,8 +54,9 @@ import static io.trino.util.JsonUtil.truncateIfNecessaryForErrorMessage;
 
 public final class JsonFunctions
 {
-    private static final JsonFactory JSON_FACTORY = new JsonFactory()
-            .disable(CANONICALIZE_FIELD_NAMES);
+    private static final JsonFactory JSON_FACTORY = jsonFactoryBuilder()
+            .disable(CANONICALIZE_FIELD_NAMES)
+            .build();
 
     private static final JsonFactory MAPPING_JSON_FACTORY = new MappingJsonFactory()
             .disable(CANONICALIZE_FIELD_NAMES);
@@ -197,7 +199,7 @@ public final class JsonFunctions
                 parser.skipChildren();
 
                 if (((token == VALUE_TRUE) && value) ||
-                        ((token == VALUE_FALSE) && (!value))) {
+                        ((token == VALUE_FALSE) && !value)) {
                     return true;
                 }
             }
@@ -283,7 +285,7 @@ public final class JsonFunctions
 
                 // noinspection FloatingPointEquality
                 if ((token == VALUE_NUMBER_FLOAT) && (parser.getDoubleValue() == value) &&
-                        (Doubles.isFinite(parser.getDoubleValue()))) {
+                        Doubles.isFinite(parser.getDoubleValue())) {
                     return true;
                 }
             }

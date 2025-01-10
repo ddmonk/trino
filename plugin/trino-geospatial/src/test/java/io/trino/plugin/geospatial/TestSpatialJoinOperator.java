@@ -24,7 +24,6 @@ import io.trino.geospatial.KdbTreeUtils;
 import io.trino.geospatial.Rectangle;
 import io.trino.operator.Driver;
 import io.trino.operator.DriverContext;
-import io.trino.operator.InternalJoinFilterFunction;
 import io.trino.operator.Operator;
 import io.trino.operator.OperatorFactory;
 import io.trino.operator.PagesIndex.TestingFactory;
@@ -34,9 +33,10 @@ import io.trino.operator.PipelineContext;
 import io.trino.operator.SpatialIndexBuilderOperator.SpatialIndexBuilderOperatorFactory;
 import io.trino.operator.SpatialIndexBuilderOperator.SpatialPredicate;
 import io.trino.operator.SpatialJoinOperator.SpatialJoinOperatorFactory;
-import io.trino.operator.StandardJoinFilterFunction;
 import io.trino.operator.TaskContext;
 import io.trino.operator.ValuesOperator;
+import io.trino.operator.join.InternalJoinFilterFunction;
+import io.trino.operator.join.StandardJoinFilterFunction;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.sql.gen.JoinFilterFunctionCompiler;
@@ -44,13 +44,14 @@ import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.SpatialJoinNode.Type;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.TestingTaskContext;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.SynchronousQueue;
@@ -76,12 +77,10 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static java.util.Collections.emptyIterator;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestSpatialJoinOperator
 {
     private static final String KDB_TREE_JSON = KdbTreeUtils.toJson(
@@ -104,7 +103,7 @@ public class TestSpatialJoinOperator
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         // Before/AfterMethod is chosen here because the executor needs to be shutdown
@@ -124,7 +123,7 @@ public class TestSpatialJoinOperator
         scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         executor.shutdownNow();
@@ -272,12 +271,12 @@ public class TestSpatialJoinOperator
 
         // force a yield for every match
         AtomicInteger filterFunctionCalls = new AtomicInteger();
-        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction((
+        InternalJoinFilterFunction filterFunction = new TestInternalJoinFilterFunction(
                 (leftPosition, leftPage, rightPosition, rightPage) -> {
                     filterFunctionCalls.incrementAndGet();
                     driverContext.getYieldSignal().forceYieldForTesting();
                     return true;
-                }));
+                });
 
         RowPagesBuilder buildPages = rowPagesBuilder(ImmutableList.of(GEOMETRY, VARCHAR))
                 .row(POLYGON_A, "A")
@@ -304,27 +303,36 @@ public class TestSpatialJoinOperator
         OperatorFactory joinOperatorFactory = new SpatialJoinOperatorFactory(2, new PlanNodeId("test"), INNER, probePages.getTypes(), Ints.asList(1), 0, Optional.empty(), pagesSpatialIndexFactory);
 
         Operator operator = joinOperatorFactory.createOperator(driverContext);
-        assertTrue(operator.needsInput());
+        assertThat(operator.needsInput()).isTrue();
         operator.addInput(probeInput.get(0));
         operator.finish();
 
         // we will yield 40 times due to filterFunction
         for (int i = 0; i < 40; i++) {
             driverContext.getYieldSignal().setWithDelay(5 * SECONDS.toNanos(1), driverContext.getYieldExecutor());
-            assertNull(operator.getOutput());
-            assertEquals(filterFunctionCalls.get(), i + 1, "Expected join to stop processing (yield) after calling filter function once");
+            assertThat(operator.getOutput()).isNull();
+            assertThat(filterFunctionCalls.get())
+                    .describedAs("Expected join to stop processing (yield) after calling filter function once")
+                    .isEqualTo(i + 1);
             driverContext.getYieldSignal().reset();
         }
         // delayed yield is not going to prevent operator from producing a page now (yield won't be forced because filter function won't be called anymore)
         driverContext.getYieldSignal().setWithDelay(5 * SECONDS.toNanos(1), driverContext.getYieldExecutor());
         Page output = operator.getOutput();
-        assertNotNull(output);
+        assertThat(output).isNotNull();
 
         // make sure we have 40 matches
-        assertEquals(output.getPositionCount(), 40);
+        assertThat(output.getPositionCount()).isEqualTo(40);
     }
 
-    @Test(dataProvider = "testDuplicateProbeFactoryDataProvider")
+    @Test
+    public void testDuplicateProbeFactory()
+            throws Exception
+    {
+        testDuplicateProbeFactory(true);
+        testDuplicateProbeFactory(false);
+    }
+
     public void testDuplicateProbeFactory(boolean createSecondaryOperators)
             throws Exception
     {
@@ -346,7 +354,7 @@ public class TestSpatialJoinOperator
             OperatorFactory secondFactory = firstFactory.duplicate();
             if (createSecondaryOperators) {
                 try (Operator secondOperator = secondFactory.createOperator(secondDriver)) {
-                    assertEquals(toPages(secondOperator, emptyIterator()), ImmutableList.of());
+                    assertThat(toPages(secondOperator, emptyIterator())).isEqualTo(ImmutableList.of());
                 }
             }
             secondFactory.noMoreOperators();
@@ -356,15 +364,6 @@ public class TestSpatialJoinOperator
                 .row("0_1", "0_0")
                 .build();
         assertOperatorEquals(firstFactory, probeDriver, probePages.build(), expected);
-    }
-
-    @DataProvider
-    public Object[][] testDuplicateProbeFactoryDataProvider()
-    {
-        return new Object[][] {
-                {true},
-                {false},
-        };
     }
 
     @Test
@@ -482,6 +481,7 @@ public class TestSpatialJoinOperator
                 Ints.asList(1),
                 0,
                 radiusChannel,
+                OptionalDouble.empty(),
                 partitionChannel,
                 spatialRelationshipTest,
                 kdbTreeJson,
@@ -497,7 +497,7 @@ public class TestSpatialJoinOperator
         ListenableFuture<PagesSpatialIndex> pagesSpatialIndex = pagesSpatialIndexFactory.createPagesSpatialIndex();
 
         while (!pagesSpatialIndex.isDone()) {
-            driver.process();
+            driver.processUntilBlocked();
         }
 
         runDriverInThread(executor, driver);
@@ -512,7 +512,7 @@ public class TestSpatialJoinOperator
         executor.execute(() -> {
             if (!driver.isFinished()) {
                 try {
-                    driver.process();
+                    driver.processUntilBlocked();
                 }
                 catch (TrinoException e) {
                     driver.getDriverContext().failed(e);

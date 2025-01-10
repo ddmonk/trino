@@ -14,36 +14,50 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
-import io.trino.metadata.TableHandle;
+import io.trino.metadata.RedirectionAwareTableHandle;
 import io.trino.security.AccessControl;
 import io.trino.spi.connector.CatalogSchemaName;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
 import io.trino.spi.security.Privilege;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Grant;
-import io.trino.sql.tree.GrantOnType;
-import io.trino.transaction.TransactionManager;
 
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.execution.PrivilegeUtilities.fetchEntityKindPrivileges;
+import static io.trino.execution.PrivilegeUtilities.parseStatementPrivileges;
 import static io.trino.metadata.MetadataUtil.createCatalogSchemaName;
+import static io.trino.metadata.MetadataUtil.createEntityKindAndName;
 import static io.trino.metadata.MetadataUtil.createPrincipal;
 import static io.trino.metadata.MetadataUtil.createQualifiedObjectName;
-import static io.trino.spi.StandardErrorCode.INVALID_PRIVILEGE;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class GrantTask
         implements DataDefinitionTask<Grant>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public GrantTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -51,26 +65,34 @@ public class GrantTask
     }
 
     @Override
-    public ListenableFuture<?> execute(Grant statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            Grant statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
-        if (statement.getType().filter(GrantOnType.SCHEMA::equals).isPresent()) {
-            executeGrantOnSchema(stateMachine.getSession(), statement, metadata, accessControl);
+        String entityKind = statement.getGrantObject().getEntityKind().orElse("TABLE");
+        if (entityKind.equalsIgnoreCase("TABLE")) {
+            executeGrantOnTable(stateMachine.getSession(), statement);
+        }
+        else if (entityKind.equalsIgnoreCase("SCHEMA")) {
+            executeGrantOnSchema(stateMachine.getSession(), statement);
         }
         else {
-            executeGrantOnTable(stateMachine.getSession(), statement, metadata, accessControl);
+            executeGrantOnEntity(stateMachine.getSession(), entityKind, metadata, statement);
         }
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 
-    private void executeGrantOnSchema(Session session, Grant statement, Metadata metadata, AccessControl accessControl)
+    private void executeGrantOnSchema(Session session, Grant statement)
     {
-        CatalogSchemaName schemaName = createCatalogSchemaName(session, statement, Optional.of(statement.getName()));
+        CatalogSchemaName schemaName = createCatalogSchemaName(session, statement, Optional.of(statement.getGrantObject().getName()));
 
         if (!metadata.schemaExists(session, schemaName)) {
             throw semanticException(SCHEMA_NOT_FOUND, statement, "Schema '%s' does not exist", schemaName);
         }
 
-        Set<Privilege> privileges = parseStatementPrivileges(statement);
+        Set<Privilege> privileges = parseStatementPrivileges(statement, statement.getPrivileges());
         for (Privilege privilege : privileges) {
             accessControl.checkCanGrantSchemaPrivilege(session.toSecurityContext(), privilege, schemaName, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
         }
@@ -78,15 +100,21 @@ public class GrantTask
         metadata.grantSchemaPrivileges(session, schemaName, privileges, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
     }
 
-    private void executeGrantOnTable(Session session, Grant statement, Metadata metadata, AccessControl accessControl)
+    private void executeGrantOnTable(Session session, Grant statement)
     {
-        QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
-        Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
-        if (tableHandle.isEmpty()) {
-            throw semanticException(TABLE_NOT_FOUND, statement, "Table '%s' does not exist", tableName);
+        QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getGrantObject().getName());
+
+        if (!metadata.isMaterializedView(session, tableName) && !metadata.isView(session, tableName)) {
+            RedirectionAwareTableHandle redirection = metadata.getRedirectionAwareTableHandle(session, tableName);
+            if (redirection.tableHandle().isEmpty()) {
+                throw semanticException(TABLE_NOT_FOUND, statement, "Table '%s' does not exist", tableName);
+            }
+            if (redirection.redirectedTableName().isPresent()) {
+                throw semanticException(NOT_SUPPORTED, statement, "Table %s is redirected to %s and GRANT is not supported with table redirections", tableName, redirection.redirectedTableName().get());
+            }
         }
 
-        Set<Privilege> privileges = parseStatementPrivileges(statement);
+        Set<Privilege> privileges = parseStatementPrivileges(statement, statement.getPrivileges());
 
         for (Privilege privilege : privileges) {
             accessControl.checkCanGrantTablePrivilege(session.toSecurityContext(), privilege, tableName, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
@@ -95,29 +123,15 @@ public class GrantTask
         metadata.grantTablePrivileges(session, tableName, privileges, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
     }
 
-    private static Set<Privilege> parseStatementPrivileges(Grant statement)
+    private void executeGrantOnEntity(Session session, String entityKind, Metadata metadata, Grant statement)
     {
-        Set<Privilege> privileges;
-        if (statement.getPrivileges().isPresent()) {
-            privileges = statement.getPrivileges().get().stream()
-                    .map(privilege -> parsePrivilege(statement, privilege))
-                    .collect(toImmutableSet());
-        }
-        else {
-            // All privileges
-            privileges = EnumSet.allOf(Privilege.class);
-        }
-        return privileges;
-    }
+        EntityKindAndName entity = createEntityKindAndName(entityKind, statement.getGrantObject().getName());
+        Set<EntityPrivilege> privileges = fetchEntityKindPrivileges(entityKind, metadata, statement.getPrivileges());
 
-    private static Privilege parsePrivilege(Grant statement, String privilegeString)
-    {
-        for (Privilege privilege : Privilege.values()) {
-            if (privilege.name().equalsIgnoreCase(privilegeString)) {
-                return privilege;
-            }
+        for (EntityPrivilege privilege : privileges) {
+            accessControl.checkCanGrantEntityPrivilege(session.toSecurityContext(), privilege, entity, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
         }
 
-        throw semanticException(INVALID_PRIVILEGE, statement, "Unknown privilege: '%s'", privilegeString);
+        metadata.grantEntityPrivileges(session, entity, privileges, createPrincipal(statement.getGrantee()), statement.isWithGrantOption());
     }
 }

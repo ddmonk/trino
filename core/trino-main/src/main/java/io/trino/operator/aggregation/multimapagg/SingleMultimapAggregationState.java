@@ -13,72 +13,88 @@
  */
 package io.trino.operator.aggregation.multimapagg;
 
-import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.ValueBlock;
+import io.trino.spi.function.AccumulatorState;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
 
-import static io.trino.type.TypeUtils.expectedValueSize;
-import static java.util.Objects.requireNonNull;
+import java.lang.invoke.MethodHandle;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 public class SingleMultimapAggregationState
-        implements MultimapAggregationState
+        extends AbstractMultimapAggregationState
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(SingleMultimapAggregationState.class).instanceSize();
-    private static final int EXPECTED_ENTRIES = 10;
-    private static final int EXPECTED_ENTRY_SIZE = 16;
-    private final Type keyType;
-    private final Type valueType;
-    private BlockBuilder keyBlockBuilder;
-    private BlockBuilder valueBlockBuilder;
+    private SqlMap tempSerializedState;
 
-    public SingleMultimapAggregationState(Type keyType, Type valueType)
+    public SingleMultimapAggregationState(
+            Type keyType,
+            MethodHandle keyReadFlat,
+            MethodHandle keyWriteFlat,
+            MethodHandle hashFlat,
+            MethodHandle distinctFlatBlock,
+            MethodHandle keyHashBlock,
+            Type valueType,
+            MethodHandle valueReadFlat,
+            MethodHandle valueWriteFlat)
     {
-        this.keyType = requireNonNull(keyType);
-        this.valueType = requireNonNull(valueType);
-        keyBlockBuilder = keyType.createBlockBuilder(null, EXPECTED_ENTRIES, expectedValueSize(keyType, EXPECTED_ENTRY_SIZE));
-        valueBlockBuilder = valueType.createBlockBuilder(null, EXPECTED_ENTRIES, expectedValueSize(valueType, EXPECTED_ENTRY_SIZE));
+        super(
+                keyType,
+                keyReadFlat,
+                keyWriteFlat,
+                hashFlat,
+                distinctFlatBlock,
+                keyHashBlock,
+                valueType,
+                valueReadFlat,
+                valueWriteFlat,
+                false);
+    }
+
+    private SingleMultimapAggregationState(SingleMultimapAggregationState state)
+    {
+        super(state);
+        checkArgument(state.tempSerializedState == null, "state.tempSerializedState is not null");
+        tempSerializedState = null;
     }
 
     @Override
-    public void add(Block key, Block value, int position)
+    public void add(ValueBlock keyBlock, int keyPosition, ValueBlock valueBlock, int valuePosition)
     {
-        keyType.appendTo(key, position, keyBlockBuilder);
-        valueType.appendTo(value, position, valueBlockBuilder);
+        add(0, keyBlock, keyPosition, valueBlock, valuePosition);
     }
 
     @Override
-    public void forEach(MultimapAggregationStateConsumer consumer)
+    public void merge(MultimapAggregationState other)
     {
-        for (int i = 0; i < keyBlockBuilder.getPositionCount(); i++) {
-            consumer.accept(keyBlockBuilder, valueBlockBuilder, i);
-        }
+        SqlMap serializedState = ((SingleMultimapAggregationState) other).removeTempSerializedState();
+        deserialize(0, serializedState);
     }
 
     @Override
-    public boolean isEmpty()
+    public void writeAll(MapBlockBuilder out)
     {
-        return keyBlockBuilder.getPositionCount() == 0;
+        serialize(0, out);
     }
 
     @Override
-    public int getEntryCount()
+    public AccumulatorState copy()
     {
-        return keyBlockBuilder.getPositionCount();
+        return new SingleMultimapAggregationState(this);
     }
 
-    @Override
-    public long getEstimatedSize()
+    void setTempSerializedState(SqlMap tempSerializedState)
     {
-        return INSTANCE_SIZE + keyBlockBuilder.getRetainedSizeInBytes() + valueBlockBuilder.getRetainedSizeInBytes();
+        this.tempSerializedState = tempSerializedState;
     }
 
-    @Override
-    public void reset()
+    SqlMap removeTempSerializedState()
     {
-        // Single aggregation state is used as scratch state in group accumulator.
-        // Thus reset() will be called for each group (via MultimapAggregationStateSerializer#deserialize)
-        keyBlockBuilder = keyBlockBuilder.newBlockBuilderLike(null);
-        valueBlockBuilder = valueBlockBuilder.newBlockBuilderLike(null);
+        SqlMap sqlMap = tempSerializedState;
+        checkState(sqlMap != null, "tempDeserializeBlock is null");
+        tempSerializedState = null;
+        return sqlMap;
     }
 }

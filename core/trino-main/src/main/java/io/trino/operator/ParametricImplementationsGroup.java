@@ -15,8 +15,8 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.metadata.FunctionArgumentDefinition;
-import io.trino.metadata.Signature;
+import io.trino.spi.function.FunctionNullability;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.TypeSignature;
 
 import java.util.List;
@@ -44,8 +44,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
     private final List<T> genericImplementations;
 
     private final Signature signature;
-    private final boolean nullable;
-    private final List<FunctionArgumentDefinition> argumentDefinitions;
+    private final FunctionNullability functionNullability;
 
     public ParametricImplementationsGroup(
             Map<Signature, T> exactImplementations,
@@ -64,27 +63,21 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
                 .addAll(genericImplementations)
                 .build();
         checkArgument(!allImplementations.isEmpty(), "No implementations provided");
-        this.nullable = allImplementations.get(0).isNullable();
-        this.argumentDefinitions = allImplementations.get(0).getArgumentDefinitions();
+        this.functionNullability = allImplementations.get(0).getFunctionNullability();
 
-        checkArgument(allImplementations.stream().allMatch(choice -> choice.isNullable() == nullable), "all implementations must have the same nullable flag: %s", signature);
         checkArgument(
                 allImplementations.stream()
-                        .map(T::getArgumentDefinitions)
-                        .allMatch(argumentDefinitions::equals),
-                "all implementations must have the argument definitions: %s", signature);
+                        .map(T::getFunctionNullability)
+                        .allMatch(functionNullability::equals),
+                "all implementations must have the nullability: %s", signature);
     }
 
-    public boolean isNullable()
+    public FunctionNullability getFunctionNullability()
     {
-        return nullable;
+        return functionNullability;
     }
 
-    public List<FunctionArgumentDefinition> getArgumentDefinitions()
-    {
-        return argumentDefinitions;
-    }
-
+    @SafeVarargs
     public static <T extends ParametricImplementation> ParametricImplementationsGroup<T> of(T... implementations)
     {
         ParametricImplementationsGroup.Builder<T> builder = builder();
@@ -129,7 +122,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
 
         public ParametricImplementationsGroup<T> build()
         {
-            Map<Signature, T> exactImplementations = this.exactImplementations.build();
+            Map<Signature, T> exactImplementations = this.exactImplementations.buildOrThrow();
             List<T> specializedImplementations = this.specializedImplementations.build();
             List<T> genericImplementations = this.genericImplementations.build();
             return new ParametricImplementationsGroup<>(
@@ -159,7 +152,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
                 List<T> specializedImplementations,
                 List<T> genericImplementations)
         {
-            if (specializedImplementations.size() + genericImplementations.size() == 0) {
+            if (specializedImplementations.isEmpty() && genericImplementations.isEmpty()) {
                 return getOnlyElement(exactImplementations.keySet());
             }
 
@@ -174,7 +167,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
                 signature = Optional.of(implementation.getSignature());
             }
 
-            return signature.get();
+            return signature.orElseThrow();
         }
     }
 }

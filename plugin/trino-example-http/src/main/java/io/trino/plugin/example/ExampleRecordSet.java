@@ -21,6 +21,7 @@ import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.Type;
 
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -36,7 +37,7 @@ public class ExampleRecordSet
     {
         requireNonNull(split, "split is null");
 
-        this.columnHandles = requireNonNull(columnHandles, "column handles is null");
+        this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
         ImmutableList.Builder<Type> types = ImmutableList.builder();
         for (ExampleColumnHandle column : columnHandles) {
             types.add(column.getColumnType());
@@ -44,7 +45,7 @@ public class ExampleRecordSet
         this.columnTypes = types.build();
 
         try {
-            byteSource = Resources.asByteSource(split.getUri().toURL());
+            byteSource = Resources.asByteSource(URI.create(split.getUri()).toURL());
         }
         catch (MalformedURLException e) {
             throw new RuntimeException(e);

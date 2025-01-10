@@ -13,9 +13,8 @@
  */
 package io.trino.plugin.jdbc.credential;
 
-import io.trino.plugin.jdbc.JdbcIdentity;
-
-import javax.inject.Inject;
+import com.google.inject.Inject;
+import io.trino.spi.security.ConnectorIdentity;
 
 import java.util.Map;
 import java.util.Optional;
@@ -43,7 +42,7 @@ public class ExtraCredentialProvider
     }
 
     @Override
-    public Optional<String> getConnectionUser(Optional<JdbcIdentity> jdbcIdentity)
+    public Optional<String> getConnectionUser(Optional<ConnectorIdentity> jdbcIdentity)
     {
         if (jdbcIdentity.isPresent() && userCredentialName.isPresent()) {
             Map<String, String> extraCredentials = jdbcIdentity.get().getExtraCredentials();
@@ -55,7 +54,7 @@ public class ExtraCredentialProvider
     }
 
     @Override
-    public Optional<String> getConnectionPassword(Optional<JdbcIdentity> jdbcIdentity)
+    public Optional<String> getConnectionPassword(Optional<ConnectorIdentity> jdbcIdentity)
     {
         if (jdbcIdentity.isPresent() && passwordCredentialName.isPresent()) {
             Map<String, String> extraCredentials = jdbcIdentity.get().getExtraCredentials();

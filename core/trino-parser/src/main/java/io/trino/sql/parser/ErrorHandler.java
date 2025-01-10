@@ -14,7 +14,6 @@
 package io.trino.sql.parser;
 
 import com.google.common.collect.ImmutableSet;
-import io.airlift.log.Logger;
 import org.antlr.v4.runtime.BaseErrorListener;
 import org.antlr.v4.runtime.NoViableAltException;
 import org.antlr.v4.runtime.Parser;
@@ -42,16 +41,17 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
-import static java.lang.String.format;
+import static java.util.logging.Level.SEVERE;
 import static org.antlr.v4.runtime.atn.ATNState.RULE_START;
 
 class ErrorHandler
         extends BaseErrorListener
 {
-    private static final Logger LOG = Logger.get(ErrorHandler.class);
+    private static final Logger LOG = Logger.getLogger(ErrorHandler.class.getName());
 
     private final Map<Integer, String> specialRules;
     private final Map<Integer, String> specialTokens;
@@ -99,10 +99,10 @@ class ErrorHandler
                     .sorted()
                     .collect(Collectors.joining(", "));
 
-            message = format("mismatched input '%s'. Expecting: %s", parser.getTokenStream().get(result.getErrorTokenIndex()).getText(), expected);
+            message = "mismatched input '%s'. Expecting: %s".formatted(parser.getTokenStream().get(result.getErrorTokenIndex()).getText(), expected);
         }
         catch (Exception exception) {
-            LOG.error(exception, "Unexpected failure when handling parsing error. This is likely a bug in the implementation");
+            LOG.log(SEVERE, "Unexpected failure when handling parsing error. This is likely a bug in the implementation", exception);
         }
 
         throw new ParsingException(message, e, line, charPositionInLine + 1);
@@ -156,8 +156,7 @@ class ErrorHandler
                 text = text.replace("\t", "\\t");
             }
 
-            return format(
-                    "%s%s:%s @ %s:<%s>:%s",
+            return "%s%s:%s @ %s:<%s>:%s".formatted(
                     suppressed ? "-" : "+",
                     parser.getRuleNames()[state.ruleIndex],
                     state.stateNumber,
@@ -210,14 +209,12 @@ class ErrorHandler
             }
 
             Set<Integer> endTokens = process(new ParsingState(currentState, tokenIndex, false, parser), 0);
-            Set<Integer> nextTokens = new HashSet<>();
             while (!endTokens.isEmpty() && context.invokingState != -1) {
-                for (int endToken : endTokens) {
-                    ATNState nextState = ((RuleTransition) atn.states.get(context.invokingState).transition(0)).followState;
-                    nextTokens.addAll(process(new ParsingState(nextState, endToken, false, parser), 0));
-                }
+                ATNState nextState = ((RuleTransition) atn.states.get(context.invokingState).transition(0)).followState;
+                endTokens = endTokens.stream()
+                    .flatMap(endToken -> process(new ParsingState(nextState, endToken, false, parser), 0).stream())
+                    .collect(Collectors.toSet());
                 context = context.parent;
-                endTokens = nextTokens;
             }
 
             return new Result(furthestTokenIndex, candidates);
@@ -297,10 +294,9 @@ class ErrorHandler
                 for (int i = 0; i < state.getNumberOfTransitions(); i++) {
                     Transition transition = state.transition(i);
 
-                    if (transition instanceof RuleTransition) {
-                        RuleTransition ruleTransition = (RuleTransition) transition;
+                    if (transition instanceof RuleTransition ruleTransition) {
                         for (int endToken : process(new ParsingState(ruleTransition.target, tokenIndex, suppressed, parser), ruleTransition.precedence)) {
-                            activeStates.push(new ParsingState(ruleTransition.followState, endToken, suppressed, parser));
+                            activeStates.push(new ParsingState(ruleTransition.followState, endToken, suppressed && endToken == currentToken, parser));
                         }
                     }
                     else if (transition instanceof PrecedencePredicateTransition) {

@@ -15,18 +15,20 @@ package io.trino.execution.scheduler;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Suppliers;
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableSetMultimap;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
-import io.trino.connector.CatalogName;
+import io.trino.Session;
+import io.trino.cache.NonEvictableCache;
 import io.trino.execution.NodeTaskMap;
+import io.trino.execution.scheduler.NodeSchedulerConfig.SplitsBalancingPolicy;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.InternalNodeManager;
 import io.trino.spi.HostAddress;
-
-import javax.inject.Inject;
+import io.trino.spi.SplitWeight;
+import io.trino.spi.connector.CatalogHandle;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -37,6 +39,9 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.SystemSessionProperties.getMaxUnacknowledgedSplitsPerTask;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.metadata.NodeState.ACTIVE;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -47,15 +52,17 @@ public class UniformNodeSelectorFactory
 {
     private static final Logger LOG = Logger.get(UniformNodeSelectorFactory.class);
 
-    private final Cache<InternalNode, Boolean> inaccessibleNodeLogCache = CacheBuilder.newBuilder()
-            .expireAfterWrite(30, TimeUnit.SECONDS)
-            .build();
+    private final NonEvictableCache<InternalNode, Object> inaccessibleNodeLogCache = buildNonEvictableCache(
+            CacheBuilder.newBuilder()
+                    .expireAfterWrite(30, TimeUnit.SECONDS));
 
     private final InternalNodeManager nodeManager;
     private final int minCandidates;
     private final boolean includeCoordinator;
-    private final int maxSplitsPerNode;
-    private final int maxPendingSplitsPerTask;
+    private final long maxSplitsWeightPerNode;
+    private final long minPendingSplitsWeightPerTask;
+    private final long maxAdjustedPendingSplitsWeightPerTask;
+    private final SplitsBalancingPolicy splitsBalancingPolicy;
     private final boolean optimizedLocalScheduling;
     private final NodeTaskMap nodeTaskMap;
     private final Duration nodeMapMemoizationDuration;
@@ -76,36 +83,38 @@ public class UniformNodeSelectorFactory
             NodeTaskMap nodeTaskMap,
             Duration nodeMapMemoizationDuration)
     {
-        requireNonNull(nodeManager, "nodeManager is null");
-        requireNonNull(config, "config is null");
-        requireNonNull(nodeTaskMap, "nodeTaskMap is null");
-
-        this.nodeManager = nodeManager;
+        this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
         this.minCandidates = config.getMinCandidates();
         this.includeCoordinator = config.isIncludeCoordinator();
-        this.maxSplitsPerNode = config.getMaxSplitsPerNode();
-        this.maxPendingSplitsPerTask = config.getMaxPendingSplitsPerTask();
+        this.splitsBalancingPolicy = config.getSplitsBalancingPolicy();
         this.optimizedLocalScheduling = config.getOptimizedLocalScheduling();
         this.nodeTaskMap = requireNonNull(nodeTaskMap, "nodeTaskMap is null");
-        checkArgument(maxSplitsPerNode >= maxPendingSplitsPerTask, "maxSplitsPerNode must be > maxPendingSplitsPerTask");
+        int maxSplitsPerNode = config.getMaxSplitsPerNode();
+        int minPendingSplitsPerTask = config.getMinPendingSplitsPerTask();
+        int maxAdjustedPendingSplitsWeightPerTask = config.getMaxAdjustedPendingSplitsWeightPerTask();
+        checkArgument(maxSplitsPerNode >= minPendingSplitsPerTask, "maxSplitsPerNode must be > minPendingSplitsPerTask");
+        checkArgument(maxAdjustedPendingSplitsWeightPerTask >= minPendingSplitsPerTask, "maxPendingSplitsPerTask must be >= minPendingSplitsPerTask");
+        this.maxSplitsWeightPerNode = SplitWeight.rawValueForStandardSplitCount(maxSplitsPerNode);
+        this.minPendingSplitsWeightPerTask = SplitWeight.rawValueForStandardSplitCount(minPendingSplitsPerTask);
+        this.maxAdjustedPendingSplitsWeightPerTask = SplitWeight.rawValueForStandardSplitCount(maxAdjustedPendingSplitsWeightPerTask);
         this.nodeMapMemoizationDuration = nodeMapMemoizationDuration;
     }
 
     @Override
-    public NodeSelector createNodeSelector(Optional<CatalogName> catalogName)
+    public NodeSelector createNodeSelector(Session session, Optional<CatalogHandle> catalogHandle)
     {
-        requireNonNull(catalogName, "catalogName is null");
+        requireNonNull(catalogHandle, "catalogHandle is null");
 
         // this supplier is thread-safe. TODO: this logic should probably move to the scheduler since the choice of which node to run in should be
         // done as close to when the split is about to be scheduled
         Supplier<NodeMap> nodeMap;
         if (nodeMapMemoizationDuration.toMillis() > 0) {
             nodeMap = Suppliers.memoizeWithExpiration(
-                    () -> createNodeMap(catalogName),
+                    () -> createNodeMap(catalogHandle),
                     nodeMapMemoizationDuration.toMillis(), MILLISECONDS);
         }
         else {
-            nodeMap = () -> createNodeMap(catalogName);
+            nodeMap = () -> createNodeMap(catalogHandle);
         }
 
         return new UniformNodeSelector(
@@ -114,15 +123,18 @@ public class UniformNodeSelectorFactory
                 includeCoordinator,
                 nodeMap,
                 minCandidates,
-                maxSplitsPerNode,
-                maxPendingSplitsPerTask,
+                maxSplitsWeightPerNode,
+                minPendingSplitsWeightPerTask,
+                maxAdjustedPendingSplitsWeightPerTask,
+                getMaxUnacknowledgedSplitsPerTask(session),
+                splitsBalancingPolicy,
                 optimizedLocalScheduling);
     }
 
-    private NodeMap createNodeMap(Optional<CatalogName> catalogName)
+    private NodeMap createNodeMap(Optional<CatalogHandle> catalogHandle)
     {
-        Set<InternalNode> nodes = catalogName
-                .map(nodeManager::getActiveConnectorNodes)
+        Set<InternalNode> nodes = catalogHandle
+                .map(nodeManager::getActiveCatalogNodes)
                 .orElseGet(() -> nodeManager.getNodes(ACTIVE));
 
         Set<String> coordinatorNodeIds = nodeManager.getCoordinators().stream()
@@ -134,18 +146,24 @@ public class UniformNodeSelectorFactory
         for (InternalNode node : nodes) {
             try {
                 byHostAndPort.put(node.getHostAndPort(), node);
-
-                InetAddress host = InetAddress.getByName(node.getInternalUri().getHost());
-                byHost.put(host, node);
+                byHost.put(node.getInternalAddress(), node);
             }
             catch (UnknownHostException e) {
-                if (inaccessibleNodeLogCache.getIfPresent(node) == null) {
-                    inaccessibleNodeLogCache.put(node, true);
+                if (markInaccessibleNode(node)) {
                     LOG.warn(e, "Unable to resolve host name for node: %s", node);
                 }
             }
         }
 
         return new NodeMap(byHostAndPort.build(), byHost.build(), ImmutableSetMultimap.of(), coordinatorNodeIds);
+    }
+
+    /**
+     * Returns true if node has been marked as inaccessible, or false if it was known to be inaccessible.
+     */
+    private boolean markInaccessibleNode(InternalNode node)
+    {
+        Object marker = new Object();
+        return uncheckedCacheGet(inaccessibleNodeLogCache, node, () -> marker) == marker;
     }
 }

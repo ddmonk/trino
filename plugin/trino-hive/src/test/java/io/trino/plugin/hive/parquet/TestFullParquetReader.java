@@ -13,6 +13,14 @@
  */
 package io.trino.plugin.hive.parquet;
 
+import org.junit.jupiter.api.parallel.Execution;
+
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
+
+// Failing on multiple threads because of org.apache.hadoop.hive.ql.io.parquet.write.ParquetRecordWriterWrapper
+// uses a single record writer across all threads.
+// For example org.apache.parquet.column.values.factory.DefaultValuesWriterFactory#DEFAULT_V1_WRITER_FACTORY is shared mutable state.
+@Execution(SAME_THREAD)
 public class TestFullParquetReader
         extends AbstractTestParquetReader
 {

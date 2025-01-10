@@ -17,10 +17,10 @@ import io.airlift.slice.SizeOf;
 import io.airlift.stats.TDigest;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class TDigestAndPercentileArrayStateFactory
@@ -33,34 +33,22 @@ public class TDigestAndPercentileArrayStateFactory
     }
 
     @Override
-    public Class<? extends TDigestAndPercentileArrayState> getSingleStateClass()
-    {
-        return SingleTDigestAndPercentileArrayState.class;
-    }
-
-    @Override
     public TDigestAndPercentileArrayState createGroupedState()
     {
         return new GroupedTDigestAndPercentileArrayState();
-    }
-
-    @Override
-    public Class<? extends TDigestAndPercentileArrayState> getGroupedStateClass()
-    {
-        return GroupedTDigestAndPercentileArrayState.class;
     }
 
     public static class GroupedTDigestAndPercentileArrayState
             extends AbstractGroupedAccumulatorState
             implements TDigestAndPercentileArrayState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(GroupedTDigestAndPercentileArrayState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(GroupedTDigestAndPercentileArrayState.class);
         private final ObjectBigArray<TDigest> digests = new ObjectBigArray<>();
         private final ObjectBigArray<List<Double>> percentilesArray = new ObjectBigArray<>();
         private long size;
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             digests.ensureCapacity(size);
             percentilesArray.ensureCapacity(size);
@@ -106,7 +94,7 @@ public class TDigestAndPercentileArrayStateFactory
     public static class SingleTDigestAndPercentileArrayState
             implements TDigestAndPercentileArrayState
     {
-        public static final int INSTANCE_SIZE = ClassLayout.parseClass(SingleTDigestAndPercentileArrayState.class).instanceSize();
+        public static final int INSTANCE_SIZE = instanceSize(SingleTDigestAndPercentileArrayState.class);
         private TDigest digest;
         private List<Double> percentiles;
 

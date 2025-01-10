@@ -41,7 +41,8 @@ public final class OperatorValidator
                 validateOperatorSignature(operatorType, returnType, argumentTypes, 1);
                 break;
             case EQUAL:
-            case COMPARISON:
+            case COMPARISON_UNORDERED_LAST:
+            case COMPARISON_UNORDERED_FIRST:
             case LESS_THAN:
             case LESS_THAN_OR_EQUAL:
                 validateComparisonOperatorSignature(operatorType, returnType, argumentTypes, 2);
@@ -69,9 +70,10 @@ public final class OperatorValidator
             case SATURATED_FLOOR_CAST:
                 validateOperatorSignature(operatorType, returnType, argumentTypes, 1);
                 break;
-            case IS_DISTINCT_FROM:
+            case IDENTICAL:
             case XX_HASH_64:
             case INDETERMINATE:
+            case READ_VALUE:
                 // TODO
         }
     }

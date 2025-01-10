@@ -36,15 +36,9 @@ public class ParameterRewriter
 
     public ParameterRewriter(Map<NodeRef<Parameter>, Expression> parameters)
     {
-        requireNonNull(parameters, "parameterMap is null");
+        requireNonNull(parameters, "parameters is null");
         this.parameters = parameters;
         this.analysis = null;
-    }
-
-    public ParameterRewriter(Analysis analysis)
-    {
-        this.analysis = analysis;
-        this.parameters = analysis.getParameters();
     }
 
     @Override
@@ -56,7 +50,7 @@ public class ParameterRewriter
     @Override
     public Expression rewriteParameter(Parameter node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
     {
-        checkState(parameters.size() > node.getPosition(), "Too few parameter values");
+        checkState(parameters.size() > node.getId(), "Too few parameter values");
         return coerceIfNecessary(node, parameters.get(NodeRef.of(node)));
     }
 
@@ -68,11 +62,7 @@ public class ParameterRewriter
 
         Type coercion = analysis.getCoercion(original);
         if (coercion != null) {
-            rewritten = new Cast(
-                    rewritten,
-                    toSqlType(coercion),
-                    false,
-                    analysis.isTypeOnlyCoercion(original));
+            rewritten = new Cast(rewritten, toSqlType(coercion), false);
         }
         return rewritten;
     }

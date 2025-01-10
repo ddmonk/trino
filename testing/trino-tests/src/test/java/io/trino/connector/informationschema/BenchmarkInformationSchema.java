@@ -20,10 +20,10 @@ import io.trino.connector.MockConnectorFactory;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.SchemaTableName;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -36,10 +36,6 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.List;
 import java.util.Map;
@@ -49,6 +45,7 @@ import java.util.function.Function;
 import java.util.stream.IntStream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 
 @SuppressWarnings("MethodMayBeStatic")
@@ -101,22 +98,11 @@ public class BenchmarkInformationSchema
                             .map(i -> "stream_" + i)
                             .collect(toImmutableList());
 
-                    BiFunction<ConnectorSession, String, List<SchemaTableName>> listTables = (session, schemaNameOrNull) -> {
-                        List<String> tables = IntStream.range(0, Integer.parseInt(tablesCount))
-                                .boxed()
-                                .map(i -> "table_" + i)
-                                .collect(toImmutableList());
-                        List<String> schemas;
-                        if (schemaNameOrNull == null) {
-                            schemas = listSchemaNames.apply(session);
-                        }
-                        else {
-                            schemas = ImmutableList.of(schemaNameOrNull);
-                        }
-                        return schemas.stream()
-                                .flatMap(schema -> tables.stream().map(table -> new SchemaTableName(schema, table)))
-                                .collect(toImmutableList());
-                    };
+                    BiFunction<ConnectorSession, String, List<String>> listTables = (session, schemaName) ->
+                            IntStream.range(0, Integer.parseInt(tablesCount))
+                                    .boxed()
+                                    .map(i -> "table_" + i)
+                                    .collect(toImmutableList());
 
                     MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
                             .withListSchemaNames(listSchemaNames)
@@ -145,6 +131,20 @@ public class BenchmarkInformationSchema
         return benchmarkData.queryRunner.execute(benchmarkData.query);
     }
 
+    @Test
+    public void test()
+            throws Exception
+    {
+        BenchmarkData data = new BenchmarkData();
+        data.setup();
+        try {
+            queryInformationSchema(data);
+        }
+        finally {
+            data.tearDown();
+        }
+    }
+
     public static void main(String[] args)
             throws Exception
     {
@@ -158,10 +158,6 @@ public class BenchmarkInformationSchema
             data.tearDown();
         }
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkInformationSchema.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkInformationSchema.class).run();
     }
 }

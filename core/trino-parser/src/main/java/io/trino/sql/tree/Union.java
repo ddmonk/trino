@@ -83,7 +83,7 @@ public class Union
         }
         Union o = (Union) obj;
         return Objects.equals(relations, o.relations) &&
-                Objects.equals(isDistinct(), o.isDistinct());
+               isDistinct() == o.isDistinct();
     }
 
     @Override
@@ -95,6 +95,10 @@ public class Union
     @Override
     public boolean shallowEquals(Node other)
     {
-        return sameClass(this, other);
+        if (!sameClass(this, other)) {
+            return false;
+        }
+
+        return this.isDistinct() == ((Union) other).isDistinct();
     }
 }

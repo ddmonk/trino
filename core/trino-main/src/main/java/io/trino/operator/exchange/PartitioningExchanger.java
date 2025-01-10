@@ -14,57 +14,38 @@
 package io.trino.operator.exchange;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.operator.HashGenerator;
-import io.trino.operator.InterpretedHashGenerator;
-import io.trino.operator.PrecomputedHashGenerator;
-import io.trino.operator.exchange.PageReference.PageReleasedListener;
+import io.trino.annotation.NotThreadSafe;
+import io.trino.operator.PartitionFunction;
 import io.trino.spi.Page;
-import io.trino.spi.type.Type;
-import io.trino.type.BlockTypeOperators;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
-import it.unimi.dsi.fastutil.ints.IntList;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
+@NotThreadSafe
 class PartitioningExchanger
         implements LocalExchanger
 {
-    private final List<Consumer<PageReference>> buffers;
+    private final List<Consumer<Page>> buffers;
     private final LocalExchangeMemoryManager memoryManager;
-    private final LocalPartitionGenerator partitionGenerator;
+    private final Function<Page, Page> partitionedPagePreparer;
+    private final PartitionFunction partitionFunction;
     private final IntArrayList[] partitionAssignments;
-    private final PageReleasedListener onPageReleased;
 
     public PartitioningExchanger(
-            List<Consumer<PageReference>> partitions,
+            List<Consumer<Page>> partitions,
             LocalExchangeMemoryManager memoryManager,
-            List<? extends Type> types,
-            List<Integer> partitionChannels,
-            Optional<Integer> hashChannel,
-            BlockTypeOperators blockTypeOperators)
+            Function<Page, Page> partitionPagePreparer,
+            PartitionFunction partitionFunction)
     {
         this.buffers = ImmutableList.copyOf(requireNonNull(partitions, "partitions is null"));
         this.memoryManager = requireNonNull(memoryManager, "memoryManager is null");
-        this.onPageReleased = PageReleasedListener.forLocalExchangeMemoryManager(memoryManager);
-
-        HashGenerator hashGenerator;
-        if (hashChannel.isPresent()) {
-            hashGenerator = new PrecomputedHashGenerator(hashChannel.get());
-        }
-        else {
-            List<Type> partitionChannelTypes = partitionChannels.stream()
-                    .map(types::get)
-                    .collect(toImmutableList());
-            hashGenerator = new InterpretedHashGenerator(partitionChannelTypes, Ints.toArray(partitionChannels), blockTypeOperators);
-        }
-        partitionGenerator = new LocalPartitionGenerator(hashGenerator, buffers.size());
+        this.partitionedPagePreparer = requireNonNull(partitionPagePreparer, "partitionPagePreparer is null");
+        this.partitionFunction = requireNonNull(partitionFunction, "partitionFunction is null");
 
         partitionAssignments = new IntArrayList[partitions.size()];
         for (int i = 0; i < partitionAssignments.length; i++) {
@@ -73,32 +54,45 @@ class PartitioningExchanger
     }
 
     @Override
-    public synchronized void accept(Page page)
+    public void accept(Page page)
     {
-        // reset the assignment lists
-        for (IntList partitionAssignment : partitionAssignments) {
-            partitionAssignment.clear();
-        }
-
-        // assign each row to a partition
-        for (int position = 0; position < page.getPositionCount(); position++) {
-            int partition = partitionGenerator.getPartition(page, position);
+        Page partitionPage = partitionedPagePreparer.apply(page);
+        // assign each row to a partition. The assignments lists are all expected to cleared by the previous iterations
+        for (int position = 0; position < partitionPage.getPositionCount(); position++) {
+            int partition = partitionFunction.getPartition(partitionPage, position);
             partitionAssignments[partition].add(position);
         }
 
         // build a page for each partition
-        for (int partition = 0; partition < buffers.size(); partition++) {
-            IntArrayList positions = partitionAssignments[partition];
-            if (!positions.isEmpty()) {
-                Page pageSplit = page.copyPositions(positions.elements(), 0, positions.size());
-                memoryManager.updateMemoryUsage(pageSplit.getRetainedSizeInBytes());
-                buffers.get(partition).accept(new PageReference(pageSplit, 1, onPageReleased));
+        for (int partition = 0; partition < partitionAssignments.length; partition++) {
+            IntArrayList positionsList = partitionAssignments[partition];
+            int partitionSize = positionsList.size();
+            if (partitionSize == 0) {
+                continue;
             }
+            // clear the assigned positions list size for the next iteration to start empty. This
+            // only resets the size() to 0 which controls the index where subsequent calls to add()
+            // will store new values, but does not modify the positions array
+            int[] positions = positionsList.elements();
+            positionsList.clear();
+
+            Page pageSplit;
+            if (partitionSize == page.getPositionCount()) {
+                // whole input page will go to this partition, compact the input page avoid over-retaining memory and to
+                // match the behavior of sub-partitioned pages that copy positions out
+                page.compact();
+                pageSplit = page;
+            }
+            else {
+                pageSplit = page.copyPositions(positions, 0, partitionSize);
+            }
+            memoryManager.updateMemoryUsage(pageSplit.getRetainedSizeInBytes());
+            buffers.get(partition).accept(pageSplit);
         }
     }
 
     @Override
-    public ListenableFuture<?> waitForWriting()
+    public ListenableFuture<Void> waitForWriting()
     {
         return memoryManager.getNotFullFuture();
     }

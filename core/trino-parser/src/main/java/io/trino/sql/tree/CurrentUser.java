@@ -16,23 +16,11 @@ package io.trino.sql.tree;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
 
 public class CurrentUser
         extends Expression
 {
-    public CurrentUser()
-    {
-        this(Optional.empty());
-    }
-
     public CurrentUser(NodeLocation location)
-    {
-        this(Optional.of(location));
-    }
-
-    private CurrentUser(Optional<NodeLocation> location)
     {
         super(location);
     }
@@ -52,7 +40,7 @@ public class CurrentUser
     @Override
     public int hashCode()
     {
-        return Objects.hash();
+        return getClass().hashCode();
     }
 
     @Override

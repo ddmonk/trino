@@ -15,7 +15,7 @@ package io.trino.sql.planner.planprinter;
 
 import io.trino.operator.WindowInfo;
 import io.trino.operator.WindowInfo.DriverWindowInfo;
-import io.trino.util.Mergeable;
+import io.trino.spi.Mergeable;
 
 class WindowOperatorStats
         implements Mergeable<WindowOperatorStats>
@@ -72,8 +72,8 @@ class WindowOperatorStats
                 sizeOfIndexesSumSquaredDiffs += driverWindowInfo.getSumSquaredDifferencesSizeOfIndex();
                 totalIndexesCount += numberOfIndexes;
 
-                indexCountPerDriverSumSquaredDiffs += (Math.pow(numberOfIndexes - averageNumberOfIndexes, 2));
-                rowCountPerDriverSumSquaredDiffs += (Math.pow(driverTotalRowsCount - averageNumberOfRows, 2));
+                indexCountPerDriverSumSquaredDiffs += Math.pow(numberOfIndexes - averageNumberOfIndexes, 2);
+                rowCountPerDriverSumSquaredDiffs += Math.pow(driverTotalRowsCount - averageNumberOfRows, 2);
                 activeDrivers++;
             }
         }

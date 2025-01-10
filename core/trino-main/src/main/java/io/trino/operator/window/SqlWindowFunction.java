@@ -13,16 +13,15 @@
  */
 package io.trino.operator.window;
 
-import io.trino.metadata.FunctionArgumentDefinition;
-import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.Signature;
 import io.trino.metadata.SqlFunction;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
+import io.trino.spi.function.WindowFunctionSupplier;
 
-import static com.google.common.base.Strings.nullToEmpty;
-import static io.trino.metadata.FunctionKind.WINDOW;
-import static java.util.Collections.nCopies;
+import java.util.Optional;
+
 import static java.util.Objects.requireNonNull;
 
 public class SqlWindowFunction
@@ -31,19 +30,21 @@ public class SqlWindowFunction
     private final WindowFunctionSupplier supplier;
     private final FunctionMetadata functionMetadata;
 
-    public SqlWindowFunction(WindowFunctionSupplier supplier, boolean deprecated)
+    public SqlWindowFunction(String name, Signature signature, Optional<String> description, boolean deprecated, WindowFunctionSupplier supplier)
     {
         this.supplier = requireNonNull(supplier, "supplier is null");
-        Signature signature = supplier.getSignature();
-        functionMetadata = new FunctionMetadata(
-                signature,
-                true,
-                nCopies(signature.getArgumentTypes().size(), new FunctionArgumentDefinition(true)),
-                false,
-                true,
-                nullToEmpty(supplier.getDescription()),
-                WINDOW,
-                deprecated);
+        FunctionMetadata.Builder functionMetadata = FunctionMetadata.windowBuilder(name)
+                .signature(signature);
+        if (description.isPresent()) {
+            functionMetadata.description(description.get());
+        }
+        else {
+            functionMetadata.noDescription();
+        }
+        if (deprecated) {
+            functionMetadata.deprecated();
+        }
+        this.functionMetadata = functionMetadata.build();
     }
 
     @Override
@@ -52,12 +53,12 @@ public class SqlWindowFunction
         return functionMetadata;
     }
 
-    public WindowFunctionSupplier specialize(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public WindowFunctionSupplier specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        return specialize(functionBinding);
+        return specialize(boundSignature);
     }
 
-    public WindowFunctionSupplier specialize(FunctionBinding functionBinding)
+    public WindowFunctionSupplier specialize(BoundSignature boundSignature)
     {
         return supplier;
     }

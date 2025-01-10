@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -30,19 +29,9 @@ public class Execute
 
     public Execute(NodeLocation location, Identifier name, List<Expression> parameters)
     {
-        this(Optional.of(location), name, parameters);
-    }
-
-    public Execute(Identifier name, List<Expression> parameters)
-    {
-        this(Optional.empty(), name, parameters);
-    }
-
-    private Execute(Optional<NodeLocation> location, Identifier name, List<Expression> parameters)
-    {
         super(location);
         this.name = requireNonNull(name, "name is null");
-        this.parameters = requireNonNull(ImmutableList.copyOf(parameters), "parameters is null");
+        this.parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
     }
 
     public Identifier getName()

@@ -14,15 +14,13 @@
 package io.trino.execution.warnings;
 
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.spi.TrinoWarning;
-import io.trino.spi.WarningCode;
 
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
-
-import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -31,26 +29,26 @@ public class DefaultWarningCollector
         implements WarningCollector
 {
     @GuardedBy("this")
-    private final Map<WarningCode, TrinoWarning> warnings = new LinkedHashMap<>();
-    private final WarningCollectorConfig config;
+    private final Set<TrinoWarning> warnings = new LinkedHashSet<>();
+    private final int maxWarnings;
 
     public DefaultWarningCollector(WarningCollectorConfig config)
     {
-        this.config = requireNonNull(config, "config is null");
+        this.maxWarnings = requireNonNull(config, "config is null").getMaxWarnings();
     }
 
     @Override
     public synchronized void add(TrinoWarning warning)
     {
         requireNonNull(warning, "warning is null");
-        if (warnings.size() < config.getMaxWarnings()) {
-            warnings.putIfAbsent(warning.getWarningCode(), warning);
+        if (warnings.size() < maxWarnings) {
+            warnings.add(warning);
         }
     }
 
     @Override
     public synchronized List<TrinoWarning> getWarnings()
     {
-        return ImmutableList.copyOf(warnings.values());
+        return ImmutableList.copyOf(warnings);
     }
 }

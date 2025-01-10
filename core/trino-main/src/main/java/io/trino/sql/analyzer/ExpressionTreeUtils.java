@@ -14,7 +14,9 @@
 package io.trino.sql.analyzer;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import io.trino.Session;
+import io.trino.metadata.FunctionResolver;
+import io.trino.security.AccessControl;
 import io.trino.spi.Location;
 import io.trino.sql.tree.DefaultExpressionTraversalVisitor;
 import io.trino.sql.tree.DereferenceExpression;
@@ -23,6 +25,7 @@ import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.QualifiedName;
+import io.trino.sql.tree.WindowOperation;
 
 import java.util.List;
 import java.util.Optional;
@@ -37,14 +40,40 @@ public final class ExpressionTreeUtils
 {
     private ExpressionTreeUtils() {}
 
-    static List<FunctionCall> extractAggregateFunctions(Iterable<? extends Node> nodes, Metadata metadata)
+    static List<FunctionCall> extractAggregateFunctions(Iterable<? extends Node> nodes, Session session, FunctionResolver functionResolver, AccessControl accessControl)
     {
-        return extractExpressions(nodes, FunctionCall.class, function -> isAggregation(function, metadata));
+        return extractExpressions(nodes, FunctionCall.class, function -> isAggregation(function, session, functionResolver, accessControl));
+    }
+
+    static List<Expression> extractWindowExpressions(Iterable<? extends Node> nodes)
+    {
+        return ImmutableList.<Expression>builder()
+                .addAll(extractWindowFunctions(nodes))
+                .addAll(extractWindowMeasures(nodes))
+                .build();
+    }
+
+    static List<Expression> extractWindowExpressions(Iterable<? extends Node> nodes, Session session, FunctionResolver functionResolver, AccessControl accessControl)
+    {
+        return ImmutableList.<Expression>builder()
+                .addAll(extractWindowFunctions(nodes, session, functionResolver, accessControl))
+                .addAll(extractWindowMeasures(nodes))
+                .build();
     }
 
     static List<FunctionCall> extractWindowFunctions(Iterable<? extends Node> nodes)
     {
         return extractExpressions(nodes, FunctionCall.class, ExpressionTreeUtils::isWindowFunction);
+    }
+
+    static List<FunctionCall> extractWindowFunctions(Iterable<? extends Node> nodes, Session session, FunctionResolver functionResolver, AccessControl accessControl)
+    {
+        return extractExpressions(nodes, FunctionCall.class, function -> isWindow(function, session, functionResolver, accessControl));
+    }
+
+    static List<WindowOperation> extractWindowMeasures(Iterable<? extends Node> nodes)
+    {
+        return extractExpressions(nodes, WindowOperation.class);
     }
 
     public static <T extends Expression> List<T> extractExpressions(
@@ -54,11 +83,18 @@ public final class ExpressionTreeUtils
         return extractExpressions(nodes, clazz, alwaysTrue());
     }
 
-    private static boolean isAggregation(FunctionCall functionCall, Metadata metadata)
+    private static boolean isAggregation(FunctionCall functionCall, Session session, FunctionResolver functionResolver, AccessControl accessControl)
     {
-        return ((metadata.isAggregationFunction(functionCall.getName()) || functionCall.getFilter().isPresent())
-                && functionCall.getWindow().isEmpty())
-                || functionCall.getOrderBy().isPresent();
+        return (functionResolver.isAggregationFunction(session, functionCall.getName(), accessControl)
+                || functionCall.getFilter().isPresent()
+                || functionCall.getOrderBy().isPresent())
+                && functionCall.getWindow().isEmpty();
+    }
+
+    private static boolean isWindow(FunctionCall functionCall, Session session, FunctionResolver functionResolver, AccessControl accessControl)
+    {
+        return functionCall.getWindow().isPresent()
+                || functionResolver.isWindowFunction(session, functionCall.getName(), accessControl);
     }
 
     private static boolean isWindowFunction(FunctionCall functionCall)

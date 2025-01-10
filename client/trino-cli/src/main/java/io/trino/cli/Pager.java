@@ -14,22 +14,20 @@
 package io.trino.cli;
 
 import com.google.common.collect.ImmutableList;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static com.google.common.base.Preconditions.checkState;
-import static io.airlift.concurrent.MoreFutures.unmodifiableFuture;
 
 public class Pager
         extends FilterOutputStream
 {
-    public static final String ENV_PAGER = "TRINO_PAGER";
     public static final List<String> LESS = ImmutableList.of("less", "-FXRSn");
 
     private final Process process;
@@ -119,7 +117,7 @@ public class Pager
                 result.complete(null);
             }
         }).start();
-        return unmodifiableFuture(result);
+        return result;
     }
 
     private static IOException propagateIOException(IOException e)
@@ -132,17 +130,10 @@ public class Pager
         throw e;
     }
 
-    public static Pager create()
+    public static Pager create(Optional<String> pagerName)
     {
-        String pager = System.getenv(ENV_PAGER);
-        if (pager == null) {
-            return create(LESS);
-        }
-        pager = pager.trim();
-        if (pager.isEmpty()) {
-            return createNullPager();
-        }
-        return create(ImmutableList.of("/bin/sh", "-c", pager));
+        return pagerName.map(name -> create(ImmutableList.of("/bin/sh", "-c", name)))
+                .orElseGet(() -> create(LESS));
     }
 
     public static Pager create(List<String> command)

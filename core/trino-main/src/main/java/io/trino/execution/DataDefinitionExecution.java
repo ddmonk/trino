@@ -16,26 +16,23 @@ package io.trino.execution;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.execution.QueryPreparer.PreparedQuery;
 import io.trino.execution.StateMachine.StateChangeListener;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.memory.VersionedMemoryPoolId;
-import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
 import io.trino.server.BasicQueryInfo;
+import io.trino.server.ResultQueryInfo;
 import io.trino.server.protocol.Slug;
 import io.trino.spi.QueryId;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Statement;
-import io.trino.transaction.TransactionManager;
+import jakarta.annotation.Nullable;
 import org.joda.time.DateTime;
-
-import javax.annotation.Nullable;
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -54,48 +51,30 @@ public class DataDefinitionExecution<T extends Statement>
     private final DataDefinitionTask<T> task;
     private final T statement;
     private final Slug slug;
-    private final TransactionManager transactionManager;
-    private final Metadata metadata;
-    private final AccessControl accessControl;
     private final QueryStateMachine stateMachine;
     private final List<Expression> parameters;
+    private final WarningCollector warningCollector;
 
     private DataDefinitionExecution(
             DataDefinitionTask<T> task,
             T statement,
             Slug slug,
-            TransactionManager transactionManager,
-            Metadata metadata,
-            AccessControl accessControl,
             QueryStateMachine stateMachine,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         this.task = requireNonNull(task, "task is null");
         this.statement = requireNonNull(statement, "statement is null");
         this.slug = requireNonNull(slug, "slug is null");
-        this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.accessControl = requireNonNull(accessControl, "accessControl is null");
         this.stateMachine = requireNonNull(stateMachine, "stateMachine is null");
         this.parameters = parameters;
+        this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
     }
 
     @Override
     public Slug getSlug()
     {
         return slug;
-    }
-
-    @Override
-    public VersionedMemoryPoolId getMemoryPool()
-    {
-        return stateMachine.getMemoryPool();
-    }
-
-    @Override
-    public void setMemoryPool(VersionedMemoryPoolId poolId)
-    {
-        stateMachine.setMemoryPool(poolId);
     }
 
     @Override
@@ -164,11 +143,11 @@ public class DataDefinitionExecution<T extends Statement>
                 return;
             }
 
-            ListenableFuture<?> future = task.execute(statement, transactionManager, metadata, accessControl, stateMachine, parameters);
-            Futures.addCallback(future, new FutureCallback<Object>()
+            ListenableFuture<Void> future = task.execute(statement, stateMachine, parameters, warningCollector);
+            Futures.addCallback(future, new FutureCallback<>()
             {
                 @Override
-                public void onSuccess(@Nullable Object result)
+                public void onSuccess(@Nullable Void result)
                 {
                     stateMachine.transitionToFinishing();
                 }
@@ -187,9 +166,21 @@ public class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
-    public void addOutputInfoListener(Consumer<QueryOutputInfo> listener)
+    public void setOutputInfoListener(Consumer<QueryOutputInfo> listener)
     {
         // DDL does not have an output
+    }
+
+    @Override
+    public void outputTaskFailed(TaskId taskId, Throwable failure)
+    {
+        // DDL does not have an output
+    }
+
+    @Override
+    public void resultsConsumed()
+    {
+        stateMachine.resultsConsumed();
     }
 
     @Override
@@ -235,6 +226,12 @@ public class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
+    public void failTask(TaskId taskId, Exception reason)
+    {
+        // no-op
+    }
+
+    @Override
     public void recordHeartbeat()
     {
         stateMachine.recordHeartbeat();
@@ -253,6 +250,12 @@ public class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
+    public boolean isInfoPruned()
+    {
+        return false;
+    }
+
+    @Override
     public QueryId getQueryId()
     {
         return stateMachine.getQueryId();
@@ -265,15 +268,27 @@ public class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
-    public Plan getQueryPlan()
+    public ResultQueryInfo getResultQueryInfo()
     {
-        throw new UnsupportedOperationException();
+        return stateMachine.getFinalQueryInfo().map(ResultQueryInfo::new).orElseGet(() -> stateMachine.updateResultQueryInfo(Optional.empty(), Optional::empty));
+    }
+
+    @Override
+    public Optional<Plan> getQueryPlan()
+    {
+        return Optional.empty();
     }
 
     @Override
     public QueryState getState()
     {
         return stateMachine.getQueryState();
+    }
+
+    @Override
+    public Optional<Duration> getPlanningTime()
+    {
+        return stateMachine.getPlanningTime();
     }
 
     public List<Expression> getParameters()
@@ -284,21 +299,11 @@ public class DataDefinitionExecution<T extends Statement>
     public static class DataDefinitionExecutionFactory
             implements QueryExecutionFactory<DataDefinitionExecution<?>>
     {
-        private final TransactionManager transactionManager;
-        private final Metadata metadata;
-        private final AccessControl accessControl;
         private final Map<Class<? extends Statement>, DataDefinitionTask<?>> tasks;
 
         @Inject
-        public DataDefinitionExecutionFactory(
-                TransactionManager transactionManager,
-                Metadata metadata,
-                AccessControl accessControl,
-                Map<Class<? extends Statement>, DataDefinitionTask<?>> tasks)
+        public DataDefinitionExecutionFactory(Map<Class<? extends Statement>, DataDefinitionTask<?>> tasks)
         {
-            this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
-            this.metadata = requireNonNull(metadata, "metadata is null");
-            this.accessControl = requireNonNull(accessControl, "accessControl is null");
             this.tasks = requireNonNull(tasks, "tasks is null");
         }
 
@@ -307,23 +312,25 @@ public class DataDefinitionExecution<T extends Statement>
                 PreparedQuery preparedQuery,
                 QueryStateMachine stateMachine,
                 Slug slug,
-                WarningCollector warningCollector)
+                WarningCollector warningCollector,
+                PlanOptimizersStatsCollector planOptimizersStatsCollector)
         {
-            return createDataDefinitionExecution(preparedQuery.getStatement(), preparedQuery.getParameters(), stateMachine, slug);
+            return createDataDefinitionExecution(preparedQuery.getStatement(), preparedQuery.getParameters(), stateMachine, slug, warningCollector);
         }
 
         private <T extends Statement> DataDefinitionExecution<T> createDataDefinitionExecution(
                 T statement,
                 List<Expression> parameters,
                 QueryStateMachine stateMachine,
-                Slug slug)
+                Slug slug,
+                WarningCollector warningCollector)
         {
             @SuppressWarnings("unchecked")
             DataDefinitionTask<T> task = (DataDefinitionTask<T>) tasks.get(statement.getClass());
             checkArgument(task != null, "no task for statement: %s", statement.getClass().getSimpleName());
 
             stateMachine.setUpdateType(task.getName());
-            return new DataDefinitionExecution<>(task, statement, slug, transactionManager, metadata, accessControl, stateMachine, parameters);
+            return new DataDefinitionExecution<>(task, statement, slug, stateMachine, parameters, warningCollector);
         }
     }
 }

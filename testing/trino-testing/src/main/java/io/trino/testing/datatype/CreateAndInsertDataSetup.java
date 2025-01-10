@@ -14,11 +14,15 @@
 package io.trino.testing.datatype;
 
 import io.trino.testing.sql.SqlExecutor;
+import io.trino.testing.sql.TemporaryRelation;
 import io.trino.testing.sql.TestTable;
+import io.trino.testing.sql.TrinoSqlExecutor;
 
 import java.util.List;
 import java.util.stream.IntStream;
 
+import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.testing.Closeables.closeAllSuppress;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 
@@ -35,28 +39,17 @@ public class CreateAndInsertDataSetup
     }
 
     @Override
-    public TestTable setupTestTable(List<ColumnSetup> inputs)
+    public TemporaryRelation setupTemporaryRelation(List<ColumnSetup> inputs)
     {
         TestTable testTable = createTestTable(inputs);
         try {
             insertRows(testTable, inputs);
         }
         catch (Exception e) {
-            closeQuietly(testTable);
+            closeAllSuppress(e, testTable);
             throw e;
         }
         return testTable;
-    }
-
-    // TODO replace with closeAllSuppress when https://github.com/airlift/airlift/pull/889 is available
-    private static void closeQuietly(AutoCloseable autoCloseable)
-    {
-        //noinspection EmptyTryBlock
-        try (AutoCloseable ignore = autoCloseable) {
-            // suppress empty try-catch warning
-        }
-        catch (Exception ignored) {
-        }
     }
 
     private void insertRows(TestTable testTable, List<ColumnSetup> inputs)
@@ -72,7 +65,7 @@ public class CreateAndInsertDataSetup
         return new TestTable(sqlExecutor, tableNamePrefix, tableDefinition(inputs));
     }
 
-    private String tableDefinition(List<ColumnSetup> inputs)
+    protected String tableDefinition(List<ColumnSetup> inputs)
     {
         if (inputs.stream().allMatch(input -> input.getDeclaredType().isPresent())) {
             // When all types are explicitly specified, use ordinary CREATE TABLE
@@ -80,6 +73,11 @@ public class CreateAndInsertDataSetup
                     .mapToObj(column -> format("col_%d %s", column, inputs.get(column).getDeclaredType().orElseThrow()))
                     .collect(joining(",\n", "(\n", ")"));
         }
+
+        // This should use smarter check of underlying system as soon as tests need to use e.g. `getQueryRunner()::execute` as a SqlExecutor.
+        checkState(
+                sqlExecutor instanceof TrinoSqlExecutor,
+                "Explicit declared input types are required when creating a table from any non-Trino system to prevent confusion between different systems' type literals.");
 
         return IntStream.range(0, inputs.size())
                 .mapToObj(column -> {

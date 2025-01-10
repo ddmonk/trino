@@ -13,12 +13,10 @@
  */
 package io.trino.plugin.hive.orc;
 
+import io.trino.filesystem.TrinoInputFile;
 import io.trino.orc.OrcReaderOptions;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
-import io.trino.plugin.hive.HdfsEnvironment;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.spi.connector.ConnectorPageSource;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
 
 import java.util.Optional;
 
@@ -28,34 +26,21 @@ import static java.util.Objects.requireNonNull;
 public class OrcDeleteDeltaPageSourceFactory
 {
     private final OrcReaderOptions options;
-    private final String sessionUser;
-    private final Configuration configuration;
-    private final HdfsEnvironment hdfsEnvironment;
     private final FileFormatDataSourceStats stats;
 
     public OrcDeleteDeltaPageSourceFactory(
             OrcReaderOptions options,
-            String sessionUser,
-            Configuration configuration,
-            HdfsEnvironment hdfsEnvironment,
             FileFormatDataSourceStats stats)
     {
         this.options = requireNonNull(options, "options is null");
-        this.sessionUser = requireNonNull(sessionUser, "sessionUser is null");
-        this.configuration = requireNonNull(configuration, "configuration is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.stats = requireNonNull(stats, "stats is null");
     }
 
-    public Optional<ConnectorPageSource> createPageSource(Path path, long fileSize)
+    public Optional<ConnectorPageSource> createPageSource(TrinoInputFile inputFile)
     {
         return createOrcDeleteDeltaPageSource(
-                path,
-                fileSize,
+                inputFile,
                 options,
-                sessionUser,
-                configuration,
-                hdfsEnvironment,
                 stats);
     }
 }

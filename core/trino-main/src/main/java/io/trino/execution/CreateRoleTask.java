@@ -14,30 +14,41 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.security.AccessControl;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.sql.tree.CreateRole;
 import io.trino.sql.tree.Expression;
-import io.trino.transaction.TransactionManager;
+import io.trino.sql.tree.Identifier;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.metadata.MetadataUtil.checkRoleExists;
 import static io.trino.metadata.MetadataUtil.createPrincipal;
-import static io.trino.metadata.MetadataUtil.getSessionCatalog;
+import static io.trino.metadata.MetadataUtil.processRoleCommandCatalog;
 import static io.trino.spi.StandardErrorCode.ROLE_ALREADY_EXISTS;
-import static io.trino.spi.StandardErrorCode.ROLE_NOT_FOUND;
-import static io.trino.spi.security.PrincipalType.ROLE;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
 import static java.util.Locale.ENGLISH;
+import static java.util.Objects.requireNonNull;
 
 public class CreateRoleTask
         implements DataDefinitionTask<CreateRole>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public CreateRoleTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -45,21 +56,22 @@ public class CreateRoleTask
     }
 
     @Override
-    public ListenableFuture<?> execute(CreateRole statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            CreateRole statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
-        String catalog = getSessionCatalog(metadata, session, statement);
+        Optional<String> catalog = processRoleCommandCatalog(metadata, session, statement, statement.getCatalog().map(Identifier::getValue));
         String role = statement.getName().getValue().toLowerCase(ENGLISH);
         Optional<TrinoPrincipal> grantor = statement.getGrantor().map(specification -> createPrincipal(session, specification));
         accessControl.checkCanCreateRole(session.toSecurityContext(), role, grantor, catalog);
-        Set<String> existingRoles = metadata.listRoles(session, catalog);
-        if (existingRoles.contains(role)) {
+        if (metadata.roleExists(session, role, catalog)) {
             throw semanticException(ROLE_ALREADY_EXISTS, statement, "Role '%s' already exists", role);
         }
-        if (grantor.isPresent() && grantor.get().getType() == ROLE && !existingRoles.contains(grantor.get().getName())) {
-            throw semanticException(ROLE_NOT_FOUND, statement, "Role '%s' does not exist", grantor.get().getName());
-        }
+        grantor.ifPresent(trinoPrincipal -> checkRoleExists(session, statement, metadata, trinoPrincipal, catalog));
         metadata.createRole(session, role, grantor, catalog);
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

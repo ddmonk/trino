@@ -13,83 +13,36 @@
  */
 package io.trino.plugin.tpch;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 
-import java.util.Objects;
-
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-public class TpchTableHandle
+public record TpchTableHandle(
+        String schemaName,
+        String tableName,
+        double scaleFactor,
+        TupleDomain<ColumnHandle> constraint)
         implements ConnectorTableHandle
 {
-    private final String tableName;
-    private final double scaleFactor;
-    private final TupleDomain<ColumnHandle> constraint;
-
-    public TpchTableHandle(String tableName, double scaleFactor)
+    public TpchTableHandle(String schemaName, String tableName, double scaleFactor)
     {
-        this(tableName, scaleFactor, TupleDomain.all());
+        this(schemaName, tableName, scaleFactor, TupleDomain.all());
     }
 
-    @JsonCreator
-    public TpchTableHandle(
-            @JsonProperty("tableName") String tableName,
-            @JsonProperty("scaleFactor") double scaleFactor,
-            @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint)
+    public TpchTableHandle
     {
-        this.tableName = requireNonNull(tableName, "tableName is null");
+        requireNonNull(schemaName, "schemaName is null");
+        requireNonNull(tableName, "tableName is null");
         checkArgument(scaleFactor > 0, "Scale factor must be larger than 0");
-        this.scaleFactor = scaleFactor;
-        this.constraint = requireNonNull(constraint, "constraint is null");
-    }
-
-    @JsonProperty
-    public String getTableName()
-    {
-        return tableName;
-    }
-
-    @JsonProperty
-    public double getScaleFactor()
-    {
-        return scaleFactor;
-    }
-
-    @JsonProperty
-    public TupleDomain<ColumnHandle> getConstraint()
-    {
-        return constraint;
+        requireNonNull(constraint, "constraint is null");
     }
 
     @Override
     public String toString()
     {
-        return tableName + ":sf" + scaleFactor;
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(tableName, scaleFactor, constraint);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
-        }
-        TpchTableHandle other = (TpchTableHandle) obj;
-        return Objects.equals(this.tableName, other.tableName) &&
-                Objects.equals(this.scaleFactor, other.scaleFactor) &&
-                Objects.equals(this.constraint, other.constraint);
+        return schemaName + ":" + tableName;
     }
 }

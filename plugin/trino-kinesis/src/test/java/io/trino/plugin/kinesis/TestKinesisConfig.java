@@ -16,7 +16,7 @@ package io.trino.plugin.kinesis;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.testing.ConfigAssertions;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +33,7 @@ public class TestKinesisConfig
                 .setAccessKey(null)
                 .setSecretKey(null)
                 .setAwsRegion("us-east-1")
+                .setTableDescriptionRefreshInterval(new Duration(10, TimeUnit.MINUTES))
                 .setSleepTime(new Duration(1000, TimeUnit.MILLISECONDS))
                 .setFetchAttempts(2)
                 .setMaxBatches(600)
@@ -43,7 +44,6 @@ public class TestKinesisConfig
                 .setCheckpointEnabled(false)
                 .setDynamoReadCapacity(50)
                 .setDynamoWriteCapacity(10)
-                .setCheckpointInterval(new Duration(60000, TimeUnit.MILLISECONDS))
                 .setLogicalProcessName("process1")
                 .setIteratorNumber(0));
     }
@@ -51,7 +51,7 @@ public class TestKinesisConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("kinesis.table-description-location", "/var/lib/kinesis")
                 .put("kinesis.default-schema", "kinesis")
                 .put("kinesis.hide-internal-columns", "false")
@@ -60,6 +60,7 @@ public class TestKinesisConfig
                 .put("kinesis.fetch-attempts", "3")
                 .put("kinesis.max-batches", "500")
                 .put("kinesis.aws-region", "us-west-1")
+                .put("kinesis.table-description-refresh-interval", "200ms")
                 .put("kinesis.sleep-time", "100ms")
                 .put("kinesis.batch-size", "9000")
                 .put("kinesis.log-batches", "false")
@@ -68,10 +69,9 @@ public class TestKinesisConfig
                 .put("kinesis.checkpoint-enabled", "true")
                 .put("kinesis.dynamo-read-capacity", "100")
                 .put("kinesis.dynamo-write-capacity", "20")
-                .put("kinesis.checkpoint-interval", "50000ms")
                 .put("kinesis.checkpoint-logical-name", "process")
                 .put("kinesis.iterator-number", "1")
-                .build();
+                .buildOrThrow();
 
         KinesisConfig expected = new KinesisConfig()
                 .setTableDescriptionLocation("/var/lib/kinesis")
@@ -80,6 +80,7 @@ public class TestKinesisConfig
                 .setAccessKey("kinesis.accessKey")
                 .setSecretKey("kinesis.secretKey")
                 .setAwsRegion("us-west-1")
+                .setTableDescriptionRefreshInterval(new Duration(200, TimeUnit.MILLISECONDS))
                 .setFetchAttempts(3)
                 .setMaxBatches(500)
                 .setSleepTime(new Duration(100, TimeUnit.MILLISECONDS))
@@ -90,7 +91,6 @@ public class TestKinesisConfig
                 .setCheckpointEnabled(true)
                 .setDynamoReadCapacity(100)
                 .setDynamoWriteCapacity(20)
-                .setCheckpointInterval(new Duration(50000, TimeUnit.MILLISECONDS))
                 .setLogicalProcessName("process")
                 .setIteratorNumber(1);
 

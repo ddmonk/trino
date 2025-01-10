@@ -16,8 +16,8 @@ package io.trino.operator.aggregation.state;
 import io.airlift.stats.QuantileDigest;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
-import org.openjdk.jol.info.ClassLayout;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class QuantileDigestStateFactory
@@ -30,33 +30,21 @@ public class QuantileDigestStateFactory
     }
 
     @Override
-    public Class<? extends QuantileDigestState> getSingleStateClass()
-    {
-        return SingleQuantileDigestState.class;
-    }
-
-    @Override
     public QuantileDigestState createGroupedState()
     {
         return new GroupedQuantileDigestState();
-    }
-
-    @Override
-    public Class<? extends QuantileDigestState> getGroupedStateClass()
-    {
-        return GroupedQuantileDigestState.class;
     }
 
     public static class GroupedQuantileDigestState
             extends AbstractGroupedAccumulatorState
             implements QuantileDigestState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(GroupedQuantileDigestState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(GroupedQuantileDigestState.class);
         private final ObjectBigArray<QuantileDigest> qdigests = new ObjectBigArray<>();
         private long size;
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             qdigests.ensureCapacity(size);
         }
@@ -90,7 +78,7 @@ public class QuantileDigestStateFactory
     public static class SingleQuantileDigestState
             implements QuantileDigestState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(SingleQuantileDigestState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(SingleQuantileDigestState.class);
         private QuantileDigest qdigest;
 
         @Override

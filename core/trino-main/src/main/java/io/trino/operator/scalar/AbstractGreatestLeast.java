@@ -24,13 +24,12 @@ import io.airlift.bytecode.Variable;
 import io.airlift.bytecode.control.IfStatement;
 import io.airlift.bytecode.expression.BytecodeExpression;
 import io.airlift.bytecode.instruction.LabelNode;
-import io.trino.metadata.FunctionArgumentDefinition;
-import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.FunctionDependencyDeclaration;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.Signature;
 import io.trino.metadata.SqlScalarFunction;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionDependencyDeclaration;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.sql.gen.CallSiteBinder;
@@ -53,20 +52,18 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantNull;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeDynamic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.isNull;
 import static io.airlift.bytecode.expression.BytecodeExpressions.or;
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.orderableTypeParameter;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BOXED_NULLABLE;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
-import static io.trino.spi.function.OperatorType.COMPARISON;
 import static io.trino.sql.gen.Bootstrap.BOOTSTRAP_METHOD;
 import static io.trino.util.CompilerUtils.defineClass;
 import static io.trino.util.CompilerUtils.makeClassName;
 import static io.trino.util.Failures.checkCondition;
 import static io.trino.util.MinMaxCompare.getMinMaxCompare;
+import static io.trino.util.MinMaxCompare.getMinMaxCompareFunctionDependencies;
 import static io.trino.util.Reflection.methodHandle;
 import static java.lang.invoke.MethodType.methodType;
 import static java.util.Collections.nCopies;
@@ -79,64 +76,57 @@ public abstract class AbstractGreatestLeast
 
     protected AbstractGreatestLeast(boolean min, String description)
     {
-        super(new FunctionMetadata(
-                new Signature(
-                        min ? "least" : "greatest",
-                        ImmutableList.of(orderableTypeParameter("E")),
-                        ImmutableList.of(),
-                        new TypeSignature("E"),
-                        ImmutableList.of(new TypeSignature("E")),
-                        true),
-                true,
-                ImmutableList.of(new FunctionArgumentDefinition(true)),
-                false,
-                true,
-                description,
-                SCALAR));
+        super(FunctionMetadata.scalarBuilder(min ? "least" : "greatest")
+                .signature(Signature.builder()
+                        .orderableTypeParameter("E")
+                        .returnType(new TypeSignature("E"))
+                        .argumentType(new TypeSignature("E"))
+                        .variableArity()
+                        .build())
+                .nullable()
+                .argumentNullability(true)
+                .description(description)
+                .build());
         this.min = min;
     }
 
     @Override
     public FunctionDependencyDeclaration getFunctionDependencies()
     {
-        return FunctionDependencyDeclaration.builder()
-                .addOperatorSignature(COMPARISON, ImmutableList.of(new TypeSignature("E"), new TypeSignature("E")))
-                .build();
+        return getMinMaxCompareFunctionDependencies(new TypeSignature("E"), min);
     }
 
     @Override
-    public ScalarFunctionImplementation specialize(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        Type type = functionBinding.getTypeVariable("E");
+        Type type = boundSignature.getReturnType();
         checkArgument(type.isOrderable(), "Type must be orderable");
 
         MethodHandle compareMethod = getMinMaxCompare(functionDependencies, type, simpleConvention(FAIL_ON_NULL, NEVER_NULL, NEVER_NULL), min);
 
-        List<Class<?>> javaTypes = IntStream.range(0, functionBinding.getArity())
+        List<Class<?>> javaTypes = IntStream.range(0, boundSignature.getArity())
                 .mapToObj(i -> wrap(type.getJavaType()))
                 .collect(toImmutableList());
 
-        Class<?> clazz = generate(javaTypes, compareMethod);
-        MethodHandle methodHandle = methodHandle(clazz, getFunctionMetadata().getSignature().getName(), javaTypes.toArray(new Class<?>[0]));
+        MethodHandle methodHandle = generate(boundSignature.getName().getFunctionName(), javaTypes, compareMethod);
 
-        return new ChoicesScalarFunctionImplementation(
-                functionBinding,
+        return new ChoicesSpecializedSqlScalarFunction(
+                boundSignature,
                 NULLABLE_RETURN,
                 nCopies(javaTypes.size(), BOXED_NULLABLE),
                 methodHandle);
     }
 
-    private Class<?> generate(List<Class<?>> javaTypes, MethodHandle compareMethod)
+    private MethodHandle generate(String functionName, List<Class<?>> javaTypes, MethodHandle compareMethod)
     {
-        Signature signature = getFunctionMetadata().getSignature();
-        checkCondition(javaTypes.size() <= 127, NOT_SUPPORTED, "Too many arguments for function call %s()", signature.getName());
+        checkCondition(javaTypes.size() <= 127, NOT_SUPPORTED, "Too many arguments for function call %s()", functionName);
         String javaTypeName = javaTypes.stream()
                 .map(Class::getSimpleName)
                 .collect(joining());
 
         ClassDefinition definition = new ClassDefinition(
                 a(PUBLIC, FINAL),
-                makeClassName(javaTypeName + "$" + signature.getName()),
+                makeClassName(javaTypeName + "$" + functionName),
                 type(Object.class));
 
         definition.declareDefaultConstructor(a(PRIVATE));
@@ -147,7 +137,7 @@ public abstract class AbstractGreatestLeast
 
         MethodDefinition method = definition.declareMethod(
                 a(PUBLIC, STATIC),
-                signature.getName(),
+                functionName,
                 type(wrap(javaTypes.get(0))),
                 parameters);
 
@@ -187,6 +177,7 @@ public abstract class AbstractGreatestLeast
 
         body.append(value.ret());
 
-        return defineClass(definition, Object.class, binder.getBindings(), new DynamicClassLoader(getClass().getClassLoader()));
+        Class<?> clazz = defineClass(definition, Object.class, binder.getBindings(), new DynamicClassLoader(getClass().getClassLoader()));
+        return methodHandle(clazz, method.getName(), javaTypes.toArray(new Class<?>[0]));
     }
 }

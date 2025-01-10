@@ -15,17 +15,22 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.ValuesNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expressions;
+import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.aggregation;
 
 public class TestRemoveRedundantLimit
         extends BaseRuleTest
@@ -38,7 +43,7 @@ public class TestRemoveRedundantLimit
                         p.limit(
                                 10,
                                 p.aggregation(builder -> builder
-                                        .addAggregation(p.symbol("c"), expression("count(foo)"), ImmutableList.of(BIGINT))
+                                        .addAggregation(p.symbol("c"), aggregation("count", ImmutableList.of(new Reference(BIGINT, "foo"))), ImmutableList.of(BIGINT))
                                         .globalGrouping()
                                         .source(p.values(p.symbol("foo"))))))
                 .matches(
@@ -68,14 +73,49 @@ public class TestRemoveRedundantLimit
                         p.limit(
                                 0,
                                 p.filter(
-                                        expression("b > 5"),
+                                        new Comparison(GREATER_THAN, new Reference(INTEGER, "b"), new Constant(INTEGER, 5L)),
                                         p.values(
                                                 ImmutableList.of(p.symbol("a"), p.symbol("b")),
                                                 ImmutableList.of(
-                                                        expressions("1", "10"),
-                                                        expressions("2", "11"))))))
+                                                        ImmutableList.of(new Constant(INTEGER, 1L), new Constant(INTEGER, 10L)),
+                                                        ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 11L)))))))
                 // TODO: verify contents
                 .matches(values(ImmutableMap.of()));
+    }
+
+    @Test
+    public void testLimitWithPreSortedInputs()
+    {
+        tester().assertThat(new RemoveRedundantLimit())
+                .on(p -> p.limit(
+                        10,
+                        ImmutableList.of(),
+                        true,
+                        ImmutableList.of(p.symbol("c")),
+                        p.aggregation(builder -> builder
+                                .addAggregation(p.symbol("c"), aggregation("count", ImmutableList.of(new Reference(BIGINT, "foo"))), ImmutableList.of(BIGINT))
+                                .globalGrouping()
+                                .source(p.values(p.symbol("foo"))))))
+                .matches(
+                        node(AggregationNode.class,
+                                node(ValuesNode.class)));
+
+        tester().assertThat(new RemoveRedundantLimit())
+                .on(p -> p.limit(
+                        10,
+                        ImmutableList.of(),
+                        true,
+                        ImmutableList.of(p.symbol("a")),
+                        p.filter(
+                                new Comparison(GREATER_THAN, new Reference(INTEGER, "b"), new Constant(INTEGER, 5L)),
+                                p.values(
+                                        ImmutableList.of(p.symbol("a"), p.symbol("b")),
+                                        ImmutableList.of(
+                                                ImmutableList.of(new Constant(INTEGER, 1L), new Constant(INTEGER, 10L)),
+                                                ImmutableList.of(new Constant(INTEGER, 2L), new Constant(INTEGER, 11L)))))))
+                .matches(
+                        node(FilterNode.class,
+                                        node(ValuesNode.class)));
     }
 
     @Test
@@ -86,7 +126,7 @@ public class TestRemoveRedundantLimit
                         p.limit(
                                 10,
                                 p.aggregation(builder -> builder
-                                        .addAggregation(p.symbol("c"), expression("count(foo)"), ImmutableList.of(BIGINT))
+                                        .addAggregation(p.symbol("c"), aggregation("count", ImmutableList.of(new Reference(BIGINT, "foo"))), ImmutableList.of(BIGINT))
                                         .singleGroupingSet(p.symbol("foo"))
                                         .source(p.values(20, p.symbol("foo"))))))
                 .doesNotFire();

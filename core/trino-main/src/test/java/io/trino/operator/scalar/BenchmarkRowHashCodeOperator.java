@@ -15,9 +15,10 @@ package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.RowType.Field;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -30,18 +31,14 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
-import org.testng.annotations.Test;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.addElement;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.getHashCodeBlockMethod;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.toType;
@@ -89,15 +86,15 @@ public class BenchmarkRowHashCodeOperator
         private static Block createChannel(int positionCount, RowType rowType)
         {
             ThreadLocalRandom random = ThreadLocalRandom.current();
-            BlockBuilder blockBuilder = rowType.createBlockBuilder(null, positionCount);
+            RowBlockBuilder blockBuilder = rowType.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-
-                List<Field> fields = rowType.getFields();
-                for (Field field : fields) {
-                    addElement(field.getType(), random, entryBuilder);
-                }
-                blockBuilder.closeEntry();
+                blockBuilder.buildEntry(fieldBuilders -> {
+                    List<Field> fields = rowType.getFields();
+                    for (int i = 0; i < fields.size(); i++) {
+                        Field field = fields.get(i);
+                        addElement(field.getType(), random, fieldBuilders.get(i));
+                    }
+                });
             }
             return blockBuilder.build();
         }
@@ -125,11 +122,6 @@ public class BenchmarkRowHashCodeOperator
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkRowHashCodeOperator.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkRowHashCodeOperator.class).run();
     }
 }

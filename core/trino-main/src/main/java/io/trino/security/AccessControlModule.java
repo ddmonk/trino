@@ -14,15 +14,20 @@
 package io.trino.security;
 
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.airlift.log.Logger;
+import io.trino.plugin.base.security.DefaultSystemAccessControl;
 import io.trino.plugin.base.util.LoggingInvocationHandler;
 import io.trino.spi.security.GroupProvider;
+import io.trino.tracing.ForTracing;
+import io.trino.tracing.TracingAccessControl;
 
 import static com.google.common.reflect.Reflection.newProxy;
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
@@ -33,7 +38,9 @@ public class AccessControlModule
     public void configure(Binder binder)
     {
         configBinder(binder).bindConfig(AccessControlConfig.class);
+        newOptionalBinder(binder, Key.get(String.class, DefaultSystemAccessControlName.class)).setDefault().toInstance(DefaultSystemAccessControl.NAME);
         binder.bind(AccessControlManager.class).in(Scopes.SINGLETON);
+        binder.bind(AccessControl.class).to(TracingAccessControl.class);
         binder.bind(GroupProviderManager.class).in(Scopes.SINGLETON);
         binder.bind(GroupProvider.class).to(GroupProviderManager.class).in(Scopes.SINGLETON);
         newExporter(binder).export(AccessControlManager.class).withGeneratedName();
@@ -41,16 +48,14 @@ public class AccessControlModule
 
     @Provides
     @Singleton
+    @ForTracing
     public AccessControl createAccessControl(AccessControlManager accessControlManager)
     {
         Logger logger = Logger.get(AccessControl.class);
 
         AccessControl loggingInvocationsAccessControl = newProxy(
                 AccessControl.class,
-                new LoggingInvocationHandler(
-                        accessControlManager,
-                        new LoggingInvocationHandler.ReflectiveParameterNamesProvider(),
-                        logger::debug));
+                new LoggingInvocationHandler(accessControlManager, logger::debug));
 
         return ForwardingAccessControl.of(() -> {
             if (logger.isDebugEnabled()) {

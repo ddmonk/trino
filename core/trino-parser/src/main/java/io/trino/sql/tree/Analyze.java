@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -28,20 +27,10 @@ public class Analyze
     private final QualifiedName tableName;
     private final List<Property> properties;
 
-    public Analyze(QualifiedName tableName, List<Property> properties)
-    {
-        this(Optional.empty(), tableName, properties);
-    }
-
     public Analyze(NodeLocation location, QualifiedName tableName, List<Property> properties)
     {
-        this(Optional.of(location), tableName, properties);
-    }
-
-    private Analyze(Optional<NodeLocation> location, QualifiedName tableName, List<Property> properties)
-    {
         super(location);
-        this.tableName = requireNonNull(tableName, "table is null");
+        this.tableName = requireNonNull(tableName, "tableName is null");
         this.properties = ImmutableList.copyOf(requireNonNull(properties, "properties is null"));
     }
 

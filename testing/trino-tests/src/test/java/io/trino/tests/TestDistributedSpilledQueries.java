@@ -19,23 +19,25 @@ import io.trino.SystemSessionProperties;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.AbstractTestQueries;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
 
 import java.nio.file.Paths;
 
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static java.util.UUID.randomUUID;
 
 public class TestDistributedSpilledQueries
         extends AbstractTestQueries
 {
     @Override
-    protected DistributedQueryRunner createQueryRunner()
+    protected QueryRunner createQueryRunner()
             throws Exception
     {
         return createSpillingQueryRunner();
     }
 
-    public static DistributedQueryRunner createSpillingQueryRunner()
+    public static QueryRunner createSpillingQueryRunner()
             throws Exception
     {
         Session defaultSession = testSessionBuilder()
@@ -43,19 +45,18 @@ public class TestDistributedSpilledQueries
                 .setSchema(TINY_SCHEMA_NAME)
                 .setSystemProperty(SystemSessionProperties.TASK_CONCURRENCY, "2")
                 .setSystemProperty(SystemSessionProperties.SPILL_ENABLED, "true")
-                .setSystemProperty(SystemSessionProperties.SPILL_ORDER_BY, "true")
                 .setSystemProperty(SystemSessionProperties.AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT, "128kB")
                 .build();
 
         ImmutableMap<String, String> extraProperties = ImmutableMap.<String, String>builder()
-                .put("spiller-spill-path", Paths.get(System.getProperty("java.io.tmpdir"), "trino", "spills").toString())
+                .put("spiller-spill-path", Paths.get(System.getProperty("java.io.tmpdir"), "trino", "spills", randomUUID().toString()).toString())
                 .put("spiller-max-used-space-threshold", "1.0")
                 .put("memory-revoking-threshold", "0.0") // revoke always
                 .put("memory-revoking-target", "0.0")
-                .build();
+                .buildOrThrow();
 
-        DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(defaultSession)
-                .setNodeCount(2)
+        QueryRunner queryRunner = DistributedQueryRunner.builder(defaultSession)
+                .setWorkerCount(1)
                 .setExtraProperties(extraProperties)
                 .build();
 

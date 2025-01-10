@@ -13,11 +13,13 @@
  */
 package io.trino.sql.planner;
 
-import io.trino.metadata.Metadata;
+import io.trino.sql.planner.iterative.GroupReference;
+import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.optimizations.UnaliasSymbolReferences;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
+import io.trino.sql.planner.plan.DynamicFilterSourceNode;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.ExceptNode;
 import io.trino.sql.planner.plan.FilterNode;
@@ -26,6 +28,7 @@ import io.trino.sql.planner.plan.IntersectNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.OffsetNode;
+import io.trino.sql.planner.plan.PatternRecognitionNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.SampleNode;
@@ -53,20 +56,27 @@ public final class PlanCopier
 {
     private PlanCopier() {}
 
-    public static NodeAndMappings copyPlan(PlanNode plan, List<Symbol> fields, Metadata metadata, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
+    public static NodeAndMappings copyPlan(PlanNode plan, List<Symbol> fields, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
     {
-        PlanNode copy = SimplePlanRewriter.rewriteWith(new Copier(idAllocator), plan, null);
-        return new UnaliasSymbolReferences(metadata).reallocateSymbols(copy, fields, symbolAllocator);
+        return copyPlan(plan, fields, symbolAllocator, idAllocator, Lookup.noLookup());
+    }
+
+    public static NodeAndMappings copyPlan(PlanNode plan, List<Symbol> fields, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, Lookup lookup)
+    {
+        PlanNode copy = SimplePlanRewriter.rewriteWith(new Copier(idAllocator, lookup), plan, null);
+        return new UnaliasSymbolReferences().reallocateSymbols(copy, fields, symbolAllocator);
     }
 
     private static class Copier
             extends SimplePlanRewriter<Void>
     {
         private final PlanNodeIdAllocator idAllocator;
+        private final Lookup lookup;
 
-        private Copier(PlanNodeIdAllocator idAllocator)
+        private Copier(PlanNodeIdAllocator idAllocator, Lookup lookup)
         {
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
+            this.lookup = requireNonNull(lookup, "lookup is null");
         }
 
         @Override
@@ -76,9 +86,18 @@ public final class PlanCopier
         }
 
         @Override
+        public PlanNode visitGroupReference(GroupReference node, RewriteContext<Void> context)
+        {
+            return context.rewrite(lookup.resolve(node));
+        }
+
+        @Override
         public PlanNode visitAggregation(AggregationNode node, RewriteContext<Void> context)
         {
-            return new AggregationNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getAggregations(), node.getGroupingSets(), node.getPreGroupedSymbols(), node.getStep(), node.getHashSymbol(), node.getGroupIdSymbol());
+            return AggregationNode.builderFrom(node)
+                    .setId(idAllocator.getNextId())
+                    .setSource(context.rewrite(node.getSource()))
+                    .build();
         }
 
         @Override
@@ -108,7 +127,7 @@ public final class PlanCopier
         @Override
         public PlanNode visitLimit(LimitNode node, RewriteContext<Void> context)
         {
-            return new LimitNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getCount(), node.getTiesResolvingScheme(), node.isPartial());
+            return new LimitNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getCount(), node.getTiesResolvingScheme(), node.isPartial(), node.getPreSortedInputs());
         }
 
         @Override
@@ -120,7 +139,15 @@ public final class PlanCopier
         @Override
         public PlanNode visitTableScan(TableScanNode node, RewriteContext<Void> context)
         {
-            return new TableScanNode(idAllocator.getNextId(), node.getTable(), node.getOutputSymbols(), node.getAssignments(), node.getEnforcedConstraint(), node.isForDelete());
+            return new TableScanNode(
+                    idAllocator.getNextId(),
+                    node.getTable(),
+                    node.getOutputSymbols(),
+                    node.getAssignments(),
+                    node.getEnforcedConstraint(),
+                    node.getStatistics(),
+                    node.isUpdateTarget(),
+                    node.getUseConnectorNodePartitioning());
         }
 
         @Override
@@ -151,6 +178,12 @@ public final class PlanCopier
         }
 
         @Override
+        public PlanNode visitDynamicFilterSource(DynamicFilterSourceNode node, RewriteContext<Void> context)
+        {
+            return new DynamicFilterSourceNode(idAllocator.getNextId(), node.getSource(), node.getDynamicFilters());
+        }
+
+        @Override
         public PlanNode visitSort(SortNode node, RewriteContext<Void> context)
         {
             return new SortNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getOrderingScheme(), node.isPartial());
@@ -160,6 +193,27 @@ public final class PlanCopier
         public PlanNode visitWindow(WindowNode node, RewriteContext<Void> context)
         {
             return new WindowNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getSpecification(), node.getWindowFunctions(), node.getHashSymbol(), node.getPrePartitionedInputs(), node.getPreSortedOrderPrefix());
+        }
+
+        @Override
+        public PlanNode visitPatternRecognition(PatternRecognitionNode node, RewriteContext<Void> context)
+        {
+            return new PatternRecognitionNode(
+                    idAllocator.getNextId(),
+                    context.rewrite(node.getSource()),
+                    node.getSpecification(),
+                    node.getHashSymbol(),
+                    node.getPrePartitionedInputs(),
+                    node.getPreSortedOrderPrefix(),
+                    node.getWindowFunctions(),
+                    node.getMeasures(),
+                    node.getCommonBaseFrame(),
+                    node.getRowsPerMatch(),
+                    node.getSkipToLabels(),
+                    node.getSkipToPosition(),
+                    node.isInitial(),
+                    node.getPattern(),
+                    node.getVariableDefinitions());
         }
 
         @Override
@@ -192,7 +246,7 @@ public final class PlanCopier
         @Override
         public PlanNode visitUnnest(UnnestNode node, RewriteContext<Void> context)
         {
-            return new UnnestNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getReplicateSymbols(), node.getMappings(), node.getOrdinalitySymbol(), node.getJoinType(), node.getFilter());
+            return new UnnestNode(idAllocator.getNextId(), context.rewrite(node.getSource()), node.getReplicateSymbols(), node.getMappings(), node.getOrdinalitySymbol(), node.getJoinType());
         }
 
         @Override

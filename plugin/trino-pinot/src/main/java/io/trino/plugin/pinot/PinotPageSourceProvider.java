@@ -13,10 +13,11 @@
  */
 package io.trino.plugin.pinot;
 
+import com.google.inject.Inject;
 import io.trino.plugin.pinot.client.PinotClient;
-import io.trino.plugin.pinot.client.PinotQueryClient;
+import io.trino.plugin.pinot.client.PinotDataFetcher;
 import io.trino.plugin.pinot.query.DynamicTable;
-import io.trino.plugin.pinot.query.PinotQuery;
+import io.trino.plugin.pinot.query.PinotQueryInfo;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -24,9 +25,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.predicate.TupleDomain;
-
-import javax.inject.Inject;
+import io.trino.spi.connector.DynamicFilter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,22 +37,23 @@ import static java.util.Objects.requireNonNull;
 public class PinotPageSourceProvider
         implements ConnectorPageSourceProvider
 {
-    private final PinotQueryClient pinotQueryClient;
     private final PinotClient clusterInfoFetcher;
     private final int limitForSegmentQueries;
-    private final int estimatedNonNumericColumnSize;
+    private final int limitForBrokerQueries;
+    private final long targetSegmentPageSizeBytes;
+    private final PinotDataFetcher.Factory pinotDataFetcherFactory;
 
     @Inject
     public PinotPageSourceProvider(
             PinotConfig pinotConfig,
             PinotClient clusterInfoFetcher,
-            PinotQueryClient pinotQueryClient)
+            PinotDataFetcher.Factory pinotDataFetcherFactory)
     {
-        requireNonNull(pinotConfig, "pinotConfig is null");
-        this.pinotQueryClient = requireNonNull(pinotQueryClient, "pinotQueryClient is null");
-        this.clusterInfoFetcher = requireNonNull(clusterInfoFetcher, "cluster info fetcher is null");
-        this.limitForSegmentQueries = pinotConfig.getMaxRowsPerSplitForSegmentQueries();
-        estimatedNonNumericColumnSize = pinotConfig.getEstimatedSizeInBytesForNonNumericColumn();
+        this.clusterInfoFetcher = requireNonNull(clusterInfoFetcher, "clusterInfoFetcher is null");
+        this.pinotDataFetcherFactory = requireNonNull(pinotDataFetcherFactory, "pinotDataFetcherFactory is null");
+        this.limitForSegmentQueries = pinotDataFetcherFactory.getRowLimit();
+        this.limitForBrokerQueries = pinotConfig.getMaxRowsForBrokerQueries();
+        this.targetSegmentPageSizeBytes = pinotConfig.getTargetSegmentPageSize().toBytes();
     }
 
     @Override
@@ -63,7 +63,7 @@ public class PinotPageSourceProvider
             ConnectorSplit split,
             ConnectorTableHandle tableHandle,
             List<ColumnHandle> columns,
-            TupleDomain<ColumnHandle> dynamicFilter)
+            DynamicFilter dynamicFilter)
     {
         requireNonNull(split, "split is null");
 
@@ -74,35 +74,34 @@ public class PinotPageSourceProvider
             handles.add((PinotColumnHandle) handle);
         }
         PinotTableHandle pinotTableHandle = (PinotTableHandle) tableHandle;
-        String query = generatePql(pinotTableHandle, handles, pinotSplit.getSuffix(), pinotSplit.getTimePredicate(), limitForSegmentQueries);
 
         switch (pinotSplit.getSplitType()) {
             case SEGMENT:
+                String segmentQuery = generatePql(pinotTableHandle, handles, pinotSplit.getSuffix(), pinotSplit.getTimePredicate(), limitForSegmentQueries);
+                PinotDataFetcher pinotDataFetcher = pinotDataFetcherFactory.create(segmentQuery, pinotSplit);
                 return new PinotSegmentPageSource(
-                        session,
-                        estimatedNonNumericColumnSize,
-                        limitForSegmentQueries,
-                        this.pinotQueryClient,
-                        pinotSplit,
+                        targetSegmentPageSizeBytes,
                         handles,
-                        query);
+                        pinotDataFetcher);
             case BROKER:
-                PinotQuery pinotQuery;
-                if (pinotTableHandle.getQuery().isPresent()) {
-                    DynamicTable dynamicTable = pinotTableHandle.getQuery().get();
-                    pinotQuery = new PinotQuery(dynamicTable.getTableName(),
-                            extractPql(dynamicTable, pinotTableHandle.getConstraint(), handles),
-                            dynamicTable.getGroupingColumns().size());
+                PinotQueryInfo pinotQueryInfo;
+                if (pinotTableHandle.query().isPresent()) {
+                    DynamicTable dynamicTable = pinotTableHandle.query().get();
+                    pinotQueryInfo = new PinotQueryInfo(dynamicTable.tableName(),
+                            extractPql(dynamicTable, pinotTableHandle.constraint()),
+                            dynamicTable.groupingColumns().size());
                 }
                 else {
-                    pinotQuery = new PinotQuery(pinotTableHandle.getTableName(), query, 0);
+                    String brokerQuery = generatePql(pinotTableHandle, handles, pinotSplit.getSuffix(), pinotSplit.getTimePredicate(), limitForSegmentQueries);
+                    pinotQueryInfo = new PinotQueryInfo(pinotTableHandle.tableName(), brokerQuery, 0);
                 }
 
                 return new PinotBrokerPageSource(
                         session,
-                        pinotQuery,
+                        pinotQueryInfo,
                         handles,
-                        clusterInfoFetcher);
+                        clusterInfoFetcher,
+                        limitForBrokerQueries);
         }
         throw new UnsupportedOperationException("Unknown Pinot split type: " + pinotSplit.getSplitType());
     }

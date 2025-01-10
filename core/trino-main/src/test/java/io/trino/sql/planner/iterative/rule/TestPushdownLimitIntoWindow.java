@@ -20,10 +20,9 @@ import io.trino.spi.connector.SortOrder;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.WindowFrame;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -31,8 +30,7 @@ import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.limit;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.topNRanking;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.tree.FrameBound.Type.CURRENT_ROW;
-import static io.trino.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestPushdownLimitIntoWindow
         extends BaseRuleTest
@@ -46,8 +44,8 @@ public class TestPushdownLimitIntoWindow
 
     private void assertLimitAboveWindow(String rankingFunctionName)
     {
-        ResolvedFunction ranking = tester().getMetadata().resolveFunction(QualifiedName.of(rankingFunctionName), fromTypes());
-        tester().assertThat(new PushdownLimitIntoWindow(tester().getMetadata()))
+        ResolvedFunction ranking = tester().getMetadata().resolveBuiltinFunction(rankingFunctionName, fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -57,7 +55,7 @@ public class TestPushdownLimitIntoWindow
                     return p.limit(
                             3,
                             p.window(
-                                    new WindowNode.Specification(ImmutableList.of(a), Optional.of(orderingScheme)),
+                                    new DataOrganizationSpecification(ImmutableList.of(a), Optional.of(orderingScheme)),
                                     ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(ranking, a)),
                                     p.values(a)));
                 })
@@ -75,8 +73,8 @@ public class TestPushdownLimitIntoWindow
     @Test
     public void testConvertToTopNRowNumber()
     {
-        ResolvedFunction ranking = tester().getMetadata().resolveFunction(QualifiedName.of("row_number"), fromTypes());
-        tester().assertThat(new PushdownLimitIntoWindow(tester().getMetadata()))
+        ResolvedFunction ranking = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -84,7 +82,7 @@ public class TestPushdownLimitIntoWindow
                             ImmutableList.of(a),
                             ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST));
                     return p.limit(3, p.window(
-                            new WindowNode.Specification(ImmutableList.of(), Optional.of(orderingScheme)),
+                            new DataOrganizationSpecification(ImmutableList.of(), Optional.of(orderingScheme)),
                             ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(ranking, a)),
                             p.values(a)));
                 })
@@ -99,6 +97,31 @@ public class TestPushdownLimitIntoWindow
     }
 
     @Test
+    public void testLimitWithPreSortedInputs()
+    {
+        // We can push Limit with pre-sorted inputs into WindowNode if ordering scheme is satisfied
+        // We don't do it currently to avoid relying on LocalProperties outside of AddExchanges/AddLocalExchanges
+        ResolvedFunction ranking = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
+                .on(p -> {
+                    Symbol a = p.symbol("a");
+                    Symbol rowNumberSymbol = p.symbol("row_number_1");
+                    OrderingScheme orderingScheme = new OrderingScheme(
+                            ImmutableList.of(a),
+                            ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST));
+                    return p.limit(
+                            3,
+                            false,
+                            ImmutableList.of(a),
+                            p.window(
+                                    new DataOrganizationSpecification(ImmutableList.of(), Optional.of(orderingScheme)),
+                                    ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(ranking, a)),
+                                    p.values(a)));
+                })
+                .doesNotFire();
+    }
+
+    @Test
     public void testZeroLimit()
     {
         assertZeroLimit("row_number");
@@ -107,8 +130,8 @@ public class TestPushdownLimitIntoWindow
 
     private void assertZeroLimit(String rankingFunctionName)
     {
-        ResolvedFunction ranking = tester().getMetadata().resolveFunction(QualifiedName.of(rankingFunctionName), fromTypes());
-        tester().assertThat(new PushdownLimitIntoWindow(tester().getMetadata()))
+        ResolvedFunction ranking = tester().getMetadata().resolveBuiltinFunction(rankingFunctionName, fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -118,7 +141,7 @@ public class TestPushdownLimitIntoWindow
                     return p.limit(
                             0,
                             p.window(
-                                    new WindowNode.Specification(ImmutableList.of(a), Optional.of(orderingScheme)),
+                                    new DataOrganizationSpecification(ImmutableList.of(a), Optional.of(orderingScheme)),
                                     ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(ranking, a)),
                                     p.values(a)));
                 })
@@ -134,15 +157,15 @@ public class TestPushdownLimitIntoWindow
 
     private void assertWindowNotOrdered(String rankingFunctionName)
     {
-        ResolvedFunction ranking = tester().getMetadata().resolveFunction(QualifiedName.of(rankingFunctionName), fromTypes());
-        tester().assertThat(new PushdownLimitIntoWindow(tester().getMetadata()))
+        ResolvedFunction ranking = tester().getMetadata().resolveBuiltinFunction(rankingFunctionName, fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.limit(
                             3,
                             p.window(
-                                    new WindowNode.Specification(ImmutableList.of(a), Optional.empty()),
+                                    new DataOrganizationSpecification(ImmutableList.of(a), Optional.empty()),
                                     ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(ranking, a)),
                                     p.values(a)));
                 })
@@ -152,9 +175,9 @@ public class TestPushdownLimitIntoWindow
     @Test
     public void testMultipleWindowFunctions()
     {
-        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveFunction(QualifiedName.of("row_number"), fromTypes());
-        ResolvedFunction rankFunction = tester().getMetadata().resolveFunction(QualifiedName.of("rank"), fromTypes());
-        tester().assertThat(new PushdownLimitIntoWindow(tester().getMetadata()))
+        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
+        ResolvedFunction rankFunction = tester().getMetadata().resolveBuiltinFunction("rank", fromTypes());
+        tester().assertThat(new PushdownLimitIntoWindow())
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
@@ -162,7 +185,7 @@ public class TestPushdownLimitIntoWindow
                     return p.limit(
                             3,
                             p.window(
-                                    new WindowNode.Specification(ImmutableList.of(a), Optional.empty()),
+                                    new DataOrganizationSpecification(ImmutableList.of(a), Optional.empty()),
                                     ImmutableMap.of(
                                             rowNumberSymbol,
                                             newWindowNodeFunction(rowNumberFunction, a),
@@ -178,16 +201,9 @@ public class TestPushdownLimitIntoWindow
         return new WindowNode.Function(
                 resolvedFunction,
                 ImmutableList.of(symbol.toSymbolReference()),
-                new WindowNode.Frame(
-                        WindowFrame.Type.RANGE,
-                        UNBOUNDED_PRECEDING,
-                        Optional.empty(),
-                        Optional.empty(),
-                        CURRENT_ROW,
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty()),
+                Optional.empty(),
+                DEFAULT_FRAME,
+                false,
                 false);
     }
 }

@@ -18,6 +18,8 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.SymbolMapper;
@@ -27,8 +29,6 @@ import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TopNNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.List;
 import java.util.Optional;
@@ -36,7 +36,7 @@ import java.util.Set;
 
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.sql.planner.iterative.rule.DereferencePushdown.exclusiveDereferences;
-import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractDereferences;
+import static io.trino.sql.planner.iterative.rule.DereferencePushdown.extractRowSubscripts;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.topN;
@@ -85,7 +85,8 @@ public final class PushTopNThroughProject
         // undoing of PushDownDereferencesThroughTopN. We still push topN in the case of overlapping dereferences since
         // it enables PushDownDereferencesThroughTopN rule to push optimal dereferences.
         Set<Expression> projections = ImmutableSet.copyOf(projectNode.getAssignments().getExpressions());
-        if (!extractDereferences(projections, false).isEmpty() && exclusiveDereferences(projections)) {
+        if (!extractRowSubscripts(projections, false).isEmpty()
+                && exclusiveDereferences(projections)) {
             return Result.empty();
         }
 
@@ -98,7 +99,7 @@ public final class PushTopNThroughProject
             }
         }
 
-        Optional<SymbolMapper> symbolMapper = symbolMapper(parent.getOrderingScheme().getOrderBy(), projectNode.getAssignments());
+        Optional<SymbolMapper> symbolMapper = symbolMapper(parent.getOrderingScheme().orderBy(), projectNode.getAssignments());
         if (symbolMapper.isEmpty()) {
             return Result.empty();
         }
@@ -112,7 +113,7 @@ public final class PushTopNThroughProject
         SymbolMapper.Builder mapper = SymbolMapper.builder();
         for (Symbol symbol : symbols) {
             Expression expression = assignments.get(symbol);
-            if (!(expression instanceof SymbolReference)) {
+            if (!(expression instanceof Reference)) {
                 return Optional.empty();
             }
             mapper.put(symbol, Symbol.from(expression));

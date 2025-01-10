@@ -13,66 +13,272 @@
  */
 package io.trino.server;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import io.trino.Session;
 import io.trino.client.ProtocolHeaders;
 import io.trino.spi.security.Identity;
+import io.trino.spi.security.SelectedRole;
 import io.trino.spi.session.ResourceEstimates;
 import io.trino.transaction.TransactionId;
 
-import javax.annotation.Nullable;
-
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 
-public interface SessionContext
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static java.util.Objects.requireNonNull;
+
+public class SessionContext
 {
-    ProtocolHeaders getProtocolHeaders();
+    private final ProtocolHeaders protocolHeaders;
 
-    Optional<Identity> getAuthenticatedIdentity();
+    private final Optional<String> catalog;
+    private final Optional<String> schema;
+    private final Optional<String> path;
 
-    Identity getIdentity();
+    private final Optional<Identity> authenticatedIdentity;
+    private final Identity identity;
+    private final Identity originalIdentity;
+    private final SelectedRole selectedRole;
 
-    @Nullable
-    String getCatalog();
+    private final Optional<String> source;
+    private final Optional<String> traceToken;
+    private final Optional<String> userAgent;
+    private final Optional<String> remoteUserAddress;
+    private final Optional<String> timeZoneId;
+    private final Optional<String> language;
+    private final Set<String> clientTags;
+    private final Set<String> clientCapabilities;
+    private final ResourceEstimates resourceEstimates;
 
-    @Nullable
-    String getSchema();
+    private final Map<String, String> systemProperties;
+    private final Map<String, Map<String, String>> catalogSessionProperties;
 
-    @Nullable
-    String getPath();
+    private final Map<String, String> preparedStatements;
 
-    @Nullable
-    String getSource();
+    private final Optional<TransactionId> transactionId;
+    private final boolean clientTransactionSupport;
+    private final Optional<String> clientInfo;
+    private final Optional<String> queryDataEncoding;
 
-    String getRemoteUserAddress();
+    public SessionContext(
+            ProtocolHeaders protocolHeaders,
+            Optional<String> catalog,
+            Optional<String> schema,
+            Optional<String> path,
+            Optional<Identity> authenticatedIdentity,
+            Identity identity,
+            Identity originalIdentity,
+            SelectedRole selectedRole,
+            Optional<String> source,
+            Optional<String> traceToken,
+            Optional<String> userAgent,
+            Optional<String> remoteUserAddress,
+            Optional<String> timeZoneId,
+            Optional<String> language,
+            Set<String> clientTags,
+            Set<String> clientCapabilities,
+            ResourceEstimates resourceEstimates,
+            Map<String, String> systemProperties,
+            Map<String, Map<String, String>> catalogSessionProperties,
+            Map<String, String> preparedStatements,
+            Optional<TransactionId> transactionId,
+            boolean clientTransactionSupport,
+            Optional<String> clientInfo,
+            Optional<String> queryDataEncoding)
+    {
+        this.protocolHeaders = requireNonNull(protocolHeaders, "protocolHeaders is null");
+        this.catalog = requireNonNull(catalog, "catalog is null");
+        this.schema = requireNonNull(schema, "schema is null");
+        this.path = requireNonNull(path, "path is null");
+        this.authenticatedIdentity = requireNonNull(authenticatedIdentity, "authenticatedIdentity is null");
+        this.identity = requireNonNull(identity, "identity is null");
+        this.originalIdentity = requireNonNull(originalIdentity, "originalIdentity is null");
+        this.selectedRole = requireNonNull(selectedRole, "selectedRole is null");
+        this.source = requireNonNull(source, "source is null");
+        this.traceToken = requireNonNull(traceToken, "traceToken is null");
+        this.userAgent = requireNonNull(userAgent, "userAgent is null");
+        this.remoteUserAddress = requireNonNull(remoteUserAddress, "remoteUserAddress is null");
+        this.timeZoneId = requireNonNull(timeZoneId, "timeZoneId is null");
+        this.language = requireNonNull(language, "language is null");
+        this.clientTags = ImmutableSet.copyOf(requireNonNull(clientTags, "clientTags is null"));
+        this.clientCapabilities = ImmutableSet.copyOf(requireNonNull(clientCapabilities, "clientCapabilities is null"));
+        this.resourceEstimates = requireNonNull(resourceEstimates, "resourceEstimates is null");
+        this.systemProperties = ImmutableMap.copyOf(requireNonNull(systemProperties, "systemProperties is null"));
+        requireNonNull(catalogSessionProperties, "catalogSessionProperties is null");
+        this.catalogSessionProperties = catalogSessionProperties.entrySet().stream()
+                .collect(toImmutableMap(Entry::getKey, entry -> ImmutableMap.copyOf(entry.getValue())));
+        this.preparedStatements = ImmutableMap.copyOf(requireNonNull(preparedStatements, "preparedStatements is null"));
+        this.transactionId = requireNonNull(transactionId, "transactionId is null");
+        this.clientTransactionSupport = clientTransactionSupport;
+        this.clientInfo = requireNonNull(clientInfo, "clientInfo is null");
+        this.queryDataEncoding = requireNonNull(queryDataEncoding, "queryDataEncoding is null");
+    }
 
-    @Nullable
-    String getUserAgent();
+    public ProtocolHeaders getProtocolHeaders()
+    {
+        return protocolHeaders;
+    }
 
-    @Nullable
-    String getClientInfo();
+    public Optional<Identity> getAuthenticatedIdentity()
+    {
+        return authenticatedIdentity;
+    }
 
-    Set<String> getClientTags();
+    public Identity getIdentity()
+    {
+        return identity;
+    }
 
-    Set<String> getClientCapabilities();
+    public Identity getOriginalIdentity()
+    {
+        return originalIdentity;
+    }
 
-    ResourceEstimates getResourceEstimates();
+    public SelectedRole getSelectedRole()
+    {
+        return selectedRole;
+    }
 
-    @Nullable
-    String getTimeZoneId();
+    public Optional<String> getCatalog()
+    {
+        return catalog;
+    }
 
-    @Nullable
-    String getLanguage();
+    public Optional<String> getSchema()
+    {
+        return schema;
+    }
 
-    Map<String, String> getSystemProperties();
+    public Optional<String> getPath()
+    {
+        return path;
+    }
 
-    Map<String, Map<String, String>> getCatalogSessionProperties();
+    public Optional<String> getSource()
+    {
+        return source;
+    }
 
-    Map<String, String> getPreparedStatements();
+    public Optional<String> getRemoteUserAddress()
+    {
+        return remoteUserAddress;
+    }
 
-    Optional<TransactionId> getTransactionId();
+    public Optional<String> getUserAgent()
+    {
+        return userAgent;
+    }
 
-    Optional<String> getTraceToken();
+    public Optional<String> getClientInfo()
+    {
+        return clientInfo;
+    }
 
-    boolean supportClientTransaction();
+    public Set<String> getClientTags()
+    {
+        return clientTags;
+    }
+
+    public Set<String> getClientCapabilities()
+    {
+        return clientCapabilities;
+    }
+
+    public ResourceEstimates getResourceEstimates()
+    {
+        return resourceEstimates;
+    }
+
+    public Optional<String> getTimeZoneId()
+    {
+        return timeZoneId;
+    }
+
+    public Optional<String> getLanguage()
+    {
+        return language;
+    }
+
+    public Map<String, String> getSystemProperties()
+    {
+        return systemProperties;
+    }
+
+    public Map<String, Map<String, String>> getCatalogSessionProperties()
+    {
+        return catalogSessionProperties;
+    }
+
+    public Map<String, String> getPreparedStatements()
+    {
+        return preparedStatements;
+    }
+
+    public Optional<TransactionId> getTransactionId()
+    {
+        return transactionId;
+    }
+
+    public boolean supportClientTransaction()
+    {
+        return clientTransactionSupport;
+    }
+
+    public Optional<String> getTraceToken()
+    {
+        return traceToken;
+    }
+
+    public Optional<String> getQueryDataEncoding()
+    {
+        return queryDataEncoding;
+    }
+
+    @VisibleForTesting
+    public static SessionContext fromSession(Session session)
+    {
+        requireNonNull(session, "session is null");
+
+        Set<String> enabledRoles = session.getIdentity().getEnabledRoles();
+        SelectedRole selectedRole;
+        if (enabledRoles.isEmpty()) {
+            selectedRole = new SelectedRole(SelectedRole.Type.NONE, Optional.empty());
+        }
+        else if (enabledRoles.size() == 1) {
+            selectedRole = new SelectedRole(SelectedRole.Type.ROLE, Optional.of(enabledRoles.iterator().next()));
+        }
+        else {
+            selectedRole = new SelectedRole(SelectedRole.Type.ALL, Optional.empty());
+        }
+
+        return new SessionContext(
+                session.getProtocolHeaders(),
+                session.getCatalog(),
+                session.getSchema(),
+                Optional.of(session.getPath().getRawPath()),
+                Optional.empty(),
+                session.getIdentity(),
+                session.getOriginalIdentity(),
+                selectedRole,
+                session.getSource(),
+                session.getTraceToken(),
+                session.getUserAgent(),
+                session.getRemoteUserAddress(),
+                Optional.of(session.getTimeZoneKey().getId()),
+                Optional.of(session.getLocale().getLanguage()),
+                session.getClientTags(),
+                session.getClientCapabilities(),
+                session.getResourceEstimates(),
+                session.getSystemProperties(),
+                session.getCatalogProperties(),
+                session.getPreparedStatements(),
+                session.getTransactionId(),
+                session.isClientTransactionSupport(),
+                session.getClientInfo(),
+                session.getQueryDataEncoding());
+    }
 }

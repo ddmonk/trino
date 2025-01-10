@@ -14,12 +14,12 @@
 package io.trino.operator.annotations;
 
 import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.FunctionDependencyDeclaration.FunctionDependencyDeclarationBuilder;
-import io.trino.metadata.FunctionInvoker;
+import io.trino.spi.function.CatalogSchemaFunctionName;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionDependencyDeclaration.FunctionDependencyDeclarationBuilder;
 import io.trino.spi.function.InvocationConvention;
+import io.trino.spi.function.ScalarFunctionImplementation;
 import io.trino.spi.type.TypeSignature;
-import io.trino.sql.tree.QualifiedName;
 
 import java.util.List;
 import java.util.Objects;
@@ -30,14 +30,24 @@ import static java.util.Objects.requireNonNull;
 public final class FunctionImplementationDependency
         extends ScalarImplementationDependency
 {
-    private final QualifiedName name;
+    private final CatalogSchemaFunctionName name;
     private final List<TypeSignature> argumentTypes;
 
-    public FunctionImplementationDependency(QualifiedName name, List<TypeSignature> argumentTypes, InvocationConvention invocationConvention, Class<?> type)
+    public FunctionImplementationDependency(CatalogSchemaFunctionName name, List<TypeSignature> argumentTypes, InvocationConvention invocationConvention, Class<?> type)
     {
         super(invocationConvention, type);
         this.name = requireNonNull(name, "name is null");
         this.argumentTypes = requireNonNull(argumentTypes, "argumentTypes is null");
+    }
+
+    public CatalogSchemaFunctionName getName()
+    {
+        return name;
+    }
+
+    public List<TypeSignature> getArgumentTypes()
+    {
+        return argumentTypes;
     }
 
     @Override
@@ -47,10 +57,10 @@ public final class FunctionImplementationDependency
     }
 
     @Override
-    protected FunctionInvoker getInvoker(FunctionBinding functionBinding, FunctionDependencies functionDependencies, InvocationConvention invocationConvention)
+    protected ScalarFunctionImplementation getImplementation(FunctionBinding functionBinding, FunctionDependencies functionDependencies, InvocationConvention invocationConvention)
     {
         List<TypeSignature> types = applyBoundVariables(argumentTypes, functionBinding);
-        return functionDependencies.getFunctionSignatureInvoker(name, types, invocationConvention);
+        return functionDependencies.getScalarFunctionImplementationSignature(name, types, invocationConvention);
     }
 
     @Override

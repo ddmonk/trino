@@ -15,32 +15,44 @@ package io.trino.operator.scalar;
 
 import io.airlift.json.JsonCodec;
 import io.trino.client.FailureInfo;
-import io.trino.spi.TrinoException;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.sql.query.QueryAssertions;
 import io.trino.util.Failures;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.type.UnknownType.UNKNOWN;
+import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestFailureFunction
-        extends AbstractTestFunctions
 {
-    private static final String FAILURE_INFO = JsonCodec.jsonCodec(FailureInfo.class).toJson(Failures.toFailure(new RuntimeException("fail me")).toFailureInfo());
+    private QueryAssertions assertions;
 
-    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "fail me")
-    public void testFailure()
+    @BeforeAll
+    public void init()
     {
-        assertFunction("fail(json_parse('" + FAILURE_INFO + "'))", UNKNOWN, null);
+        assertions = new QueryAssertions();
     }
 
-    @Test(expectedExceptions = TrinoException.class, expectedExceptionsMessageRegExp = "Division by zero")
-    public void testQuery()
+    @AfterAll
+    public void teardown()
     {
-        // The other test does not exercise this function during execution (i.e. inside a page processor).
-        // It only verifies constant folding works.
-        try (LocalQueryRunner runner = LocalQueryRunner.create(TEST_SESSION)) {
-            runner.execute("select if(x, 78, 0/0) from (values rand() >= 0, rand() < 0) t(x)");
-        }
+        assertions.close();
+        assertions = null;
+    }
+
+    @Test
+    public void testFailure()
+    {
+        String failure = JsonCodec.jsonCodec(FailureInfo.class).toJson(Failures.toFailure(new RuntimeException("fail me")).toFailureInfo());
+        assertTrinoExceptionThrownBy(assertions.function("fail", "json_parse('" + failure + "')")::evaluate)
+                .hasErrorCode(GENERIC_USER_ERROR)
+                .hasMessage("fail me");
     }
 }

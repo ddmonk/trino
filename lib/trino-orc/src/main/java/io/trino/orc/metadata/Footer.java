@@ -16,7 +16,6 @@ package io.trino.orc.metadata;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import io.trino.orc.metadata.statistics.ColumnStatistics;
 
 import java.util.List;
@@ -37,6 +36,7 @@ public class Footer
     private final ColumnMetadata<OrcType> types;
     private final Optional<ColumnMetadata<ColumnStatistics>> fileStats;
     private final Map<String, Slice> userMetadata;
+    private final Optional<Integer> writerId;
 
     public Footer(
             long numberOfRows,
@@ -44,7 +44,8 @@ public class Footer
             List<StripeInformation> stripes,
             ColumnMetadata<OrcType> types,
             Optional<ColumnMetadata<ColumnStatistics>> fileStats,
-            Map<String, Slice> userMetadata)
+            Map<String, Slice> userMetadata,
+            Optional<Integer> writerId)
     {
         this.numberOfRows = numberOfRows;
         rowsInRowGroup.ifPresent(value -> checkArgument(value > 0, "rowsInRowGroup must be at least 1"));
@@ -53,7 +54,8 @@ public class Footer
         this.types = requireNonNull(types, "types is null");
         this.fileStats = requireNonNull(fileStats, "fileStats is null");
         requireNonNull(userMetadata, "userMetadata is null");
-        this.userMetadata = ImmutableMap.copyOf(transformValues(userMetadata, Slices::copyOf));
+        this.userMetadata = ImmutableMap.copyOf(transformValues(userMetadata, Slice::copy));
+        this.writerId = requireNonNull(writerId, "writerId is null");
     }
 
     public long getNumberOfRows()
@@ -83,7 +85,12 @@ public class Footer
 
     public Map<String, Slice> getUserMetadata()
     {
-        return ImmutableMap.copyOf(transformValues(userMetadata, Slices::copyOf));
+        return ImmutableMap.copyOf(transformValues(userMetadata, Slice::copy));
+    }
+
+    public Optional<Integer> getWriterId()
+    {
+        return writerId;
     }
 
     @Override
@@ -96,6 +103,7 @@ public class Footer
                 .add("types", types)
                 .add("columnStatistics", fileStats)
                 .add("userMetadata", userMetadata.keySet())
+                .add("writerId", writerId)
                 .toString();
     }
 }

@@ -15,21 +15,21 @@
 package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import io.trino.jmh.Benchmarks;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
+import io.trino.sql.planner.Symbol;
 import io.trino.sql.relational.LambdaDefinitionExpression;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.VariableReferenceExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.type.FunctionType;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -43,10 +43,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 import org.openjdk.jmh.runner.options.WarmupMode;
 
 import java.util.List;
@@ -55,7 +51,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.function.OperatorType.ADD;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -105,8 +100,8 @@ public class BenchmarkTransformKey
         @Setup
         public void setup()
         {
-            Metadata metadata = createTestMetadataManager();
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution();
+            ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Type elementType;
             Object increment;
@@ -123,15 +118,14 @@ public class BenchmarkTransformKey
                     throw new UnsupportedOperationException();
             }
             MapType mapType = mapType(elementType, elementType);
-            ResolvedFunction resolvedFunction = metadata.resolveFunction(
-                    QualifiedName.of(name),
+            ResolvedFunction resolvedFunction = functionResolution.resolveFunction(
+                    name,
                     fromTypes(mapType, new FunctionType(ImmutableList.of(elementType, elementType), elementType)));
-            ResolvedFunction add = metadata.resolveOperator(ADD, ImmutableList.of(elementType, elementType));
+            ResolvedFunction add = functionResolution.resolveOperator(ADD, ImmutableList.of(elementType, elementType));
             projectionsBuilder.add(call(resolvedFunction, ImmutableList.of(
                     field(0, mapType),
                     new LambdaDefinitionExpression(
-                            ImmutableList.of(elementType, elementType),
-                            ImmutableList.of("x", "y"),
+                            ImmutableList.of(new Symbol(elementType, "x"), new Symbol(elementType, "y")),
                             call(add, ImmutableList.of(
                                     new VariableReferenceExpression("x", elementType),
                                     constant(increment, elementType)))))));
@@ -144,24 +138,24 @@ public class BenchmarkTransformKey
 
         private static Block createChannel(int positionCount, MapType mapType, Type elementType)
         {
-            BlockBuilder mapBlockBuilder = mapType.createBlockBuilder(null, 1);
-            BlockBuilder singleMapBlockWriter = mapBlockBuilder.beginBlockEntry();
-            Object value;
-            for (int position = 0; position < positionCount; position++) {
-                if (elementType.equals(BIGINT)) {
-                    value = ThreadLocalRandom.current().nextLong();
+            MapBlockBuilder mapBlockBuilder = mapType.createBlockBuilder(null, 1);
+            mapBlockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
+                Object value;
+                for (int position = 0; position < positionCount; position++) {
+                    if (elementType.equals(BIGINT)) {
+                        value = ThreadLocalRandom.current().nextLong();
+                    }
+                    else if (elementType.equals(DOUBLE)) {
+                        value = ThreadLocalRandom.current().nextDouble();
+                    }
+                    else {
+                        throw new UnsupportedOperationException();
+                    }
+                    // Use position as the key to avoid collision
+                    writeNativeValue(elementType, keyBuilder, position);
+                    writeNativeValue(elementType, valueBuilder, value);
                 }
-                else if (elementType.equals(DOUBLE)) {
-                    value = ThreadLocalRandom.current().nextDouble();
-                }
-                else {
-                    throw new UnsupportedOperationException();
-                }
-                // Use position as the key to avoid collision
-                writeNativeValue(elementType, singleMapBlockWriter, position);
-                writeNativeValue(elementType, singleMapBlockWriter, value);
-            }
-            mapBlockBuilder.closeEntry();
+            });
             return mapBlockBuilder.build();
         }
 
@@ -184,11 +178,6 @@ public class BenchmarkTransformKey
         data.setup();
         new BenchmarkTransformKey().benchmark(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .warmupMode(WarmupMode.BULK)
-                .include(".*" + BenchmarkTransformKey.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        Benchmarks.benchmark(BenchmarkTransformKey.class, WarmupMode.BULK).run();
     }
 }

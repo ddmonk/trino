@@ -17,7 +17,7 @@ import io.trino.Session;
 import io.trino.cost.StatsProvider;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
-import io.trino.metadata.TableMetadata;
+import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -29,7 +29,6 @@ import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.base.Verify.verify;
 import static io.trino.sql.planner.assertions.MatchResult.NO_MATCH;
 import static java.util.Objects.requireNonNull;
 
@@ -59,8 +58,8 @@ public final class TableScanMatcher
         checkState(shapeMatches(node), "Plan testing framework error: shapeMatches returned false in detailMatches in %s", this.getClass().getName());
 
         TableScanNode tableScanNode = (TableScanNode) node;
-        TableMetadata tableMetadata = metadata.getTableMetadata(session, tableScanNode.getTable());
-        String actualTableName = tableMetadata.getTable().getTableName();
+        CatalogSchemaTableName tableName = metadata.getTableName(session, tableScanNode.getTable());
+        String actualTableName = tableName.getSchemaTableName().getTableName();
 
         // TODO (https://github.com/trinodb/trino/issues/17) change to equals()
         if (!expectedTableName.equalsIgnoreCase(actualTableName)) {
@@ -87,11 +86,7 @@ public final class TableScanMatcher
 
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle);
         TupleDomain<ColumnHandle> expected = TupleDomain.withColumnDomains(expectedDomains.get())
-                .transform(key -> {
-                    ColumnHandle columnHandle = columnHandles.get(key);
-                    verify(columnHandle != null, "No column handle for: %s", key);
-                    return columnHandle;
-                });
+                .transformKeys(columnHandles::get);
 
         return expected.equals(actualConstraint);
     }

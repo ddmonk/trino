@@ -14,30 +14,38 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.client.ClientCapabilities;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
 import io.trino.spi.TrinoException;
 import io.trino.sql.SqlPath;
 import io.trino.sql.SqlPathElement;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.SetPath;
-import io.trino.transaction.TransactionManager;
 
 import java.util.List;
-import java.util.Optional;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.metadata.MetadataUtil.getRequiredCatalogHandle;
 import static io.trino.spi.StandardErrorCode.MISSING_CATALOG_NAME;
-import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
 import static java.util.Locale.ENGLISH;
+import static java.util.Objects.requireNonNull;
 
 public class SetPathTask
         implements DataDefinitionTask<SetPath>
 {
+    private final Metadata metadata;
+
+    @Inject
+    public SetPathTask(Metadata metadata)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+    }
+
     @Override
     public String getName()
     {
@@ -45,13 +53,11 @@ public class SetPathTask
     }
 
     @Override
-    public ListenableFuture<?> execute(
+    public ListenableFuture<Void> execute(
             SetPath statement,
-            TransactionManager transactionManager,
-            Metadata metadata,
-            AccessControl accessControl,
             QueryStateMachine stateMachine,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
 
@@ -60,21 +66,18 @@ public class SetPathTask
         }
 
         // convert to IR before setting HTTP headers - ensures that the representations of all path objects outside the parser remain consistent
-        SqlPath sqlPath = new SqlPath(Optional.of(statement.getPathSpecification().toString()));
-
-        for (SqlPathElement element : sqlPath.getParsedPath()) {
+        String rawPath = statement.getPathSpecification().toString();
+        for (SqlPathElement element : SqlPath.parsePath(rawPath)) {
             if (element.getCatalog().isEmpty() && session.getCatalog().isEmpty()) {
                 throw semanticException(MISSING_CATALOG_NAME, statement, "Catalog must be specified for each path element when session catalog is not set");
             }
 
             element.getCatalog().ifPresent(catalog -> {
                 String catalogName = catalog.getValue().toLowerCase(ENGLISH);
-                if (metadata.getCatalogHandle(session, catalogName).isEmpty()) {
-                    throw new TrinoException(NOT_FOUND, "Catalog does not exist: " + catalogName);
-                }
+                getRequiredCatalogHandle(metadata, session, statement, catalogName);
             });
         }
-        stateMachine.setSetPath(sqlPath.toString());
-        return immediateFuture(null);
+        stateMachine.setSetPath(rawPath);
+        return immediateVoidFuture();
     }
 }

@@ -13,26 +13,23 @@
  */
 package io.trino.plugin.elasticsearch.decoders;
 
-import io.trino.spi.TrinoException;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.elasticsearch.DecoderDescriptor;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
 import org.elasticsearch.search.SearchHit;
 
 import java.util.List;
 import java.util.function.Supplier;
 
-import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
-import static java.lang.String.format;
-import static java.util.Objects.requireNonNull;
-
 public class ArrayDecoder
         implements Decoder
 {
-    private final String path;
     private final Decoder elementDecoder;
 
-    public ArrayDecoder(String path, Decoder elementDecoder)
+    public ArrayDecoder(Decoder elementDecoder)
     {
-        this.path = requireNonNull(path, "path is null");
         this.elementDecoder = elementDecoder;
     }
 
@@ -44,13 +41,35 @@ public class ArrayDecoder
         if (data == null) {
             output.appendNull();
         }
-        else if (data instanceof List) {
-            BlockBuilder array = output.beginBlockEntry();
-            ((List<?>) data).forEach(element -> elementDecoder.decode(hit, () -> element, array));
-            output.closeEntry();
+        else if (data instanceof List<?> list) {
+            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> list.forEach(element -> elementDecoder.decode(hit, () -> element, elementBuilder)));
         }
         else {
-            throw new TrinoException(TYPE_MISMATCH, format("Expected list of elements for field '%s' of type ARRAY: %s [%s]", path, data, data.getClass().getSimpleName()));
+            ((ArrayBlockBuilder) output).buildEntry(elementBuilder -> elementDecoder.decode(hit, () -> data, elementBuilder));
+        }
+    }
+
+    public static class Descriptor
+            implements DecoderDescriptor
+    {
+        private final DecoderDescriptor elementDescriptor;
+
+        @JsonCreator
+        public Descriptor(DecoderDescriptor elementDescriptor)
+        {
+            this.elementDescriptor = elementDescriptor;
+        }
+
+        @JsonProperty
+        public DecoderDescriptor getElementDescriptor()
+        {
+            return elementDescriptor;
+        }
+
+        @Override
+        public Decoder createDecoder()
+        {
+            return new ArrayDecoder(elementDescriptor.createDecoder());
         }
     }
 }

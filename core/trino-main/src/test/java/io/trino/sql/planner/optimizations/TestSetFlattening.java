@@ -19,15 +19,17 @@ import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
+import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.iterative.rule.MergeExcept;
 import io.trino.sql.planner.iterative.rule.MergeIntersect;
 import io.trino.sql.planner.iterative.rule.MergeUnion;
 import io.trino.sql.planner.iterative.rule.PruneDistinctAggregation;
 import io.trino.sql.planner.iterative.rule.RemoveRedundantIdentityProjections;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.trino.sql.planner.PlanOptimizers.columnPruningRules;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.except;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.intersect;
@@ -131,18 +133,20 @@ public class TestSetFlattening
     protected void assertPlan(String sql, PlanMatchPattern pattern)
     {
         List<PlanOptimizer> optimizers = ImmutableList.of(
-                new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
-                new PruneUnreferencedOutputs(getQueryRunner().getMetadata()),
+                new UnaliasSymbolReferences(),
                 new IterativeOptimizer(
+                        getPlanTester().getPlannerContext(),
                         new RuleStatsRecorder(),
-                        getQueryRunner().getStatsCalculator(),
-                        getQueryRunner().getEstimatedExchangesCostCalculator(),
-                        ImmutableSet.of(
-                                new RemoveRedundantIdentityProjections(),
-                                new MergeUnion(),
-                                new MergeIntersect(),
-                                new MergeExcept(),
-                                new PruneDistinctAggregation())));
+                        getPlanTester().getStatsCalculator(),
+                        getPlanTester().getEstimatedExchangesCostCalculator(),
+                        ImmutableSet.<Rule<?>>builder()
+                                .add(new RemoveRedundantIdentityProjections())
+                                .add(new MergeUnion())
+                                .add(new MergeIntersect())
+                                .add(new MergeExcept())
+                                .add(new PruneDistinctAggregation())
+                                .addAll(columnPruningRules(getPlanTester().getPlannerContext().getMetadata()))
+                                .build()));
         assertPlan(sql, pattern, optimizers);
     }
 }

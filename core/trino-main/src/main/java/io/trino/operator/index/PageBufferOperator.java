@@ -33,36 +33,36 @@ public class PageBufferOperator
         private final int operatorId;
         private final PlanNodeId planNodeId;
         private final PageBuffer pageBuffer;
+        private final String operatorType;
 
-        public PageBufferOperatorFactory(int operatorId, PlanNodeId planNodeId, PageBuffer pageBuffer)
+        public PageBufferOperatorFactory(int operatorId, PlanNodeId planNodeId, PageBuffer pageBuffer, String operatorType)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
             this.pageBuffer = requireNonNull(pageBuffer, "pageBuffer is null");
+            this.operatorType = requireNonNull(operatorType, "operatorType is null");
         }
 
         @Override
         public Operator createOperator(DriverContext driverContext)
         {
-            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, PageBufferOperator.class.getSimpleName());
+            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, operatorType);
             return new PageBufferOperator(operatorContext, pageBuffer);
         }
 
         @Override
-        public void noMoreOperators()
-        {
-        }
+        public void noMoreOperators() {}
 
         @Override
         public OperatorFactory duplicate()
         {
-            return new PageBufferOperatorFactory(operatorId, planNodeId, pageBuffer);
+            return new PageBufferOperatorFactory(operatorId, planNodeId, pageBuffer, operatorType);
         }
     }
 
     private final OperatorContext operatorContext;
     private final PageBuffer pageBuffer;
-    private ListenableFuture<?> blocked = NOT_BLOCKED;
+    private ListenableFuture<Void> blocked = NOT_BLOCKED;
     private boolean finished;
 
     public PageBufferOperator(OperatorContext operatorContext, PageBuffer pageBuffer)
@@ -91,7 +91,7 @@ public class PageBufferOperator
     }
 
     @Override
-    public ListenableFuture<?> isBlocked()
+    public ListenableFuture<Void> isBlocked()
     {
         updateBlockedIfNecessary();
         return blocked;
@@ -116,7 +116,7 @@ public class PageBufferOperator
     {
         requireNonNull(page, "page is null");
         checkState(blocked == NOT_BLOCKED, "output is already blocked");
-        ListenableFuture<?> future = pageBuffer.add(page);
+        ListenableFuture<Void> future = pageBuffer.add(page);
         if (!future.isDone()) {
             this.blocked = future;
         }

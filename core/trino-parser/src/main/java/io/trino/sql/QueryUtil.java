@@ -18,11 +18,12 @@ import io.trino.sql.tree.AliasedRelation;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.CoalesceExpression;
 import io.trino.sql.tree.ComparisonExpression;
+import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.GroupBy;
 import io.trino.sql.tree.Identifier;
-import io.trino.sql.tree.LogicalBinaryExpression;
+import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.Offset;
 import io.trino.sql.tree.OrderBy;
@@ -32,7 +33,6 @@ import io.trino.sql.tree.QueryBody;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.Relation;
 import io.trino.sql.tree.Row;
-import io.trino.sql.tree.SearchedCaseExpression;
 import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
 import io.trino.sql.tree.SingleColumn;
@@ -41,7 +41,6 @@ import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.Values;
-import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.WindowDefinition;
 
 import java.util.List;
@@ -64,6 +63,11 @@ public final class QueryUtil
     public static Identifier quotedIdentifier(String name)
     {
         return new Identifier(name, true);
+    }
+
+    public static Expression nameReference(String first, String... rest)
+    {
+        return DereferenceExpression.from(QualifiedName.of(first, rest));
     }
 
     public static SelectItem unaliasedName(String name)
@@ -117,17 +121,12 @@ public final class QueryUtil
 
     public static Expression logicalAnd(Expression left, Expression right)
     {
-        return new LogicalBinaryExpression(LogicalBinaryExpression.Operator.AND, left, right);
+        return LogicalExpression.and(left, right);
     }
 
     public static Expression equal(Expression left, Expression right)
     {
         return new ComparisonExpression(ComparisonExpression.Operator.EQUAL, left, right);
-    }
-
-    public static Expression caseWhen(Expression operand, Expression result)
-    {
-        return new SearchedCaseExpression(ImmutableList.of(new WhenClause(operand, result)), Optional.empty());
     }
 
     public static Expression functionCall(String name, Expression... arguments)
@@ -143,6 +142,11 @@ public final class QueryUtil
     public static Row row(Expression... values)
     {
         return new Row(ImmutableList.copyOf(values));
+    }
+
+    public static Relation aliased(Relation relation, String alias)
+    {
+        return new AliasedRelation(relation, identifier(alias), null);
     }
 
     public static Relation aliased(Relation relation, String alias, List<String> columnAliases)
@@ -242,7 +246,7 @@ public final class QueryUtil
 
     public static Query singleValueQuery(String columnName, String value)
     {
-        Relation values = values(row(new StringLiteral((value))));
+        Relation values = values(row(new StringLiteral(value)));
         return simpleQuery(
                 selectList(new AllColumns()),
                 aliased(values, "t", ImmutableList.of(columnName)));
@@ -259,6 +263,7 @@ public final class QueryUtil
     public static Query query(QueryBody body)
     {
         return new Query(
+                ImmutableList.of(),
                 Optional.empty(),
                 body,
                 Optional.empty(),

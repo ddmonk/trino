@@ -16,7 +16,7 @@ package io.trino.plugin.hive.metastore.file;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.hive.metastore.Database;
+import io.trino.metastore.Database;
 import io.trino.spi.security.PrincipalType;
 
 import java.util.Map;
@@ -27,32 +27,32 @@ import static java.util.Objects.requireNonNull;
 public class DatabaseMetadata
 {
     private final Optional<String> writerVersion;
-    private final String ownerName;
-    private final PrincipalType ownerType;
-    private final Optional<String> comment;
+    private final Optional<String> location;
+    private final Optional<String> ownerName;
+    private final Optional<PrincipalType> ownerType;
     private final Map<String, String> parameters;
 
     @JsonCreator
     public DatabaseMetadata(
             @JsonProperty("writerVersion") Optional<String> writerVersion,
-            @JsonProperty("ownerName") String ownerName,
-            @JsonProperty("ownerType") PrincipalType ownerType,
-            @JsonProperty("comment") Optional<String> comment,
+            @JsonProperty("location") Optional<String> location,
+            @JsonProperty("ownerName") Optional<String> ownerName,
+            @JsonProperty("ownerType") Optional<PrincipalType> ownerType,
             @JsonProperty("parameters") Map<String, String> parameters)
     {
         this.writerVersion = requireNonNull(writerVersion, "writerVersion is null");
+        this.location = requireNonNull(location, "location is null");
         this.ownerName = requireNonNull(ownerName, "ownerName is null");
         this.ownerType = requireNonNull(ownerType, "ownerType is null");
-        this.comment = requireNonNull(comment, "comment is null");
         this.parameters = ImmutableMap.copyOf(requireNonNull(parameters, "parameters is null"));
     }
 
     public DatabaseMetadata(String currentVersion, Database database)
     {
         this.writerVersion = Optional.of(requireNonNull(currentVersion, "currentVersion is null"));
+        this.location = database.getLocation();
         this.ownerName = database.getOwnerName();
         this.ownerType = database.getOwnerType();
-        this.comment = database.getComment();
         this.parameters = database.getParameters();
     }
 
@@ -63,21 +63,21 @@ public class DatabaseMetadata
     }
 
     @JsonProperty
-    public String getOwnerName()
+    public Optional<String> getLocation()
+    {
+        return location;
+    }
+
+    @JsonProperty
+    public Optional<String> getOwnerName()
     {
         return ownerName;
     }
 
     @JsonProperty
-    public PrincipalType getOwnerType()
+    public Optional<PrincipalType> getOwnerType()
     {
         return ownerType;
-    }
-
-    @JsonProperty
-    public Optional<String> getComment()
-    {
-        return comment;
     }
 
     @JsonProperty
@@ -86,11 +86,11 @@ public class DatabaseMetadata
         return parameters;
     }
 
-    public Database toDatabase(String databaseName, String location)
+    public Database toDatabase(String databaseName, String databaseMetadataDirectory)
     {
         return Database.builder()
                 .setDatabaseName(databaseName)
-                .setLocation(Optional.of(location))
+                .setLocation(Optional.of(location.orElse(databaseMetadataDirectory)))
                 .setOwnerName(ownerName)
                 .setOwnerType(ownerType)
                 .setParameters(parameters)

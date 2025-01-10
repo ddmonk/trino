@@ -14,38 +14,52 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
+import dev.failsafe.RetryPolicy;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 
+import static io.trino.plugin.jdbc.RetryingModule.retry;
 import static java.util.Objects.requireNonNull;
 
 public class JdbcRecordSet
         implements RecordSet
 {
     private final JdbcClient jdbcClient;
-    private final JdbcTableHandle table;
+    private final ExecutorService executor;
+    private final BaseJdbcConnectorTableHandle table;
     private final List<JdbcColumnHandle> columnHandles;
     private final List<Type> columnTypes;
     private final JdbcSplit split;
     private final ConnectorSession session;
+    private final RetryPolicy<Object> policy;
 
-    public JdbcRecordSet(JdbcClient jdbcClient, ConnectorSession session, JdbcSplit split, JdbcTableHandle table, List<JdbcColumnHandle> columnHandles)
+    public JdbcRecordSet(
+            JdbcClient jdbcClient,
+            ExecutorService executor,
+            ConnectorSession session,
+            RetryPolicy<Object> policy,
+            JdbcSplit split,
+            BaseJdbcConnectorTableHandle table,
+            List<JdbcColumnHandle> columnHandles)
     {
         this.jdbcClient = requireNonNull(jdbcClient, "jdbcClient is null");
+        this.executor = requireNonNull(executor, "executor is null");
         this.split = requireNonNull(split, "split is null");
 
         this.table = requireNonNull(table, "table is null");
-        this.columnHandles = requireNonNull(columnHandles, "column handles is null");
-        ImmutableList.Builder<Type> types = ImmutableList.builder();
+        this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
+        ImmutableList.Builder<Type> types = ImmutableList.builderWithExpectedSize(columnHandles.size());
         for (JdbcColumnHandle column : columnHandles) {
             types.add(column.getColumnType());
         }
         this.columnTypes = types.build();
         this.session = requireNonNull(session, "session is null");
+        this.policy = requireNonNull(policy, "policy is null");
     }
 
     @Override
@@ -57,6 +71,6 @@ public class JdbcRecordSet
     @Override
     public RecordCursor cursor()
     {
-        return new JdbcRecordCursor(jdbcClient, session, split, table, columnHandles);
+        return retry(policy, () -> new JdbcRecordCursor(jdbcClient, executor, session, split, table, columnHandles));
     }
 }

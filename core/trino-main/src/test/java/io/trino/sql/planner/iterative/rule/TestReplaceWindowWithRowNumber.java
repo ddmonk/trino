@@ -20,18 +20,16 @@ import io.trino.spi.connector.SortOrder;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.WindowFrame;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.rowNumber;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.tree.FrameBound.Type.CURRENT_ROW;
-import static io.trino.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestReplaceWindowWithRowNumber
         extends BaseRuleTest
@@ -39,13 +37,13 @@ public class TestReplaceWindowWithRowNumber
     @Test
     public void test()
     {
-        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveFunction(QualifiedName.of("row_number"), fromTypes());
+        ResolvedFunction rowNumberFunction = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
         tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.window(
-                            new WindowNode.Specification(ImmutableList.of(a), Optional.empty()),
+                            new DataOrganizationSpecification(ImmutableList.of(a), Optional.empty()),
                             ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(rowNumberFunction)),
                             p.values(a));
                 })
@@ -60,7 +58,7 @@ public class TestReplaceWindowWithRowNumber
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.window(
-                            new WindowNode.Specification(ImmutableList.of(), Optional.empty()),
+                            new DataOrganizationSpecification(ImmutableList.of(), Optional.empty()),
                             ImmutableMap.of(rowNumberSymbol, newWindowNodeFunction(rowNumberFunction)),
                             p.values(a));
                 })
@@ -74,26 +72,26 @@ public class TestReplaceWindowWithRowNumber
     @Test
     public void testDoNotFire()
     {
-        ResolvedFunction rank = tester().getMetadata().resolveFunction(QualifiedName.of("rank"), fromTypes());
+        ResolvedFunction rank = tester().getMetadata().resolveBuiltinFunction("rank", fromTypes());
         tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rank1 = p.symbol("rank_1");
                     return p.window(
-                            new WindowNode.Specification(ImmutableList.of(a), Optional.empty()),
+                            new DataOrganizationSpecification(ImmutableList.of(a), Optional.empty()),
                             ImmutableMap.of(rank1, newWindowNodeFunction(rank)),
                             p.values(a));
                 })
                 .doesNotFire();
 
-        ResolvedFunction rowNumber = tester().getMetadata().resolveFunction(QualifiedName.of("row_number"), fromTypes());
+        ResolvedFunction rowNumber = tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes());
         tester().assertThat(new ReplaceWindowWithRowNumber(tester().getMetadata()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumber1 = p.symbol("row_number_1");
                     Symbol rank1 = p.symbol("rank_1");
                     return p.window(
-                            new WindowNode.Specification(ImmutableList.of(a), Optional.empty()),
+                            new DataOrganizationSpecification(ImmutableList.of(a), Optional.empty()),
                             ImmutableMap.of(rowNumber1, newWindowNodeFunction(rowNumber), rank1, newWindowNodeFunction(rank)),
                             p.values(a));
                 })
@@ -105,7 +103,7 @@ public class TestReplaceWindowWithRowNumber
                     OrderingScheme orderingScheme = new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST));
                     Symbol rowNumber1 = p.symbol("row_number_1");
                     return p.window(
-                            new WindowNode.Specification(ImmutableList.of(a), Optional.of(orderingScheme)),
+                            new DataOrganizationSpecification(ImmutableList.of(a), Optional.of(orderingScheme)),
                             ImmutableMap.of(rowNumber1, newWindowNodeFunction(rowNumber)),
                             p.values(a));
                 })
@@ -117,16 +115,9 @@ public class TestReplaceWindowWithRowNumber
         return new WindowNode.Function(
                 resolvedFunction,
                 ImmutableList.of(),
-                new WindowNode.Frame(
-                        WindowFrame.Type.RANGE,
-                        UNBOUNDED_PRECEDING,
-                        Optional.empty(),
-                        Optional.empty(),
-                        CURRENT_ROW,
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty()),
+                Optional.empty(),
+                DEFAULT_FRAME,
+                false,
                 false);
     }
 }

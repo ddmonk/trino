@@ -14,23 +14,35 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.connector.CatalogName;
+import com.google.inject.Inject;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
+import io.trino.metadata.SessionPropertyManager;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.ResetSession;
-import io.trino.transaction.TransactionManager;
 
 import java.util.List;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
-import static io.trino.spi.StandardErrorCode.CATALOG_NOT_FOUND;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.metadata.MetadataUtil.getRequiredCatalogHandle;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class ResetSessionTask
         implements DataDefinitionTask<ResetSession>
 {
+    private final Metadata metadata;
+    private final SessionPropertyManager sessionPropertyManager;
+
+    @Inject
+    public ResetSessionTask(Metadata metadata, SessionPropertyManager sessionPropertyManager)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
+    }
+
     @Override
     public String getName()
     {
@@ -38,7 +50,11 @@ public class ResetSessionTask
     }
 
     @Override
-    public ListenableFuture<?> execute(ResetSession statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            ResetSession statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         List<String> parts = statement.getName().getParts();
         if (parts.size() > 2) {
@@ -47,18 +63,19 @@ public class ResetSessionTask
 
         // validate the property name
         if (parts.size() == 1) {
-            metadata.getSessionPropertyManager().getSystemSessionPropertyMetadata(parts.get(0))
-                    .orElseThrow(() -> semanticException(INVALID_SESSION_PROPERTY, statement, "Session property '%s' does not exist", statement.getName()));
+            if (sessionPropertyManager.getSystemSessionPropertyMetadata(parts.get(0)).isEmpty()) {
+                throw semanticException(INVALID_SESSION_PROPERTY, statement, "Session property '%s' does not exist", statement.getName());
+            }
         }
         else {
-            CatalogName catalogName = metadata.getCatalogHandle(stateMachine.getSession(), parts.get(0))
-                    .orElseThrow(() -> semanticException(CATALOG_NOT_FOUND, statement, "Catalog '%s' does not exist", parts.get(0)));
-            metadata.getSessionPropertyManager().getConnectorSessionPropertyMetadata(catalogName, parts.get(1))
-                    .orElseThrow(() -> semanticException(INVALID_SESSION_PROPERTY, statement, "Session property '%s' does not exist", statement.getName()));
+            CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, stateMachine.getSession(), statement, parts.get(0));
+            if (sessionPropertyManager.getConnectorSessionPropertyMetadata(catalogHandle, parts.get(1)).isEmpty()) {
+                throw semanticException(INVALID_SESSION_PROPERTY, statement, "Session property '%s' does not exist", statement.getName());
+            }
         }
 
         stateMachine.addResetSessionProperties(statement.getName().toString());
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

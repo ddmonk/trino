@@ -21,7 +21,8 @@ import com.google.inject.Module;
 import com.google.inject.Scopes;
 import io.airlift.log.Logging;
 import io.trino.client.ClientSelectedRole;
-import io.trino.plugin.hive.HiveHadoop2Plugin;
+import io.trino.plugin.blackhole.BlackHolePlugin;
+import io.trino.plugin.hive.HivePlugin;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -31,37 +32,56 @@ import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.testing.Closeables.closeAll;
 import static io.trino.metadata.MetadataUtil.TableMetadataBuilder.tableMetadataBuilder;
 import static io.trino.spi.connector.SystemTable.Distribution.ALL_NODES;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.lang.String.format;
+import static java.sql.Types.VARCHAR;
+import static java.util.UUID.randomUUID;
+import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Fail.fail;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestJdbcConnection
 {
+    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getName()));
+
     private TestingTrinoServer server;
 
-    @BeforeClass
+    @BeforeAll
     public void setupServer()
             throws Exception
     {
@@ -71,26 +91,38 @@ public class TestJdbcConnection
         server = TestingTrinoServer.builder()
                 .setAdditionalModule(systemTables)
                 .build();
-        server.installPlugin(new HiveHadoop2Plugin());
-        server.createCatalog("hive", "hive-hadoop2", ImmutableMap.<String, String>builder()
+        server.installPlugin(new HivePlugin());
+        server.createCatalog("hive", "hive", ImmutableMap.<String, String>builder()
                 .put("hive.metastore", "file")
                 .put("hive.metastore.catalog.dir", server.getBaseDataDir().resolve("hive").toAbsolutePath().toString())
                 .put("hive.security", "sql-standard")
-                .build());
+                .put("fs.hadoop.enabled", "true")
+                .buildOrThrow());
+        server.installPlugin(new BlackHolePlugin());
+        server.createCatalog("blackhole", "blackhole", ImmutableMap.of());
 
         try (Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
-            statement.execute("SET ROLE admin");
+            statement.execute("SET ROLE admin IN hive");
             statement.execute("CREATE SCHEMA default");
             statement.execute("CREATE SCHEMA fruit");
+            statement.execute(
+                    "CREATE TABLE blackhole.default.devzero(dummy bigint) " +
+                            "WITH (split_count = 100000, pages_per_split = 100000, rows_per_page = 10000)");
+            statement.execute(
+                    "CREATE TABLE blackhole.default.delay(dummy bigint) " +
+                            "WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '60s')");
         }
     }
 
-    @AfterClass(alwaysRun = true)
-    public void tearDownServer()
+    @AfterAll
+    public void tearDown()
             throws Exception
     {
-        server.close();
+        closeAll(
+                server,
+                executor::shutdownNow);
+        server = null;
     }
 
     @Test
@@ -98,11 +130,11 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection()) {
-            assertTrue(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isTrue();
             connection.setAutoCommit(false);
-            assertFalse(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isFalse();
             connection.setAutoCommit(true);
-            assertTrue(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isTrue();
         }
     }
 
@@ -197,7 +229,7 @@ public class TestJdbcConnection
             // invalid catalog
             try (Statement statement = connection.createStatement()) {
                 assertThatThrownBy(() -> statement.execute("USE abc.xyz"))
-                        .hasMessageEndingWith("Catalog does not exist: abc");
+                        .hasMessageEndingWith("Catalog 'abc' not found");
             }
 
             // invalid schema
@@ -224,7 +256,7 @@ public class TestJdbcConnection
         try (Connection connection = createConnection()) {
             assertThat(listSession(connection))
                     .contains("join_distribution_type|AUTOMATIC|AUTOMATIC")
-                    .contains("exchange_compression|false|false");
+                    .contains("exchange_compression_codec|NONE|NONE");
 
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SET SESSION join_distribution_type = 'BROADCAST'");
@@ -232,32 +264,32 @@ public class TestJdbcConnection
 
             assertThat(listSession(connection))
                     .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                    .contains("exchange_compression|false|false");
+                    .contains("exchange_compression_codec|NONE|NONE");
 
             try (Statement statement = connection.createStatement()) {
-                statement.execute("SET SESSION exchange_compression = true");
+                statement.execute("SET SESSION exchange_compression_codec = 'LZ4'");
             }
 
             assertThat(listSession(connection))
                     .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                    .contains("exchange_compression|true|false");
+                    .contains("exchange_compression_codec|LZ4|NONE");
 
             try (Statement statement = connection.createStatement()) {
                 // setting Hive session properties requires the admin role
-                statement.execute("SET ROLE admin");
+                statement.execute("SET ROLE admin IN hive");
             }
 
             for (String part : ImmutableList.of(",", "=", ":", "|", "/", "\\", "'", "\\'", "''", "\"", "\\\"", "[", "]")) {
-                String value = format("/tmp/presto-%s-${USER}", part);
+                String value = format("my-table-%s-name", part);
                 try {
                     try (Statement statement = connection.createStatement()) {
-                        statement.execute(format("SET SESSION hive.temporary_staging_directory_path = '%s'", value.replace("'", "''")));
+                        statement.execute(format("SET SESSION spatial_partitioning_table_name = '%s'", value.replace("'", "''")));
                     }
 
                     assertThat(listSession(connection))
                             .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                            .contains("exchange_compression|true|false")
-                            .contains(format("hive.temporary_staging_directory_path|%s|/tmp/presto-${USER}", value));
+                            .contains("exchange_compression_codec|LZ4|NONE")
+                            .contains(format("spatial_partitioning_table_name|%s|", value));
                 }
                 catch (Exception e) {
                     fail(format("Failed to set session property value to [%s]", value), e);
@@ -325,10 +357,10 @@ public class TestJdbcConnection
                     .put("test.token.foo", "bar")
                     .put("test.token.abc", "xyz")
                     .put("colon", "-::-")
-                    .build();
+                    .buildOrThrow();
             TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
-            assertEquals(trinoConnection.getExtraCredentials(), expectedCredentials);
-            assertEquals(listExtraCredentials(connection), expectedCredentials);
+            assertThat(trinoConnection.getExtraCredentials()).isEqualTo(expectedCredentials);
+            assertThat(listExtraCredentials(connection)).isEqualTo(expectedCredentials);
         }
     }
 
@@ -337,7 +369,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("clientInfo=hello%20world")) {
-            assertEquals(connection.getClientInfo("ClientInfo"), "hello world");
+            assertThat(connection.getClientInfo("ClientInfo")).isEqualTo("hello world");
         }
     }
 
@@ -346,7 +378,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("clientTags=c2,c3")) {
-            assertEquals(connection.getClientInfo("ClientTags"), "c2,c3");
+            assertThat(connection.getClientInfo("ClientTags")).isEqualTo("c2,c3");
         }
     }
 
@@ -355,7 +387,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("traceToken=trace%20me")) {
-            assertEquals(connection.getClientInfo("TraceToken"), "trace me");
+            assertThat(connection.getClientInfo("TraceToken")).isEqualTo("trace me");
         }
     }
 
@@ -385,8 +417,8 @@ public class TestJdbcConnection
     {
         try (Connection connection = createConnection("roles=hive:" + roleParameterValue)) {
             TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
-            assertEquals(trinoConnection.getRoles(), ImmutableMap.of("hive", clientSelectedRole));
-            assertEquals(listCurrentRoles(connection), currentRoles);
+            assertThat(trinoConnection.getRoles()).isEqualTo(ImmutableMap.of("hive", clientSelectedRole));
+            assertThat(listCurrentRoles(connection)).isEqualTo(currentRoles);
         }
     }
 
@@ -394,15 +426,97 @@ public class TestJdbcConnection
     public void testSessionProperties()
             throws SQLException
     {
-        try (Connection connection = createConnection("roles=hive:admin&sessionProperties=hive.temporary_staging_directory_path:/tmp;execution_policy:phased")) {
+        try (Connection connection = createConnection("roles=hive:admin&sessionProperties=hive.hive_views_legacy_translation:true;execution_policy:all-at-once")) {
             TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
             assertThat(trinoConnection.getSessionProperties())
-                    .extractingByKeys("hive.temporary_staging_directory_path", "execution_policy")
-                    .containsExactly("/tmp", "phased");
+                    .extractingByKeys("hive.hive_views_legacy_translation", "execution_policy")
+                    .containsExactly("true", "all-at-once");
             assertThat(listSession(connection)).containsAll(ImmutableSet.of(
-                    "execution_policy|phased|all-at-once",
-                    "hive.temporary_staging_directory_path|/tmp|/tmp/presto-${USER}"));
+                    "execution_policy|all-at-once|phased",
+                    "hive.hive_views_legacy_translation|true|false"));
         }
+    }
+
+    @Test
+    public void testSessionUser()
+            throws SQLException
+    {
+        try (Connection connection = createConnection()) {
+            assertThat(getSingleStringColumn(connection, "select current_user")).isEqualTo("admin");
+            TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
+            String impersonatedUser = "alice";
+            trinoConnection.setSessionUser(impersonatedUser);
+            assertThat(getSingleStringColumn(connection, "select current_user")).isEqualTo(impersonatedUser);
+            trinoConnection.clearSessionUser();
+            assertThat(getSingleStringColumn(connection, "select current_user")).isEqualTo("admin");
+        }
+    }
+
+    @Test
+    public void testPreparedStatementCreationOption()
+            throws SQLException
+    {
+        String sql = "SELECT 123";
+        try (Connection connection = createConnection()) {
+            try (PreparedStatement statement = connection.prepareStatement(sql, Statement.NO_GENERATED_KEYS)) {
+                assertThat(statement).isNotNull();
+            }
+            assertThatThrownBy(() -> connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS))
+                    .isInstanceOf(SQLFeatureNotSupportedException.class)
+                    .hasMessage("Auto generated keys must be NO_GENERATED_KEYS");
+        }
+    }
+
+    /**
+     * @see TestJdbcStatement#testCancellationOnStatementClose()
+     * @see TestJdbcStatement#testConcurrentCancellationOnStatementClose()
+     */
+    // TODO https://github.com/trinodb/trino/issues/10096 - enable test once concurrent jdbc statements are supported
+    @Test
+    @Timeout(60)
+    @Disabled
+    public void testConcurrentCancellationOnConnectionClose()
+            throws Exception
+    {
+        testConcurrentCancellationOnConnectionClose(true);
+        testConcurrentCancellationOnConnectionClose(false);
+    }
+
+    private void testConcurrentCancellationOnConnectionClose(boolean autoCommit)
+            throws Exception
+    {
+        String sql = "SELECT * FROM blackhole.default.delay -- test cancellation " + randomUUID();
+        List<Future<?>> futures;
+        Connection connection = createConnection();
+        connection.setAutoCommit(autoCommit);
+        futures = range(0, 10)
+                .mapToObj(i -> executor.submit(() -> {
+                    try (Statement statement = connection.createStatement();
+                            ResultSet resultSet = statement.executeQuery(sql)) {
+                        //noinspection StatementWithEmptyBody
+                        while (resultSet.next()) {
+                            // consume results
+                        }
+                    }
+                    return null;
+                }))
+                .collect(toImmutableList());
+
+        // Wait for the queries to be started
+        assertEventually(() -> {
+            futures.forEach(TestJdbcConnection::assertThatFutureIsBlocked);
+            assertThat(listQueryStatuses(sql))
+                    .hasSize(futures.size());
+        });
+
+        // Closing connection should cancel queries
+        connection.close();
+
+        // verify that all queries were cancelled
+        futures.forEach(future -> assertThatThrownBy(future::get).isNotNull());
+        assertThat(listQueryErrorCodes(sql))
+                .hasSize(futures.size())
+                .allMatch(errorCode -> "TRANSACTION_ALREADY_ABORTED".equals(errorCode) || "USER_CANCELED".equals(errorCode));
     }
 
     private Connection createConnection()
@@ -457,7 +571,7 @@ public class TestJdbcConnection
                 builder.put(rs.getString("name"), rs.getString("value"));
             }
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     private static Set<String> listCurrentRoles(Connection connection)
@@ -465,12 +579,52 @@ public class TestJdbcConnection
     {
         ImmutableSet.Builder<String> builder = ImmutableSet.builder();
         try (Statement statement = connection.createStatement();
-                ResultSet rs = statement.executeQuery("SHOW CURRENT ROLES")) {
+                ResultSet rs = statement.executeQuery("SHOW CURRENT ROLES IN hive")) {
             while (rs.next()) {
                 builder.add(rs.getString("role"));
             }
         }
         return builder.build();
+    }
+
+    private List<String> listQueryStatuses(String sql)
+    {
+        return listSingleStringColumn(format("SELECT state FROM system.runtime.queries WHERE query = '%s'", sql));
+    }
+
+    private List<String> listQueryErrorCodes(String sql)
+    {
+        return listSingleStringColumn(format("SELECT error_code FROM system.runtime.queries WHERE query = '%s'", sql));
+    }
+
+    private List<String> listSingleStringColumn(String sql)
+    {
+        ImmutableList.Builder<String> statuses = ImmutableList.builder();
+        try (Connection connection = createConnection();
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+            assertThat(resultSet.getMetaData().getColumnCount()).isOne();
+            assertThat(resultSet.getMetaData().getColumnType(1)).isEqualTo(VARCHAR);
+            while (resultSet.next()) {
+                statuses.add(resultSet.getString(1));
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+        return statuses.build();
+    }
+
+    private String getSingleStringColumn(Connection connection, String sql)
+            throws SQLException
+    {
+        try (Statement statement = connection.createStatement(); ResultSet resultSet = statement.executeQuery(sql)) {
+            assertThat(resultSet.getMetaData().getColumnCount()).isOne();
+            assertThat(resultSet.next()).isTrue();
+            String result = resultSet.getString(1);
+            assertThat(resultSet.next()).isFalse();
+            return result;
+        }
     }
 
     private static void assertConnectionSource(Connection connection, String expectedSource)
@@ -486,9 +640,9 @@ public class TestJdbcConnection
                 "SELECT source FROM system.runtime.queries WHERE query_id = ?")) {
             statement.setString(1, queryId);
             try (ResultSet rs = statement.executeQuery()) {
-                assertTrue(rs.next());
+                assertThat(rs.next()).isTrue();
                 assertThat(rs.getString("source")).isEqualTo(expectedSource);
-                assertFalse(rs.next());
+                assertThat(rs.next()).isFalse();
             }
         }
     }
@@ -522,5 +676,20 @@ public class TestJdbcConnection
             session.getIdentity().getExtraCredentials().forEach(table::addRow);
             return table.build().cursor();
         }
+    }
+
+    static void assertThatFutureIsBlocked(Future<?> future)
+    {
+        if (!future.isDone()) {
+            return;
+        }
+        // Calling Future::get to see if it failed and if so to learn why
+        try {
+            future.get();
+        }
+        catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        fail("Expecting future to be blocked");
     }
 }

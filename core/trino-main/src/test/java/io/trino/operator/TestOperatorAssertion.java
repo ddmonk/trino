@@ -13,35 +13,40 @@
  */
 package io.trino.operator;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.Duration;
 import io.trino.spi.Page;
-import io.trino.testing.assertions.Assert;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import static java.util.Collections.emptyIterator;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestOperatorAssertion
 {
     private ScheduledExecutorService executor;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         executor = newSingleThreadScheduledExecutor();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
@@ -50,9 +55,9 @@ public class TestOperatorAssertion
     @Test
     public void testToPagesWithBlockedOperator()
     {
-        Operator operator = new BlockedOperator(Duration.valueOf("15 ms"));
+        Operator operator = new BlockedOperator(new Duration(15, MILLISECONDS));
         List<Page> pages = OperatorAssertion.toPages(operator, emptyIterator());
-        Assert.assertEquals(pages, ImmutableList.of());
+        assertThat(pages).isEmpty();
     }
 
     private class BlockedOperator
@@ -61,7 +66,7 @@ public class TestOperatorAssertion
         private final Duration unblockAfter;
         private final OperatorContext operatorContext;
 
-        private ListenableFuture<?> isBlocked = NOT_BLOCKED;
+        private ListenableFuture<Void> isBlocked = NOT_BLOCKED;
 
         public BlockedOperator(Duration unblockAfter)
         {
@@ -76,7 +81,7 @@ public class TestOperatorAssertion
         }
 
         @Override
-        public ListenableFuture<?> isBlocked()
+        public ListenableFuture<Void> isBlocked()
         {
             return isBlocked;
         }
@@ -97,9 +102,7 @@ public class TestOperatorAssertion
         public void finish()
         {
             if (this.isBlocked == NOT_BLOCKED) {
-                SettableFuture<?> isBlocked = SettableFuture.create();
-                this.isBlocked = isBlocked;
-                executor.schedule(() -> isBlocked.set(null), unblockAfter.toMillis(), TimeUnit.MILLISECONDS);
+                this.isBlocked = Futures.scheduleAsync(Futures::immediateVoidFuture, unblockAfter.toMillis(), MILLISECONDS, executor);
             }
         }
 

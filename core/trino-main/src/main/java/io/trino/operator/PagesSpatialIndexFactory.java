@@ -16,11 +16,10 @@ package io.trino.operator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.spi.type.Type;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
+import jakarta.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -66,7 +65,7 @@ public class PagesSpatialIndexFactory
     @Nullable
     private Supplier<PagesSpatialIndex> pagesSpatialIndex;
 
-    private final SettableFuture<?> destroyed = SettableFuture.create();
+    private final SettableFuture<Void> destroyed = SettableFuture.create();
 
     public PagesSpatialIndexFactory(List<Type> types, List<Type> outputTypes)
     {
@@ -114,7 +113,7 @@ public class PagesSpatialIndexFactory
      * <p>
      * Returns a Future that completes once all the {@link SpatialJoinOperator}s have completed.
      */
-    public ListenableFuture<?> lendPagesSpatialIndex(Supplier<PagesSpatialIndex> pagesSpatialIndex)
+    public ListenableFuture<Void> lendPagesSpatialIndex(Supplier<PagesSpatialIndex> pagesSpatialIndex)
     {
         requireNonNull(pagesSpatialIndex, "pagesSpatialIndex is null");
 

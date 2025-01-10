@@ -14,7 +14,7 @@
 package io.trino.plugin.hive.metastore.file;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -32,25 +32,25 @@ public class TestFileHiveMetastoreConfig
         assertRecordedDefaults(recordDefaults(FileHiveMetastoreConfig.class)
                 .setCatalogDirectory(null)
                 .setVersionCompatibility(NOT_SUPPORTED)
-                .setMetastoreUser("presto")
-                .setAssumeCanonicalPartitionKeys(false));
+                .setDisableLocationChecks(false)
+                .setMetastoreUser("presto"));
     }
 
     @Test
     public void testExplicitPropertyMapping()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.metastore.catalog.dir", "some path")
                 .put("hive.metastore.version-compatibility", "UNSAFE_ASSUME_COMPATIBILITY")
+                .put("hive.metastore.disable-location-checks", "true")
                 .put("hive.metastore.user", "some user")
-                .put("hive.metastore.assume-canonical-partition-keys", "true")
-                .build();
+                .buildOrThrow();
 
         FileHiveMetastoreConfig expected = new FileHiveMetastoreConfig()
                 .setCatalogDirectory("some path")
                 .setVersionCompatibility(UNSAFE_ASSUME_COMPATIBILITY)
-                .setMetastoreUser("some user")
-                .setAssumeCanonicalPartitionKeys(true);
+                .setDisableLocationChecks(true)
+                .setMetastoreUser("some user");
 
         assertFullMapping(properties, expected);
     }

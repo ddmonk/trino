@@ -19,17 +19,17 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
-import io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.joins.JoinGraph;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.sql.tree.Expression;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -43,8 +43,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SystemSessionProperties.getJoinReorderingStrategy;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.AUTOMATIC;
-import static io.trino.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.ELIMINATE_CROSS_JOINS;
+import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy.AUTOMATIC;
+import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy.ELIMINATE_CROSS_JOINS;
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.plan.Patterns.join;
 import static java.util.Comparator.comparing;
@@ -54,12 +54,6 @@ public class EliminateCrossJoins
         implements Rule<JoinNode>
 {
     private static final Pattern<JoinNode> PATTERN = join();
-    private final Metadata metadata;
-
-    public EliminateCrossJoins(Metadata metadata)
-    {
-        this.metadata = metadata;
-    }
 
     @Override
     public Pattern<JoinNode> getPattern()
@@ -78,7 +72,7 @@ public class EliminateCrossJoins
     @Override
     public Result apply(JoinNode node, Captures captures, Context context)
     {
-        JoinGraph joinGraph = JoinGraph.buildFrom(metadata, node, context.getLookup(), context.getIdAllocator());
+        JoinGraph joinGraph = JoinGraph.buildFrom(node, context.getLookup(), context.getIdAllocator());
         if (joinGraph.size() < 3 || !joinGraph.isContainsCrossJoin()) {
             return Result.empty();
         }
@@ -179,7 +173,7 @@ public class EliminateCrossJoins
 
             result = new JoinNode(
                     idAllocator.getNextId(),
-                    JoinNode.Type.INNER,
+                    JoinType.INNER,
                     result,
                     rightNode,
                     criteria.build(),

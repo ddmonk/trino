@@ -89,6 +89,11 @@ public abstract class PlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
+    public R visitDynamicFilterSource(DynamicFilterSourceNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
     public R visitJoin(JoinNode node, C context)
     {
         return visitPlan(node, context);
@@ -119,22 +124,42 @@ public abstract class PlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
+    public R visitRefreshMaterializedView(RefreshMaterializedViewNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
     public R visitTableWriter(TableWriterNode node, C context)
     {
         return visitPlan(node, context);
     }
 
-    public R visitDelete(DeleteNode node, C context)
+    public R visitTableExecute(TableExecuteNode node, C context)
     {
         return visitPlan(node, context);
     }
 
-    public R visitUpdate(UpdateNode node, C context)
+    public R visitSimpleTableExecuteNode(SimpleTableExecuteNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitMergeWriter(MergeWriterNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitMergeProcessor(MergeProcessorNode node, C context)
     {
         return visitPlan(node, context);
     }
 
     public R visitTableDelete(TableDeleteNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableUpdate(TableUpdateNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -215,6 +240,26 @@ public abstract class PlanVisitor<R, C>
     }
 
     public R visitCorrelatedJoin(CorrelatedJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitPatternRecognition(PatternRecognitionNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableFunction(TableFunctionNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableFunctionProcessor(TableFunctionProcessorNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitAdaptivePlanNode(AdaptivePlanNode node, C context)
     {
         return visitPlan(node, context);
     }

@@ -13,8 +13,6 @@
  */
 package io.trino.spi.type;
 
-import com.fasterxml.jackson.annotation.JsonValue;
-
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -47,12 +45,15 @@ public final class SqlTimestampWithTimeZone
 
     public static SqlTimestampWithTimeZone newInstance(int precision, long epochMillis, int picosOfMilli, TimeZoneKey timeZoneKey)
     {
+        if (precision < 0 || precision > 12) {
+            throw new IllegalArgumentException("Invalid precision: " + precision);
+        }
         if (precision <= 3) {
             if (picosOfMilli != 0) {
                 throw new IllegalArgumentException(format("Expected picosOfMilli to be 0 for precision %s: %s", precision, picosOfMilli));
             }
             if (round(epochMillis, 3 - precision) != epochMillis) {
-                throw new IllegalArgumentException(format("Expected 0s for digits beyond precision %s: epochMicros = %s", precision, epochMillis));
+                throw new IllegalArgumentException(format("Expected 0s for digits beyond precision %s: epochMillis = %s", precision, epochMillis));
             }
         }
         else {
@@ -70,6 +71,9 @@ public final class SqlTimestampWithTimeZone
 
     private static SqlTimestampWithTimeZone newInstanceWithRounding(int precision, long epochMillis, int picosOfMilli, TimeZoneKey sessionTimeZoneKey)
     {
+        if (precision < 0 || precision > 12) {
+            throw new IllegalArgumentException("Invalid precision: " + precision);
+        }
         if (precision < 3) {
             epochMillis = round(epochMillis, 3 - precision);
             picosOfMilli = 0;
@@ -126,7 +130,6 @@ public final class SqlTimestampWithTimeZone
         return newInstanceWithRounding(precision, epochMillis, picosOfMilli, timeZoneKey);
     }
 
-    @JsonValue
     @Override
     public String toString()
     {

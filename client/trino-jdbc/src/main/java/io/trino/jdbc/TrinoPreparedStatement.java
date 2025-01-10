@@ -45,10 +45,12 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.util.ArrayList;
@@ -56,6 +58,7 @@ import java.util.Calendar;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -93,6 +96,14 @@ public class TrinoPreparedStatement
                     .append(ISO_LOCAL_TIME)
                     .toFormatter();
 
+    private static final DateTimeFormatter OFFSET_DATE_TIME_FORMATTER =
+            new DateTimeFormatterBuilder()
+                    .append(ISO_LOCAL_DATE)
+                    .appendLiteral(' ')
+                    .append(ISO_LOCAL_TIME)
+                    .appendOffset("+HH:mm", "+00:00")
+                    .toFormatter();
+
     private static final DateTimeFormatter OFFSET_TIME_FORMATTER =
             new DateTimeFormatterBuilder()
                     .append(ISO_LOCAL_TIME)
@@ -108,21 +119,25 @@ public class TrinoPreparedStatement
     private final String statementName;
     private final String originalSql;
     private boolean isBatch;
+    private boolean prepareStatementExecuted;
 
-    TrinoPreparedStatement(TrinoConnection connection, String statementName, String sql)
+    TrinoPreparedStatement(TrinoConnection connection, Consumer<TrinoStatement> onClose, String statementName, String sql)
             throws SQLException
     {
-        super(connection);
+        super(connection, onClose);
         this.statementName = requireNonNull(statementName, "statementName is null");
         this.originalSql = requireNonNull(sql, "sql is null");
-        super.execute(format("PREPARE %s FROM %s", statementName, sql));
+        if (connection().useExplicitPrepare()) {
+            super.execute(format("PREPARE %s FROM %s", statementName, sql));
+            prepareStatementExecuted = true;
+        }
     }
 
     @Override
     public void close()
             throws SQLException
     {
-        super.execute(format("DEALLOCATE PREPARE %s", statementName));
+        optionalConnection().ifPresent(x -> x.removePreparedStatement(statementName));
         super.close();
     }
 
@@ -427,6 +442,9 @@ public class TrinoPreparedStatement
             // TODO validate proper format
             return (String) value;
         }
+        else if (value instanceof Instant) {
+            return OFFSET_DATE_TIME_FORMATTER.format(((Instant) value).atOffset(ZoneOffset.UTC));
+        }
         throw invalidConversion(value, "timestamp with time zone");
     }
 
@@ -593,6 +611,12 @@ public class TrinoPreparedStatement
         else if (x instanceof LocalDate) {
             setAsDate(parameterIndex, x);
         }
+        else if (x instanceof LocalDateTime) {
+            setAsTimestamp(parameterIndex, x);
+        }
+        else if (x instanceof Instant) {
+            setAsTimestampWithTimeZone(parameterIndex, x);
+        }
         else if (x instanceof Time) {
             setTime(parameterIndex, (Time) x);
         }
@@ -682,6 +706,8 @@ public class TrinoPreparedStatement
     public ResultSetMetaData getMetaData()
             throws SQLException
     {
+        prepareStatementIfNecessary();
+
         try (Statement statement = connection().createStatement(); ResultSet resultSet = statement.executeQuery("DESCRIBE OUTPUT " + statementName)) {
             return new TrinoResultSetMetaData(getDescribeOutputColumnInfoList(resultSet));
         }
@@ -719,7 +745,11 @@ public class TrinoPreparedStatement
     public ParameterMetaData getParameterMetaData()
             throws SQLException
     {
-        throw new NotImplementedException("PreparedStatement", "getParameterMetaData");
+        prepareStatementIfNecessary();
+
+        try (Statement statement = connection().createStatement(); ResultSet resultSet = statement.executeQuery("DESCRIBE INPUT " + statementName)) {
+            return new TrinoParameterMetaData(getParamerters(resultSet));
+        }
     }
 
     @Override
@@ -983,7 +1013,19 @@ public class TrinoPreparedStatement
         }
     }
 
-    private static String getExecuteSql(String statementName, List<String> values)
+    private String getExecuteImmediateSql(List<String> values)
+    {
+        StringBuilder sql = new StringBuilder();
+        sql.append("EXECUTE IMMEDIATE ");
+        sql.append(formatStringLiteral(originalSql));
+        if (!values.isEmpty()) {
+            sql.append(" USING ");
+            Joiner.on(", ").appendTo(sql, values);
+        }
+        return sql.toString();
+    }
+
+    private String getLegacySql(String statementName, List<String> values)
     {
         StringBuilder sql = new StringBuilder();
         sql.append("EXECUTE ").append(statementName);
@@ -992,6 +1034,14 @@ public class TrinoPreparedStatement
             Joiner.on(", ").appendTo(sql, values);
         }
         return sql.toString();
+    }
+
+    private String getExecuteSql(String statementName, List<String> values)
+            throws SQLException
+    {
+        return connection().useExplicitPrepare()
+                ? getLegacySql(statementName, values)
+                : getExecuteImmediateSql(values);
     }
 
     private static String formatLiteral(String type, String x)
@@ -1071,6 +1121,26 @@ public class TrinoPreparedStatement
         return format("CAST(NULL AS %s)", type);
     }
 
+    private static List<ColumnInfo> getParamerters(ResultSet resultSet)
+            throws SQLException
+    {
+        ImmutableList.Builder<ColumnInfo> builder = ImmutableList.builder();
+        while (resultSet.next()) {
+            ClientTypeSignature clientTypeSignature = getClientTypeSignatureFromTypeString(resultSet.getString("Type"));
+            ColumnInfo.Builder columnInfoBuilder = new ColumnInfo.Builder()
+                    .setCatalogName("")
+                    .setSchemaName("")
+                    .setTableName("")
+                    .setColumnLabel(resultSet.getString("Position"))
+                    .setColumnName(resultSet.getString("Position"))
+                    .setColumnTypeSignature(clientTypeSignature)
+                    .setNullable(ColumnInfo.Nullable.UNKNOWN);
+            setTypeInfo(columnInfoBuilder, clientTypeSignature);
+            builder.add(columnInfoBuilder.build());
+        }
+        return builder.build();
+    }
+
     private static List<ColumnInfo> getDescribeOutputColumnInfoList(ResultSet resultSet)
             throws SQLException
     {
@@ -1093,6 +1163,22 @@ public class TrinoPreparedStatement
             list.add(builder.build());
         }
         return list.build();
+    }
+
+    /*
+    When explicitPrepare is disabled, the PREPARE statement won't be executed unless needed
+    e.g. when getMetadata() or getParameterMetadata() are called.
+    When needed, just make sure it is executed only once, even if the metadata methods are called many times
+     */
+    private void prepareStatementIfNecessary()
+            throws SQLException
+    {
+        if (prepareStatementExecuted) {
+            return;
+        }
+
+        super.execute(format("PREPARE %s FROM %s", statementName, originalSql));
+        prepareStatementExecuted = true;
     }
 
     @VisibleForTesting

@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -30,17 +31,17 @@ import static java.util.Objects.requireNonNull;
  * Defines the possible values of a single variable in terms of its valid scalar values and nullability.
  * <p>
  * For example:
- * <p>
  * <ul>
  * <li>Domain.none() => no scalar values allowed, NULL not allowed
  * <li>Domain.all() => all scalar values allowed, NULL allowed
  * <li>Domain.onlyNull() => no scalar values allowed, NULL allowed
  * <li>Domain.notNull() => all scalar values allowed, NULL not allowed
  * </ul>
- * <p>
  */
 public final class Domain
 {
+    private static final int INSTANCE_SIZE = instanceSize(Domain.class);
+
     public static final int DEFAULT_COMPACTION_THRESHOLD = 32;
 
     private final ValueSet values;
@@ -82,18 +83,28 @@ public final class Domain
 
     public static Domain singleValue(Type type, Object value)
     {
-        return new Domain(ValueSet.of(type, value), false);
+        return singleValue(type, value, false);
+    }
+
+    public static Domain singleValue(Type type, Object value, boolean nullAllowed)
+    {
+        return new Domain(ValueSet.of(type, value), nullAllowed);
     }
 
     public static Domain multipleValues(Type type, List<?> values)
+    {
+        return multipleValues(type, values, false);
+    }
+
+    public static Domain multipleValues(Type type, List<?> values, boolean nullAllowed)
     {
         if (values.isEmpty()) {
             throw new IllegalArgumentException("values cannot be empty");
         }
         if (values.size() == 1) {
-            return singleValue(type, values.get(0));
+            return singleValue(type, values.get(0), nullAllowed);
         }
-        return new Domain(ValueSet.of(type, values.get(0), values.subList(1, values.size()).toArray()), false);
+        return new Domain(ValueSet.of(type, values.get(0), values.subList(1, values.size()).toArray()), nullAllowed);
     }
 
     public Type getType()
@@ -133,9 +144,7 @@ public final class Domain
         if (nullAllowed) {
             return values.isNone();
         }
-        else {
-            return values.isSingleValue();
-        }
+        return values.isSingleValue();
     }
 
     public boolean isOnlyNull()
@@ -160,9 +169,7 @@ public final class Domain
         if (nullAllowed) {
             return null;
         }
-        else {
-            return values.getSingleValue();
-        }
+        return values.getSingleValue();
     }
 
     public boolean includesNullableValue(Object value)
@@ -170,12 +177,12 @@ public final class Domain
         return value == null ? nullAllowed : values.containsValue(value);
     }
 
-    boolean isNullableDiscreteSet()
+    public boolean isNullableDiscreteSet()
     {
         return values.isNone() ? nullAllowed : values.isDiscreteSet();
     }
 
-    DiscreteSet getNullableDiscreteSet()
+    public DiscreteSet getNullableDiscreteSet()
     {
         if (!isNullableDiscreteSet()) {
             throw new IllegalStateException("Domain is not a nullable discrete set");
@@ -198,7 +205,10 @@ public final class Domain
     public boolean contains(Domain other)
     {
         checkCompatibility(other);
-        return this.union(other).equals(this);
+        if (!this.isNullAllowed() && other.isNullAllowed()) {
+            return false;
+        }
+        return values.contains(other.getValues());
     }
 
     public Domain intersect(Domain other)
@@ -308,15 +318,34 @@ public final class Domain
     @Override
     public String toString()
     {
-        return "[ " + (nullAllowed ? "NULL, " : "") + values.toString() + " ]";
+        return toString(ToStringSession.INSTANCE);
     }
 
     public String toString(ConnectorSession session)
     {
-        return "[ " + (nullAllowed ? "NULL, " : "") + values.toString(session) + " ]";
+        return toString(session, 10);
     }
 
-    static class DiscreteSet
+    public String toString(ConnectorSession session, int limit)
+    {
+        if (isAll()) {
+            return "ALL";
+        }
+        if (isNone()) {
+            return "NONE";
+        }
+        if (isOnlyNull()) {
+            return "[NULL]";
+        }
+        return "[ " + (nullAllowed ? "NULL, " : "") + values.toString(session, limit) + " ]";
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE + values.getRetainedSizeInBytes();
+    }
+
+    public static class DiscreteSet
     {
         private final List<Object> nonNullValues;
         private final boolean containsNull;
@@ -330,12 +359,12 @@ public final class Domain
             }
         }
 
-        List<Object> getNonNullValues()
+        public List<Object> getNonNullValues()
         {
             return nonNullValues;
         }
 
-        boolean containsNull()
+        public boolean containsNull()
         {
             return containsNull;
         }

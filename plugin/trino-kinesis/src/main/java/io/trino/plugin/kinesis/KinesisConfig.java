@@ -15,18 +15,22 @@ package io.trino.plugin.kinesis;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.configuration.DefunctConfig;
 import io.airlift.units.Duration;
-
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
 import java.util.concurrent.TimeUnit;
 
+@DefunctConfig("kinesis.checkpoint-interval")
 public class KinesisConfig
 {
     private String defaultSchema = "default";
     private String tableDescriptionLocation = "etc/kinesis/";
+    private Duration tableDescriptionRefreshInterval = new Duration(10, TimeUnit.MINUTES);
     private boolean hideInternalColumns = true;
     private String awsRegion = "us-east-1";
     private int batchSize = 10000;
@@ -41,7 +45,6 @@ public class KinesisConfig
     private boolean checkpointEnabled;
     private long dynamoReadCapacity = 50L;
     private long dynamoWriteCapacity = 10L;
-    private Duration checkpointInterval = new Duration(60000, TimeUnit.MILLISECONDS);
     private String logicalProcessName = "process1";
     private int iteratorNumber;
 
@@ -56,6 +59,21 @@ public class KinesisConfig
     public KinesisConfig setTableDescriptionLocation(String tableDescriptionLocation)
     {
         this.tableDescriptionLocation = tableDescriptionLocation;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1ms")
+    public Duration getTableDescriptionRefreshInterval()
+    {
+        return tableDescriptionRefreshInterval;
+    }
+
+    @Config("kinesis.table-description-refresh-interval")
+    @ConfigDescription("How often to get the table description from S3")
+    public KinesisConfig setTableDescriptionRefreshInterval(Duration tableDescriptionRefreshInterval)
+    {
+        this.tableDescriptionRefreshInterval = tableDescriptionRefreshInterval;
         return this;
     }
 
@@ -106,6 +124,7 @@ public class KinesisConfig
 
     @Config("kinesis.secret-key")
     @ConfigDescription("S3 Secret Key to access s3 locations")
+    @ConfigSecuritySensitive
     public KinesisConfig setSecretKey(String secretKey)
     {
         this.secretKey = secretKey;
@@ -257,19 +276,6 @@ public class KinesisConfig
     public KinesisConfig setDynamoWriteCapacity(long dynamoWriteCapacity)
     {
         this.dynamoWriteCapacity = dynamoWriteCapacity;
-        return this;
-    }
-
-    public Duration getCheckpointInterval()
-    {
-        return checkpointInterval;
-    }
-
-    @Config("kinesis.checkpoint-interval")
-    @ConfigDescription("Intervals at which to checkpoint shard iterator details")
-    public KinesisConfig setCheckpointInterval(Duration checkpointInterval)
-    {
-        this.checkpointInterval = checkpointInterval;
         return this;
     }
 

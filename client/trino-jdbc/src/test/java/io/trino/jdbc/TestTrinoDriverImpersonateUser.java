@@ -19,25 +19,32 @@ import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.BasicPrincipal;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.Principal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 import java.util.Properties;
 
 import static com.google.common.io.Resources.getResource;
 import static java.lang.String.format;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestTrinoDriverImpersonateUser
 {
     private static final String TEST_USER = "test_user";
@@ -45,19 +52,23 @@ public class TestTrinoDriverImpersonateUser
 
     private TestingTrinoServer server;
 
-    @BeforeClass
+    @BeforeAll
     public void setup()
+            throws Exception
     {
+        Path passwordConfigDummy = Files.createTempFile("passwordConfigDummy", null);
+        passwordConfigDummy.toFile().deleteOnExit();
         server = TestingTrinoServer.builder()
                 .setProperties(ImmutableMap.<String, String>builder()
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
                         .put("http-server.authentication.type", "password")
                         .put("http-server.https.enabled", "true")
-                        .put("http-server.https.keystore.path", getResource("localhost.keystore").getPath())
+                        .put("http-server.https.keystore.path", new File(getResource("localhost.keystore").toURI()).getPath())
                         .put("http-server.https.keystore.key", "changeit")
-                        .build())
+                        .buildOrThrow())
                 .build();
 
-        server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticator(TestTrinoDriverImpersonateUser::authenticate);
+        server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestTrinoDriverImpersonateUser::authenticate);
     }
 
     private static Principal authenticate(String user, String password)
@@ -68,11 +79,12 @@ public class TestTrinoDriverImpersonateUser
         throw new AccessDeniedException("Invalid credentials");
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
             throws Exception
     {
         server.close();
+        server = null;
     }
 
     @Test
@@ -86,36 +98,36 @@ public class TestTrinoDriverImpersonateUser
 
     @Test
     public void testQueryUserNotSpecified()
-            throws SQLException
+            throws Exception
     {
-        assertEquals(trySelectCurrentUser(ImmutableMap.of("user", TEST_USER, "password", PASSWORD)), TEST_USER);
+        assertThat(trySelectCurrentUser(ImmutableMap.of("user", TEST_USER, "password", PASSWORD))).isEqualTo(TEST_USER);
     }
 
     @Test
     public void testImpersonateUser()
-            throws SQLException
+            throws Exception
     {
-        assertEquals(trySelectCurrentUser(ImmutableMap.of("user", TEST_USER, "password", PASSWORD, "sessionUser", "differentUser")), "differentUser");
+        assertThat(trySelectCurrentUser(ImmutableMap.of("user", TEST_USER, "password", PASSWORD, "sessionUser", "differentUser"))).isEqualTo("differentUser");
     }
 
     private String trySelectCurrentUser(Map<String, String> additionalProperties)
-            throws SQLException
+            throws Exception
     {
         try (Connection connection = createConnection(additionalProperties);
                 Statement statement = connection.createStatement();
                 ResultSet resultSet = statement.executeQuery("SELECT current_user")) {
-            assertTrue(resultSet.next());
+            assertThat(resultSet.next()).isTrue();
             return resultSet.getString(1);
         }
     }
 
     private Connection createConnection(Map<String, String> additionalProperties)
-            throws SQLException
+            throws Exception
     {
         String url = format("jdbc:trino://localhost:%s", server.getHttpsAddress().getPort());
         Properties properties = new Properties();
         properties.setProperty("SSL", "true");
-        properties.setProperty("SSLTrustStorePath", getResource("localhost.truststore").getPath());
+        properties.setProperty("SSLTrustStorePath", new File(getResource("localhost.truststore").toURI()).getPath());
         properties.setProperty("SSLTrustStorePassword", "changeit");
         additionalProperties.forEach(properties::setProperty);
         return DriverManager.getConnection(url, properties);

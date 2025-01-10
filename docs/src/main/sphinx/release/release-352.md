@@ -2,7 +2,7 @@
 
 ## General
 
-* Add support for [`WINDOW` clause](window_clause). ({issue}`651`)
+* Add support for [`WINDOW` clause](window-clause). ({issue}`651`)
 * Add support for {doc}`/sql/update`. ({issue}`5861`)
 * Add {func}`version` function. ({issue}`4627`)
 * Allow prepared statement parameters for `SHOW STATS`. ({issue}`6582`)
@@ -56,7 +56,9 @@
 
 * Add `UPDATE` support for ACID tables. ({issue}`5861`)
 * Match columns by index rather than by name by default for ORC ACID tables. ({issue}`6479`)
-* Match columns by name rather than by index by default for Parquet files. ({issue}`6479`)
+* Match columns by name rather than by index by default for Parquet files.
+  This can be changed using `hive.parquet.use-column-names` configuration property and `parquet_use_column_names`
+  session property. ({issue}`6479`)
 * Remove the `hive.partition-use-column-names` configuration property and the
   `partition_use_column_names ` session property. This is now determined automatically. ({issue}`6479`)
 * Support timestamps with microsecond or nanosecond precision (as configured with

@@ -17,10 +17,13 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.log.Logger;
 import io.trino.tests.product.launcher.env.common.EnvironmentExtender;
 
+import java.io.PrintStream;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.util.Collections.newSetFromMap;
 import static java.util.Objects.requireNonNull;
 
@@ -40,10 +43,11 @@ public abstract class EnvironmentProvider
         this.bases = ImmutableList.copyOf(requireNonNull(bases, "bases is null"));
     }
 
-    public final Environment.Builder createEnvironment(String name, EnvironmentConfig environmentConfig)
+    public final Environment.Builder createEnvironment(String name, PrintStream printStream, EnvironmentConfig environmentConfig, Map<String, String> extraOptions)
     {
         requireNonNull(environmentConfig, "environmentConfig is null");
-        Environment.Builder builder = Environment.builder(name);
+        requireNonNull(extraOptions, "extraOptions is null");
+        Environment.Builder builder = Environment.builder(name, printStream);
 
         // Environment is created by applying bases, environment definition and environment config to builder
         ImmutableList<EnvironmentExtender> extenders = ImmutableList.<EnvironmentExtender>builder()
@@ -53,17 +57,31 @@ public abstract class EnvironmentProvider
                 .build();
 
         Set<EnvironmentExtender> seen = newSetFromMap(new IdentityHashMap<>());
-        extenders.forEach(extender -> extend(extender, builder, seen));
+        extenders.forEach(extender -> extend(extender, builder, extraOptions, seen));
         return builder;
     }
 
-    private void extend(EnvironmentExtender extender, Environment.Builder builder, Set<EnvironmentExtender> seen)
+    private void extend(EnvironmentExtender extender, Environment.Builder builder, Map<String, String> extraOptions, Set<EnvironmentExtender> seen)
     {
         extender.getDependencies()
-                .forEach(dependencyExtender -> extend(dependencyExtender, builder, seen));
+                .forEach(dependencyExtender -> extend(dependencyExtender, builder, extraOptions, seen));
         if (seen.add(extender)) {
-            log.info("Building environment %s with extender: %s", builder.getEnvironmentName(), extender.getClass().getSimpleName());
-            extender.extendEnvironment(builder);
+            Map<String, String> extraOptionsForExtender;
+            if (extender.getExtraOptionsPrefix().isPresent()) {
+                String prefix = extender.getExtraOptionsPrefix().get();
+                extraOptionsForExtender = extraOptions.entrySet().stream()
+                        .filter(entry -> entry.getKey().startsWith(prefix))
+                        .collect(toImmutableMap(
+                                // remove prefix
+                                entry -> entry.getKey().substring(prefix.length()),
+                                Map.Entry::getValue));
+            }
+            else {
+                extraOptionsForExtender = Map.of();
+            }
+
+            log.info("Building environment %s with extender: %s; options: %s", builder.getEnvironmentName(), extender.getClass().getSimpleName(), extraOptionsForExtender);
+            extender.extendEnvironment(builder, extraOptionsForExtender);
         }
     }
 }

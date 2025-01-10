@@ -17,9 +17,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -30,6 +29,7 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.util.Objects.requireNonNull;
 
@@ -42,16 +42,16 @@ public class AsyncQueue<T>
     private Queue<T> elements;
     // This future is completed when the queue transitions from full to not. But it will be replaced by a new instance of future immediately.
     @GuardedBy("this")
-    private SettableFuture<?> notFullSignal = SettableFuture.create();
+    private SettableFuture<Void> notFullSignal = SettableFuture.create();
     // This future is completed when the queue transitions from empty to not. But it will be replaced by a new instance of future immediately.
     @GuardedBy("this")
-    private SettableFuture<?> notEmptySignal = SettableFuture.create();
+    private SettableFuture<Void> notEmptySignal = SettableFuture.create();
     @GuardedBy("this")
     private boolean finishing;
     @GuardedBy("this")
     private int borrowerCount;
 
-    private final Executor executor;
+    protected final Executor executor;
 
     public AsyncQueue(int targetQueueSize, Executor executor)
     {
@@ -62,12 +62,12 @@ public class AsyncQueue<T>
     }
 
     /**
-     * Returns <tt>true</tt> if all future attempts to retrieve elements from this queue
+     * Returns {@code true} if all future attempts to retrieve elements from this queue
      * are guaranteed to return empty.
      */
     public synchronized boolean isFinished()
     {
-        return finishing && borrowerCount == 0 && elements.size() == 0;
+        return finishing && borrowerCount == 0 && elements.isEmpty();
     }
 
     public synchronized void finish()
@@ -83,7 +83,7 @@ public class AsyncQueue<T>
     private synchronized void signalIfFinishing()
     {
         if (finishing && borrowerCount == 0) {
-            if (elements.size() == 0) {
+            if (elements.isEmpty()) {
                 // Reset elements queue after finishing to avoid holding on to the full sized empty array inside
                 elements = new ArrayDeque<>(0);
                 completeAsync(executor, notEmptySignal);
@@ -96,12 +96,12 @@ public class AsyncQueue<T>
         }
     }
 
-    public synchronized ListenableFuture<?> offer(T element)
+    public synchronized ListenableFuture<Void> offer(T element)
     {
         requireNonNull(element);
 
         if (finishing && borrowerCount == 0) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
         elements.add(element);
         int newSize = elements.size();
@@ -112,7 +112,21 @@ public class AsyncQueue<T>
         if (newSize >= targetQueueSize) {
             return notFullSignal;
         }
-        return immediateFuture(null);
+        return immediateVoidFuture();
+    }
+
+    private synchronized void offerAll(List<T> elementsToInsert)
+    {
+        requireNonNull(elementsToInsert);
+        if (finishing && borrowerCount == 0) {
+            return;
+        }
+        boolean wasEmpty = elements.isEmpty();
+        elements.addAll(elementsToInsert);
+        if (wasEmpty && !elements.isEmpty()) {
+            completeAsync(executor, notEmptySignal);
+            notEmptySignal = SettableFuture.create();
+        }
     }
 
     public synchronized int size()
@@ -144,7 +158,7 @@ public class AsyncQueue<T>
         return borrowBatchAsync(maxSize, elements -> new BorrowResult<>(ImmutableList.of(), elements));
     }
 
-    protected synchronized SettableFuture<?> getNotEmptySignal()
+    protected synchronized SettableFuture<Void> getNotEmptySignal()
     {
         return notEmptySignal;
     }
@@ -179,7 +193,7 @@ public class AsyncQueue<T>
             else {
                 borrowedListFuture = Futures.transform(
                         notEmptySignal,
-                        ignored -> {
+                        _ -> {
                             synchronized (this) {
                                 List<T> batch = getBatch(maxSize);
                                 if (!batch.isEmpty()) {
@@ -204,8 +218,9 @@ public class AsyncQueue<T>
                             checkArgument(borrowResult.getElementsToInsert().isEmpty(), "Function must not insert anything when no element is borrowed");
                             return borrowResult.getResult();
                         }
-                        for (T element : borrowResult.getElementsToInsert()) {
-                            offer(element);
+                        List<T> elementsToInsert = borrowResult.getElementsToInsert();
+                        if (!elementsToInsert.isEmpty()) {
+                            offerAll(elementsToInsert);
                         }
                         return borrowResult.getResult();
                     }
@@ -220,7 +235,7 @@ public class AsyncQueue<T>
                 }, directExecutor());
     }
 
-    private static void completeAsync(Executor executor, SettableFuture<?> future)
+    private static void completeAsync(Executor executor, SettableFuture<Void> future)
     {
         executor.execute(() -> future.set(null));
     }

@@ -13,79 +13,104 @@
  */
 package io.trino.plugin.oracle;
 
-import io.trino.plugin.jdbc.BaseJdbcConfig;
+import com.google.common.base.Joiner;
+import com.google.common.io.Files;
+import dev.failsafe.Failsafe;
+import dev.failsafe.RetryPolicy;
+import io.airlift.log.Logger;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.RetryingConnectionFactory;
 import io.trino.plugin.jdbc.credential.StaticCredentialProvider;
+import io.trino.plugin.jdbc.jmx.StatisticsAwareConnectionFactory;
 import oracle.jdbc.OracleDriver;
 import org.testcontainers.containers.OracleContainer;
 import org.testcontainers.utility.MountableFile;
 
 import java.io.Closeable;
+import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.temporal.ChronoUnit;
 
 import static io.trino.testing.TestingConnectorSession.SESSION;
+import static io.trino.testing.containers.TestContainers.startOrReuse;
 import static java.lang.String.format;
 
 public class TestingOracleServer
-        extends OracleContainer
-        implements Closeable
+        implements AutoCloseable
 {
+    private static final Logger log = Logger.get(TestingOracleServer.class);
+
+    private static final RetryPolicy<Object> CONTAINER_RETRY_POLICY = RetryPolicy.builder()
+            .withBackoff(1, 5, ChronoUnit.SECONDS)
+            .withMaxAttempts(5)
+            .onRetry(event -> log.warn(
+                    "Container initialization failed on attempt %s, will retry. Exception: %s",
+                    event.getAttemptCount(),
+                    event.getLastException().getMessage()))
+            .build();
+
     private static final String TEST_TABLESPACE = "trino_test";
 
     public static final String TEST_USER = "trino_test";
     public static final String TEST_SCHEMA = TEST_USER; // schema and user is the same thing in Oracle
     public static final String TEST_PASS = "trino_test_password";
 
+    private OracleContainer container;
+
+    private Closeable cleanup = () -> {};
+
     public TestingOracleServer()
     {
-        super("wnameless/oracle-xe-11g-r2");
+        Failsafe.with(CONTAINER_RETRY_POLICY).run(this::createContainer);
+    }
 
-        withCopyFileToContainer(MountableFile.forClasspathResource("init.sql"), "/docker-entrypoint-initdb.d/init.sql");
-
-        start();
-
-        try (Connection connection = getConnectionFactory().openConnection(SESSION);
-                Statement statement = connection.createStatement()) {
-            // this is added to allow more processes on database, otherwise the tests end up giving
-            // ORA-12519, TNS:no appropriate service handler found
-            // ORA-12505, TNS:listener does not currently know of SID given in connect descriptor
-            // to fix this we have to change the number of processes of SPFILE
-            statement.execute("ALTER SYSTEM SET processes=1000 SCOPE=SPFILE");
-            statement.execute("ALTER SYSTEM SET disk_asynch_io = FALSE SCOPE = SPFILE");
-        }
-        catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
-
+    private void createContainer()
+    {
+        OracleContainer container = new OracleContainer("gvenzl/oracle-xe:11.2.0.2-full")
+                .withCopyFileToContainer(MountableFile.forClasspathResource("init.sql"), "/container-entrypoint-initdb.d/01-init.sql")
+                .withCopyFileToContainer(MountableFile.forClasspathResource("restart.sh"), "/container-entrypoint-initdb.d/02-restart.sh")
+                .withCopyFileToContainer(MountableFile.forHostPath(createConfigureScript()), "/container-entrypoint-initdb.d/03-create-users.sql")
+                .usingSid();
         try {
-            execInContainer("/bin/bash", "/etc/init.d/oracle-xe", "restart");
+            this.cleanup = startOrReuse(container);
+            this.container = container;
         }
-        catch (InterruptedException | IOException e) {
-            throw new RuntimeException(e);
-        }
-
-        waitUntilContainerStarted();
-        try (Connection connection = getConnectionFactory().openConnection(SESSION);
-                Statement statement = connection.createStatement()) {
-            statement.execute(format("CREATE TABLESPACE %s DATAFILE 'test_db.dat' SIZE 100M ONLINE", TEST_TABLESPACE));
-            statement.execute(format("CREATE USER %s IDENTIFIED BY %s DEFAULT TABLESPACE %s", TEST_USER, TEST_PASS, TEST_TABLESPACE));
-            statement.execute(format("GRANT UNLIMITED TABLESPACE TO %s", TEST_USER));
-            statement.execute(format("GRANT ALL PRIVILEGES TO %s", TEST_USER));
-        }
-        catch (SQLException e) {
-            throw new RuntimeException(e);
+        catch (Throwable e) {
+            try (container) {
+                throw e;
+            }
         }
     }
 
-    @Override
+    private Path createConfigureScript()
+    {
+        try {
+            File tempFile = File.createTempFile("init-", ".sql");
+
+            Files.write(Joiner.on("\n").join(
+                    format("CREATE TABLESPACE %s DATAFILE 'test_db.dat' SIZE 100M ONLINE;", TEST_TABLESPACE),
+                    format("CREATE USER %s IDENTIFIED BY %s DEFAULT TABLESPACE %s;", TEST_USER, TEST_PASS, TEST_TABLESPACE),
+                    format("GRANT UNLIMITED TABLESPACE TO %s;", TEST_USER),
+                    format("GRANT CREATE SESSION TO %s;", TEST_USER),
+                    format("GRANT ALL PRIVILEGES TO %s;", TEST_USER)).getBytes(StandardCharsets.UTF_8), tempFile);
+
+            return tempFile.toPath();
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     public String getJdbcUrl()
     {
-        return "jdbc:oracle:thin:@" + getHost() + ":" + getOraclePort() + ":" + getSid();
+        return container.getJdbcUrl();
     }
 
     public void execute(String sql)
@@ -95,7 +120,7 @@ public class TestingOracleServer
 
     public void execute(String sql, String user, String password)
     {
-        try (Connection connection = getConnectionFactory(user, password).openConnection(SESSION);
+        try (Connection connection = getConnectionFactory(getJdbcUrl(), user, password).openConnection(SESSION);
                 Statement statement = connection.createStatement()) {
             statement.execute(sql);
         }
@@ -104,23 +129,21 @@ public class TestingOracleServer
         }
     }
 
-    private ConnectionFactory getConnectionFactory()
+    private ConnectionFactory getConnectionFactory(String connectionUrl, String username, String password)
     {
-        return getConnectionFactory(getUsername(), getPassword());
-    }
-
-    private ConnectionFactory getConnectionFactory(String username, String password)
-    {
-        DriverConnectionFactory connectionFactory = new DriverConnectionFactory(
-                new OracleDriver(),
-                new BaseJdbcConfig().setConnectionUrl(getJdbcUrl()),
-                StaticCredentialProvider.of(username, password));
-        return new RetryingConnectionFactory(connectionFactory);
+        StatisticsAwareConnectionFactory connectionFactory = new StatisticsAwareConnectionFactory(
+                DriverConnectionFactory.builder(new OracleDriver(), connectionUrl, StaticCredentialProvider.of(username, password)).build());
+        return new RetryingConnectionFactory(connectionFactory, RetryPolicy.ofDefaults());
     }
 
     @Override
     public void close()
     {
-        stop();
+        try {
+            cleanup.close();
+        }
+        catch (IOException ioe) {
+            throw new UncheckedIOException(ioe);
+        }
     }
 }

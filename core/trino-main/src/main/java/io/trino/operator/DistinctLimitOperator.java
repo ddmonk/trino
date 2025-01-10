@@ -18,21 +18,19 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.spi.Page;
-import io.trino.spi.block.Block;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.type.BlockTypeOperators;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.SystemSessionProperties.isDictionaryAggregationEnabled;
 import static io.trino.operator.GroupByHash.createGroupByHash;
+import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -49,8 +47,7 @@ public class DistinctLimitOperator
         private final long limit;
         private final Optional<Integer> hashChannel;
         private boolean closed;
-        private final JoinCompiler joinCompiler;
-        private final BlockTypeOperators blockTypeOperators;
+        private final FlatHashStrategyCompiler hashStrategyCompiler;
 
         public DistinctLimitOperatorFactory(
                 int operatorId,
@@ -59,8 +56,7 @@ public class DistinctLimitOperator
                 List<Integer> distinctChannels,
                 long limit,
                 Optional<Integer> hashChannel,
-                JoinCompiler joinCompiler,
-                BlockTypeOperators blockTypeOperators)
+                FlatHashStrategyCompiler hashStrategyCompiler)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
@@ -70,8 +66,7 @@ public class DistinctLimitOperator
             checkArgument(limit >= 0, "limit must be at least zero");
             this.limit = limit;
             this.hashChannel = requireNonNull(hashChannel, "hashChannel is null");
-            this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
-            this.blockTypeOperators = requireNonNull(blockTypeOperators, "blockTypeOperators is null");
+            this.hashStrategyCompiler = requireNonNull(hashStrategyCompiler, "hashStrategyCompiler is null");
         }
 
         @Override
@@ -82,7 +77,7 @@ public class DistinctLimitOperator
             List<Type> distinctTypes = distinctChannels.stream()
                     .map(sourceTypes::get)
                     .collect(toImmutableList());
-            return new DistinctLimitOperator(operatorContext, distinctChannels, distinctTypes, limit, hashChannel, joinCompiler, blockTypeOperators);
+            return new DistinctLimitOperator(operatorContext, distinctChannels, distinctTypes, limit, hashChannel, hashStrategyCompiler);
         }
 
         @Override
@@ -94,7 +89,7 @@ public class DistinctLimitOperator
         @Override
         public OperatorFactory duplicate()
         {
-            return new DistinctLimitOperatorFactory(operatorId, planNodeId, sourceTypes, distinctChannels, limit, hashChannel, joinCompiler, blockTypeOperators);
+            return new DistinctLimitOperatorFactory(operatorId, planNodeId, sourceTypes, distinctChannels, limit, hashChannel, hashStrategyCompiler);
         }
     }
 
@@ -106,35 +101,44 @@ public class DistinctLimitOperator
 
     private boolean finishing;
 
-    private final List<Integer> outputChannels;
+    private final int[] inputChannels;
     private final GroupByHash groupByHash;
     private long nextDistinctId;
 
     // for yield when memory is not available
-    private GroupByIdBlock groupByIds;
-    private Work<GroupByIdBlock> unfinishedWork;
+    private int[] groupByIds;
+    private Work<int[]> unfinishedWork;
 
-    public DistinctLimitOperator(OperatorContext operatorContext, List<Integer> distinctChannels, List<Type> distinctTypes, long limit, Optional<Integer> hashChannel, JoinCompiler joinCompiler, BlockTypeOperators blockTypeOperators)
+    public DistinctLimitOperator(
+            OperatorContext operatorContext,
+            List<Integer> distinctChannels,
+            List<Type> distinctTypes,
+            long limit,
+            Optional<Integer> hashChannel,
+            FlatHashStrategyCompiler hashStrategyCompiler)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
         this.localUserMemoryContext = operatorContext.localUserMemoryContext();
-        requireNonNull(distinctChannels, "distinctChannels is null");
         checkArgument(limit >= 0, "limit must be at least zero");
-        requireNonNull(hashChannel, "hashChannel is null");
+        checkArgument(distinctTypes.size() == distinctChannels.size(), "distinctTypes and distinctChannels sizes don't match");
 
-        outputChannels = ImmutableList.<Integer>builder()
-                .addAll(distinctChannels)
-                .addAll(hashChannel.map(ImmutableList::of).orElse(ImmutableList.of()))
-                .build();
+        if (hashChannel.isPresent()) {
+            this.inputChannels = new int[distinctChannels.size() + 1];
+            for (int i = 0; i < distinctChannels.size(); i++) {
+                this.inputChannels[i] = distinctChannels.get(i);
+            }
+            this.inputChannels[distinctChannels.size()] = hashChannel.get();
+        }
+        else {
+            this.inputChannels = Ints.toArray(distinctChannels);
+        }
 
         this.groupByHash = createGroupByHash(
+                operatorContext.getSession(),
                 distinctTypes,
-                Ints.toArray(distinctChannels),
-                hashChannel,
-                toIntExact(Math.min(limit, 10_000)),
-                isDictionaryAggregationEnabled(operatorContext.getSession()),
-                joinCompiler,
-                blockTypeOperators,
+                hashChannel.isPresent(),
+                toIntExact(min(limit, 10_000)),
+                hashStrategyCompiler,
                 this::updateMemoryReservation);
         remainingLimit = limit;
     }
@@ -168,8 +172,8 @@ public class DistinctLimitOperator
     {
         checkState(needsInput());
 
-        inputPage = page;
-        unfinishedWork = groupByHash.getGroupIds(page);
+        inputPage = page.getColumns(inputChannels);
+        unfinishedWork = groupByHash.getGroupIds(inputPage);
         processUnfinishedWork();
         updateMemoryReservation();
     }
@@ -186,39 +190,27 @@ public class DistinctLimitOperator
         }
 
         verifyNotNull(inputPage);
-        int distinctCount = 0;
-        int[] distinctPositions = new int[inputPage.getPositionCount()];
-        for (int position = 0; position < groupByIds.getPositionCount(); position++) {
-            if (groupByIds.getGroupId(position) == nextDistinctId) {
-                distinctPositions[distinctCount] = position;
-                distinctCount++;
 
-                remainingLimit--;
-                nextDistinctId++;
-                if (remainingLimit == 0) {
-                    break;
+        long resultingPositions = min(groupByHash.getGroupCount() - nextDistinctId, remainingLimit);
+        Page result = null;
+        if (resultingPositions > 0) {
+            int[] distinctPositions = new int[toIntExact(resultingPositions)];
+            int distinctCount = 0;
+            for (int position = 0; position < groupByIds.length && distinctCount < distinctPositions.length; position++) {
+                if (groupByIds[position] == nextDistinctId) {
+                    distinctPositions[distinctCount++] = position;
+                    nextDistinctId++;
                 }
             }
+            verify(distinctCount == distinctPositions.length);
+            remainingLimit -= distinctCount;
+            result = inputPage.getPositions(distinctPositions, 0, distinctPositions.length);
         }
-        Page result = maskToDistinctOutputPositions(distinctCount, distinctPositions);
 
         groupByIds = null;
         inputPage = null;
 
         updateMemoryReservation();
-        return result;
-    }
-
-    private Page maskToDistinctOutputPositions(int distinctCount, int[] distinctPositions)
-    {
-        Page result = null;
-        if (distinctCount > 0) {
-            Block[] blocks = outputChannels.stream()
-                    .map(inputPage::getBlock)
-                    .map(block -> block.getPositions(distinctPositions, 0, distinctCount))
-                    .toArray(Block[]::new);
-            result = new Page(distinctCount, blocks);
-        }
         return result;
     }
 
@@ -229,6 +221,7 @@ public class DistinctLimitOperator
             return false;
         }
         groupByIds = unfinishedWork.getResult();
+        verify(groupByIds.length == inputPage.getPositionCount(), "Expected on groupId for each input position");
         unfinishedWork = null;
         return true;
     }

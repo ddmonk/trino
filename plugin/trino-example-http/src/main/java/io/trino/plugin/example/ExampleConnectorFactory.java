@@ -16,13 +16,14 @@ package io.trino.plugin.example;
 import com.google.inject.Injector;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.json.JsonModule;
+import io.trino.plugin.base.TypeDeserializerModule;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
-import io.trino.spi.connector.ConnectorHandleResolver;
 
 import java.util.Map;
 
+import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
 import static java.util.Objects.requireNonNull;
 
 public class ExampleConnectorFactory
@@ -31,27 +32,22 @@ public class ExampleConnectorFactory
     @Override
     public String getName()
     {
-        return "example-http";
-    }
-
-    @Override
-    public ConnectorHandleResolver getHandleResolver()
-    {
-        return new ExampleHandleResolver();
+        return "example_http";
     }
 
     @Override
     public Connector create(String catalogName, Map<String, String> requiredConfig, ConnectorContext context)
     {
         requireNonNull(requiredConfig, "requiredConfig is null");
+        checkStrictSpiVersionMatch(context, this);
 
         // A plugin is not required to use Guice; it is just very convenient
         Bootstrap app = new Bootstrap(
                 new JsonModule(),
-                new ExampleModule(context.getTypeManager()));
+                new TypeDeserializerModule(context.getTypeManager()),
+                new ExampleModule());
 
         Injector injector = app
-                .strictConfig()
                 .doNotInitializeLogging()
                 .setRequiredConfigurationProperties(requiredConfig)
                 .initialize();

@@ -13,43 +13,32 @@
  */
 package io.trino.plugin.hive.metastore.thrift;
 
-import com.google.common.net.HostAndPort;
-import io.airlift.units.Duration;
 import org.apache.thrift.transport.TTransportException;
 
 import java.net.URI;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 
 public class MockThriftMetastoreClientFactory
-        extends DefaultThriftMetastoreClientFactory
+        implements ThriftMetastoreClientFactory
 {
-    private Map<HostAndPort, Optional<ThriftMetastoreClient>> clients;
+    private final Map<URI, Optional<ThriftMetastoreClient>> clients;
 
-    public MockThriftMetastoreClientFactory(Optional<HostAndPort> socksProxy, Duration timeout, Map<String, Optional<ThriftMetastoreClient>> clients)
+    public MockThriftMetastoreClientFactory(Map<String, Optional<ThriftMetastoreClient>> clients)
     {
-        super(Optional.empty(), socksProxy, timeout, new NoHiveMetastoreAuthentication(), "localhost");
-        this.clients = clients.entrySet().stream().collect(Collectors.toMap(entry -> createHostAndPort(entry.getKey()), Map.Entry::getValue));
+        this.clients = clients.entrySet().stream()
+                .collect(toImmutableMap(entry -> URI.create(entry.getKey()), Map.Entry::getValue));
     }
 
     @Override
-    public ThriftMetastoreClient create(HostAndPort address, Optional<String> delegationToken)
+    public ThriftMetastoreClient create(URI uri, Optional<String> delegationToken)
             throws TTransportException
     {
         checkArgument(delegationToken.isEmpty(), "delegation token is not supported");
-        Optional<ThriftMetastoreClient> client = clients.getOrDefault(address, Optional.empty());
-        if (client.isEmpty()) {
-            throw new TTransportException(TTransportException.TIMED_OUT);
-        }
-        return client.get();
-    }
-
-    private static HostAndPort createHostAndPort(String str)
-    {
-        URI uri = URI.create(str);
-        return HostAndPort.fromParts(uri.getHost(), uri.getPort());
+        return clients.getOrDefault(uri, Optional.empty())
+                .orElseThrow(() -> new TTransportException(TTransportException.TIMED_OUT));
     }
 }

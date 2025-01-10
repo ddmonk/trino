@@ -14,27 +14,39 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.QualifiedTablePrefix;
 import io.trino.security.AccessControl;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.sql.tree.DropSchema;
 import io.trino.sql.tree.Expression;
-import io.trino.transaction.TransactionManager;
 
 import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.metadata.MetadataUtil.createCatalogSchemaName;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_FOUND;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class DropSchemaTask
         implements DataDefinitionTask<DropSchema>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public DropSchemaTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -42,18 +54,12 @@ public class DropSchemaTask
     }
 
     @Override
-    public String explain(DropSchema statement, List<Expression> parameters)
+    public ListenableFuture<Void> execute(
+            DropSchema statement,
+            QueryStateMachine stateMachine,
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
-        return "DROP SCHEMA " + statement.getSchemaName();
-    }
-
-    @Override
-    public ListenableFuture<?> execute(DropSchema statement, TransactionManager transactionManager, Metadata metadata, AccessControl accessControl, QueryStateMachine stateMachine, List<Expression> parameters)
-    {
-        if (statement.isCascade()) {
-            throw new TrinoException(NOT_SUPPORTED, "CASCADE is not yet supported for DROP SCHEMA");
-        }
-
         Session session = stateMachine.getSession();
         CatalogSchemaName schema = createCatalogSchemaName(session, statement, Optional.of(statement.getSchemaName()));
 
@@ -61,13 +67,25 @@ public class DropSchemaTask
             if (!statement.isExists()) {
                 throw semanticException(SCHEMA_NOT_FOUND, statement, "Schema '%s' does not exist", schema);
             }
-            return immediateFuture(null);
+            return immediateVoidFuture();
+        }
+
+        if (!statement.isCascade() && !isSchemaEmpty(session, schema, metadata)) {
+            throw semanticException(SCHEMA_NOT_EMPTY, statement, "Cannot drop non-empty schema '%s'", schema.getSchemaName());
         }
 
         accessControl.checkCanDropSchema(session.toSecurityContext(), schema);
 
-        metadata.dropSchema(session, schema);
+        metadata.dropSchema(session, schema, statement.isCascade());
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
+    }
+
+    private static boolean isSchemaEmpty(Session session, CatalogSchemaName schema, Metadata metadata)
+    {
+        QualifiedTablePrefix tablePrefix = new QualifiedTablePrefix(schema.getCatalogName(), schema.getSchemaName());
+
+        // This is a best effort check that doesn't provide any guarantees against concurrent DDL operations
+        return metadata.listTables(session, tablePrefix).isEmpty();
     }
 }

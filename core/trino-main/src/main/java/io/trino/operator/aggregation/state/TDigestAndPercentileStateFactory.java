@@ -17,8 +17,8 @@ import io.airlift.stats.TDigest;
 import io.trino.array.DoubleBigArray;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
-import org.openjdk.jol.info.ClassLayout;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class TDigestAndPercentileStateFactory
@@ -31,34 +31,22 @@ public class TDigestAndPercentileStateFactory
     }
 
     @Override
-    public Class<? extends TDigestAndPercentileState> getSingleStateClass()
-    {
-        return SingleTDigestAndPercentileState.class;
-    }
-
-    @Override
     public TDigestAndPercentileState createGroupedState()
     {
         return new GroupedTDigestAndPercentileState();
-    }
-
-    @Override
-    public Class<? extends TDigestAndPercentileState> getGroupedStateClass()
-    {
-        return GroupedTDigestAndPercentileState.class;
     }
 
     public static class GroupedTDigestAndPercentileState
             extends AbstractGroupedAccumulatorState
             implements TDigestAndPercentileState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(GroupedTDigestAndPercentileState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(GroupedTDigestAndPercentileState.class);
         private final ObjectBigArray<TDigest> digests = new ObjectBigArray<>();
         private final DoubleBigArray percentiles = new DoubleBigArray();
         private long size;
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             digests.ensureCapacity(size);
             percentiles.ensureCapacity(size);
@@ -73,7 +61,7 @@ public class TDigestAndPercentileStateFactory
         @Override
         public void setDigest(TDigest digest)
         {
-            requireNonNull(digest, "value is null");
+            requireNonNull(digest, "digest is null");
             digests.set(getGroupId(), digest);
         }
 
@@ -105,7 +93,7 @@ public class TDigestAndPercentileStateFactory
     public static class SingleTDigestAndPercentileState
             implements TDigestAndPercentileState
     {
-        public static final int INSTANCE_SIZE = ClassLayout.parseClass(SingleTDigestAndPercentileState.class).instanceSize();
+        public static final int INSTANCE_SIZE = instanceSize(SingleTDigestAndPercentileState.class);
         private TDigest digest;
         private double percentile;
 

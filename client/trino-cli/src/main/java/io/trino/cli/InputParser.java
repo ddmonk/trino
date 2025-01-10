@@ -14,7 +14,7 @@
 package io.trino.cli;
 
 import com.google.common.collect.ImmutableSet;
-import io.trino.sql.parser.StatementSplitter;
+import io.trino.cli.lexer.StatementSplitter;
 import org.jline.reader.EOFError;
 import org.jline.reader.ParsedLine;
 import org.jline.reader.Parser;
@@ -26,18 +26,19 @@ import java.util.Set;
 import static com.google.common.base.CharMatcher.whitespace;
 import static io.trino.cli.Console.STATEMENT_DELIMITERS;
 import static java.util.Locale.ENGLISH;
+import static org.jline.reader.Parser.ParseContext.COMPLETE;
 
 public class InputParser
         implements Parser
 {
-    private static final Set<String> SPECIAL = ImmutableSet.of("exit", "quit", "history", "help");
+    private static final Set<String> SPECIAL = ImmutableSet.of("exit", "quit", "history", "help", "clear");
 
     @Override
     public ParsedLine parse(String line, int cursor, ParseContext context)
             throws SyntaxError
     {
         String command = whitespace().trimFrom(line);
-        if (command.isEmpty() || SPECIAL.contains(command.toLowerCase(ENGLISH))) {
+        if (command.isEmpty() || SPECIAL.contains(command.toLowerCase(ENGLISH)) || context == COMPLETE) {
             return new DefaultParser().parse(line, cursor, context);
         }
 

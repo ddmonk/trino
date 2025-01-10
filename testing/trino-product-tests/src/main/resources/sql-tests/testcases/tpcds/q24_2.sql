@@ -1,4 +1,4 @@
--- database: presto_tpcds; groups: tpcds; requires: io.trino.tempto.fulfillment.table.hive.tpcds.ImmutableTpcdsTablesRequirements
+-- database: trino_tpcds; groups: tpcds; requires: io.trino.tempto.fulfillment.table.hive.tpcds.ImmutableTpcdsTablesRequirements
 WITH
   ssales AS (
    SELECT
@@ -44,3 +44,4 @@ HAVING ("sum"("netpaid") > (
       FROM
         ssales
    ))
+ORDER BY "c_last_name", "c_first_name", "s_store_name"

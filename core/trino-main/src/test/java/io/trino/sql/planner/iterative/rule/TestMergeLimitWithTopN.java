@@ -16,7 +16,9 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.topN;
@@ -83,5 +85,21 @@ public class TestMergeLimitWithTopN
                                     p.values(a)));
                 })
                 .doesNotFire();
+    }
+
+    @Test
+    public void testLimitWithPreSortedInputs()
+    {
+        tester().assertThat(new MergeLimitWithTopN())
+                .on(p -> {
+                    Symbol a = p.symbol("a");
+                    List<Symbol> orderBy = ImmutableList.of(a);
+                    return p.limit(
+                            2,
+                            false,
+                            orderBy,
+                            p.topN(1, orderBy, p.values(a)));
+                })
+                .matches(topN(1, ImmutableList.of(sort("a", ASCENDING, FIRST)), values("a")));
     }
 }

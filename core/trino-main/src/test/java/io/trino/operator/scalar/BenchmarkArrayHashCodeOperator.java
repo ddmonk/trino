@@ -13,9 +13,10 @@
  */
 package io.trino.operator.scalar;
 
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.ArrayType;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -28,16 +29,12 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
-import org.testng.annotations.Test;
 
 import java.lang.invoke.MethodHandle;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.addElement;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.getHashCodeBlockMethod;
 import static io.trino.operator.scalar.TypeOperatorBenchmarkUtil.toType;
@@ -84,13 +81,13 @@ public class BenchmarkArrayHashCodeOperator
 
         private static Block createChannel(int positionCount, int arraySize, ArrayType arrayType)
         {
-            BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-                for (int i = 0; i < arraySize; i++) {
-                    addElement(arrayType.getElementType(), ThreadLocalRandom.current(), entryBuilder);
-                }
-                blockBuilder.closeEntry();
+                blockBuilder.buildEntry(elementBuilder -> {
+                    for (int i = 0; i < arraySize; i++) {
+                        addElement(arrayType.getElementType(), ThreadLocalRandom.current(), elementBuilder);
+                    }
+                });
             }
             return blockBuilder.build();
         }
@@ -118,10 +115,6 @@ public class BenchmarkArrayHashCodeOperator
     public static void main(String[] args)
             throws Throwable
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkArrayHashCodeOperator.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkArrayHashCodeOperator.class).run();
     }
 }

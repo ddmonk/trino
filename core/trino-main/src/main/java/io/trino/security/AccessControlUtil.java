@@ -13,24 +13,22 @@
  */
 package io.trino.security;
 
-import com.google.common.collect.ImmutableSet;
 import io.trino.SessionRepresentation;
 import io.trino.server.BasicQueryInfo;
 import io.trino.spi.security.Identity;
 
+import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 public final class AccessControlUtil
 {
     private AccessControlUtil() {}
 
-    public static void checkCanViewQueryOwnedBy(Identity identity, String queryOwner, AccessControl accessControl)
+    public static void checkCanViewQueryOwnedBy(Identity identity, Identity queryOwner, AccessControl accessControl)
     {
-        if (identity.getUser().equals(queryOwner)) {
+        if (identity.getUser().equals(queryOwner.getUser())) {
             return;
         }
         accessControl.checkCanViewQueryOwnedBy(identity, queryOwner);
@@ -38,26 +36,25 @@ public final class AccessControlUtil
 
     public static List<BasicQueryInfo> filterQueries(Identity identity, List<BasicQueryInfo> queries, AccessControl accessControl)
     {
-        String currentUser = identity.getUser();
-        Set<String> owners = queries.stream()
+        Collection<Identity> owners = queries.stream()
                 .map(BasicQueryInfo::getSession)
-                .map(SessionRepresentation::getUser)
-                .filter(owner -> !owner.equals(currentUser))
-                .collect(toImmutableSet());
-        owners = accessControl.filterQueriesOwnedBy(identity, owners);
+                .map(SessionRepresentation::toIdentity)
+                .filter(owner -> !owner.getUser().equals(identity.getUser()))
+                .distinct()
+                .collect(toImmutableList());
+        Collection<Identity> allowedOwners = accessControl.filterQueriesOwnedBy(identity, owners);
 
-        Set<String> allowedOwners = ImmutableSet.<String>builder()
-                .add(currentUser)
-                .addAll(owners)
-                .build();
         return queries.stream()
-                .filter(queryInfo -> allowedOwners.contains(queryInfo.getSession().getUser()))
+                .filter(queryInfo -> {
+                    Identity queryIdentity = queryInfo.getSession().toIdentity();
+                    return queryIdentity.getUser().equals(identity.getUser()) || allowedOwners.contains(queryIdentity);
+                })
                 .collect(toImmutableList());
     }
 
-    public static void checkCanKillQueryOwnedBy(Identity identity, String queryOwner, AccessControl accessControl)
+    public static void checkCanKillQueryOwnedBy(Identity identity, Identity queryOwner, AccessControl accessControl)
     {
-        if (identity.getUser().equals(queryOwner)) {
+        if (identity.getUser().equals(queryOwner.getUser())) {
             return;
         }
         accessControl.checkCanKillQueryOwnedBy(identity, queryOwner);

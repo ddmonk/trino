@@ -27,6 +27,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.type.StandardTypes.ARRAY;
 import static io.trino.spi.type.StandardTypes.MAP;
 import static io.trino.spi.type.StandardTypes.ROW;
+import static org.apache.iceberg.avro.AvroSchemaUtil.makeCompatibleName;
 
 public class PrimitiveTypeMapBuilder
 {
@@ -42,9 +43,9 @@ public class PrimitiveTypeMapBuilder
     private Map<List<String>, Type> buildTypeMap(List<Type> types, List<String> columnNames)
     {
         for (int i = 0; i < types.size(); i++) {
-            visitType(types.get(i), columnNames.get(i), ImmutableList.of());
+            visitType(types.get(i), makeCompatibleName(columnNames.get(i)), ImmutableList.of());
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     private void visitType(Type type, String name, List<String> parent)
@@ -81,7 +82,7 @@ public class PrimitiveTypeMapBuilder
         parent = ImmutableList.<String>builder().addAll(parent).add(name).build();
         for (RowType.Field field : type.getFields()) {
             checkArgument(field.getName().isPresent(), "field in struct type doesn't have name");
-            visitType(field.getType(), field.getName().get(), parent);
+            visitType(field.getType(), makeCompatibleName(field.getName().get()), parent);
         }
     }
 }

@@ -14,26 +14,36 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.security.AccessControl;
-import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.sql.tree.DropMaterializedView;
 import io.trino.sql.tree.Expression;
-import io.trino.transaction.TransactionManager;
 
 import java.util.List;
-import java.util.Optional;
 
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.metadata.MetadataUtil.createQualifiedObjectName;
-import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
+import static java.util.Objects.requireNonNull;
 
 public class DropMaterializedViewTask
         implements DataDefinitionTask<DropMaterializedView>
 {
+    private final Metadata metadata;
+    private final AccessControl accessControl;
+
+    @Inject
+    public DropMaterializedViewTask(Metadata metadata, AccessControl accessControl)
+    {
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.accessControl = requireNonNull(accessControl, "accessControl is null");
+    }
+
     @Override
     public String getName()
     {
@@ -41,29 +51,38 @@ public class DropMaterializedViewTask
     }
 
     @Override
-    public ListenableFuture<?> execute(
+    public ListenableFuture<Void> execute(
             DropMaterializedView statement,
-            TransactionManager transactionManager,
-            Metadata metadata,
-            AccessControl accessControl,
             QueryStateMachine stateMachine,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
         QualifiedObjectName name = createQualifiedObjectName(session, statement, statement.getName());
 
-        Optional<ConnectorMaterializedViewDefinition> view = metadata.getMaterializedView(session, name);
-        if (view.isEmpty()) {
-            if (!statement.isExists()) {
-                throw semanticException(TABLE_NOT_FOUND, statement, "View '%s' does not exist", name);
+        if (!metadata.isMaterializedView(session, name)) {
+            if (metadata.isView(session, name)) {
+                throw semanticException(
+                        GENERIC_USER_ERROR,
+                        statement,
+                        "Materialized view '%s' does not exist, but a view with that name exists. Did you mean DROP VIEW %s?", name, name);
             }
-            return immediateFuture(null);
+            if (metadata.getTableHandle(session, name).isPresent()) {
+                throw semanticException(
+                        GENERIC_USER_ERROR,
+                        statement,
+                        "Materialized view '%s' does not exist, but a table with that name exists. Did you mean DROP TABLE %s?", name, name);
+            }
+            if (!statement.isExists()) {
+                throw semanticException(GENERIC_USER_ERROR, statement, "Materialized view '%s' does not exist", name);
+            }
+            return immediateVoidFuture();
         }
 
-        accessControl.checkCanDropView(session.toSecurityContext(), name);
+        accessControl.checkCanDropMaterializedView(session.toSecurityContext(), name);
 
         metadata.dropMaterializedView(session, name);
 
-        return immediateFuture(null);
+        return immediateVoidFuture();
     }
 }

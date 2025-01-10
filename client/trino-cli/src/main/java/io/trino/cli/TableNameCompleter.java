@@ -17,8 +17,9 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
-import io.trino.client.QueryData;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.trino.client.StatementClient;
+import org.gaul.modernizer_maven_annotations.SuppressModernizer;
 import org.jline.reader.Candidate;
 import org.jline.reader.Completer;
 import org.jline.reader.LineReader;
@@ -26,11 +27,11 @@ import org.jline.reader.ParsedLine;
 
 import java.io.Closeable;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.cache.CacheLoader.asyncReloading;
-import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
@@ -40,7 +41,9 @@ public class TableNameCompleter
 {
     private static final long RELOAD_TIME_MINUTES = 2;
 
-    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed("completer-%s"));
+    private final ExecutorService executor = newCachedThreadPool(
+            new ThreadFactoryBuilder().setNameFormat("completer-%s").setDaemon(true).build());
+
     private final QueryRunner queryRunner;
     private final LoadingCache<String, List<String>> tableCache;
     private final LoadingCache<String, List<String>> functionCache;
@@ -49,12 +52,21 @@ public class TableNameCompleter
     {
         this.queryRunner = requireNonNull(queryRunner, "queryRunner session was null!");
 
-        tableCache = CacheBuilder.newBuilder()
-                .refreshAfterWrite(RELOAD_TIME_MINUTES, TimeUnit.MINUTES)
-                .build(asyncReloading(CacheLoader.from(this::listTables), executor));
+        tableCache = buildUnsafeCache(
+                CacheBuilder.newBuilder()
+                        .refreshAfterWrite(RELOAD_TIME_MINUTES, TimeUnit.MINUTES),
+                asyncReloading(CacheLoader.from(this::listTables), executor));
 
-        functionCache = CacheBuilder.newBuilder()
-                .build(asyncReloading(CacheLoader.from(this::listFunctions), executor));
+        functionCache = buildUnsafeCache(
+                CacheBuilder.newBuilder(),
+                CacheLoader.from(this::listFunctions));
+    }
+
+    // TODO extract safe caches implementations to a new module and use SafeCaches.buildNonEvictableCache hereAsyncCache
+    @SuppressModernizer
+    private static <K, V> LoadingCache<K, V> buildUnsafeCache(CacheBuilder<? super K, ? super V> cacheBuilder, CacheLoader<? super K, V> cacheLoader)
+    {
+        return cacheBuilder.build(cacheLoader);
     }
 
     private List<String> listTables(String schemaName)
@@ -73,11 +85,8 @@ public class TableNameCompleter
         ImmutableList.Builder<String> cache = ImmutableList.builder();
         try (StatementClient client = queryRunner.startInternalQuery(query)) {
             while (client.isRunning() && !Thread.currentThread().isInterrupted()) {
-                QueryData results = client.currentData();
-                if (results.getData() != null) {
-                    for (List<Object> row : results.getData()) {
-                        cache.add((String) row.get(0));
-                    }
+                for (List<Object> row : client.currentRows()) {
+                    cache.add((String) row.get(0));
                 }
                 client.advance();
             }
@@ -87,13 +96,10 @@ public class TableNameCompleter
 
     public void populateCache()
     {
-        String schemaName = queryRunner.getSession().getSchema();
-        if (schemaName != null) {
-            executor.execute(() -> {
-                functionCache.refresh(schemaName);
-                tableCache.refresh(schemaName);
-            });
-        }
+        queryRunner.getSession().getSchema().ifPresent(schemaName -> executor.execute(() -> {
+            functionCache.refresh(schemaName);
+            tableCache.refresh(schemaName);
+        }));
     }
 
     @Override
@@ -102,21 +108,22 @@ public class TableNameCompleter
         String buffer = line.word().substring(0, line.wordCursor());
         int blankPos = findLastBlank(buffer);
         String prefix = buffer.substring(blankPos + 1);
-        String schemaName = queryRunner.getSession().getSchema();
+        Optional<String> schemaName = queryRunner.getSession().getSchema();
 
-        if (schemaName != null) {
-            List<String> functionNames = functionCache.getIfPresent(schemaName);
-            List<String> tableNames = tableCache.getIfPresent(schemaName);
+        if (!schemaName.isPresent()) {
+            return;
+        }
+        List<String> functionNames = functionCache.getIfPresent(schemaName.get());
+        List<String> tableNames = tableCache.getIfPresent(schemaName.get());
 
-            if (functionNames != null) {
-                for (String name : filterResults(functionNames, prefix)) {
-                    candidates.add(new Candidate(name));
-                }
+        if (functionNames != null) {
+            for (String name : filterResults(functionNames, prefix)) {
+                candidates.add(new Candidate(name));
             }
-            if (tableNames != null) {
-                for (String name : filterResults(tableNames, prefix)) {
-                    candidates.add(new Candidate(name));
-                }
+        }
+        if (tableNames != null) {
+            for (String name : filterResults(tableNames, prefix)) {
+                candidates.add(new Candidate(name));
             }
         }
     }

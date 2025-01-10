@@ -16,7 +16,7 @@ package io.trino.execution;
 import io.trino.plugin.memory.MemoryQueryRunner;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -27,7 +27,8 @@ public class TestTry
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return MemoryQueryRunner.createQueryRunner();
+        return MemoryQueryRunner.builder()
+                .build();
     }
 
     @Test

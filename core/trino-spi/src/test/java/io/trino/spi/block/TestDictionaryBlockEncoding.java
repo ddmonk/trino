@@ -14,29 +14,21 @@
 package io.trino.spi.block;
 
 import io.airlift.slice.DynamicSliceOutput;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.spi.block.BlockTestUtils.assertBlockEquals;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDictionaryBlockEncoding
 {
     private final BlockEncodingSerde blockEncodingSerde = new TestingBlockEncodingSerde();
+    private final Block dictionary = buildTestDictionary();
 
     @Test
     public void testRoundTrip()
     {
         int positionCount = 40;
-
-        // build dictionary
-        BlockBuilder dictionaryBuilder = VARCHAR.createBlockBuilder(null, 4);
-        VARCHAR.writeString(dictionaryBuilder, "alice");
-        VARCHAR.writeString(dictionaryBuilder, "bob");
-        VARCHAR.writeString(dictionaryBuilder, "charlie");
-        VARCHAR.writeString(dictionaryBuilder, "dave");
-        Block dictionary = dictionaryBuilder.build();
 
         // build ids
         int[] ids = new int[positionCount];
@@ -44,18 +36,59 @@ public class TestDictionaryBlockEncoding
             ids[i] = i % 4;
         }
 
-        DictionaryBlock dictionaryBlock = new DictionaryBlock(dictionary, ids);
+        DictionaryBlock dictionaryBlock = (DictionaryBlock) DictionaryBlock.create(ids.length, dictionary, ids);
 
+        Block actualBlock = roundTripBlock(dictionaryBlock);
+        assertBlockEquals(VARCHAR, actualBlock, dictionaryBlock);
+    }
+
+    @Test
+    public void testNonSequentialDictionaryUnnest()
+    {
+        int[] ids = new int[] {3, 2, 1, 0};
+        DictionaryBlock dictionaryBlock = (DictionaryBlock) DictionaryBlock.create(ids.length, dictionary, ids);
+
+        Block actualBlock = roundTripBlock(dictionaryBlock);
+        assertBlockEquals(VARCHAR, actualBlock, dictionary.getPositions(ids, 0, 4));
+    }
+
+    @Test
+    public void testNonSequentialDictionaryUnnestWithGaps()
+    {
+        int[] ids = new int[] {3, 2, 0};
+        DictionaryBlock dictionaryBlock = (DictionaryBlock) DictionaryBlock.create(ids.length, dictionary, ids);
+
+        Block actualBlock = roundTripBlock(dictionaryBlock);
+        assertThat(actualBlock).isInstanceOf(VariableWidthBlock.class);
+        assertBlockEquals(VARCHAR, actualBlock, dictionary.getPositions(ids, 0, 3));
+    }
+
+    @Test
+    public void testSequentialDictionaryUnnest()
+    {
+        int[] ids = new int[] {0, 1, 2, 3};
+        DictionaryBlock dictionaryBlock = (DictionaryBlock) DictionaryBlock.create(ids.length, dictionary, ids);
+
+        Block actualBlock = roundTripBlock(dictionaryBlock);
+        assertThat(actualBlock).isInstanceOf(VariableWidthBlock.class);
+        assertBlockEquals(VARCHAR, actualBlock, dictionary.getPositions(ids, 0, 4));
+    }
+
+    private Block roundTripBlock(Block block)
+    {
         DynamicSliceOutput sliceOutput = new DynamicSliceOutput(1024);
-        blockEncodingSerde.writeBlock(sliceOutput, dictionaryBlock);
-        Block actualBlock = blockEncodingSerde.readBlock(sliceOutput.slice().getInput());
+        blockEncodingSerde.writeBlock(sliceOutput, block);
+        return blockEncodingSerde.readBlock(sliceOutput.slice().getInput());
+    }
 
-        assertTrue(actualBlock instanceof DictionaryBlock);
-        DictionaryBlock actualDictionaryBlock = (DictionaryBlock) actualBlock;
-        assertBlockEquals(VARCHAR, actualDictionaryBlock.getDictionary(), dictionary);
-        for (int position = 0; position < actualDictionaryBlock.getPositionCount(); position++) {
-            assertEquals(actualDictionaryBlock.getId(position), ids[position]);
-        }
-        assertEquals(actualDictionaryBlock.getDictionarySourceId(), dictionaryBlock.getDictionarySourceId());
+    private static Block buildTestDictionary()
+    {
+        // build dictionary
+        BlockBuilder dictionaryBuilder = VARCHAR.createBlockBuilder(null, 4);
+        VARCHAR.writeString(dictionaryBuilder, "alice");
+        VARCHAR.writeString(dictionaryBuilder, "bob");
+        VARCHAR.writeString(dictionaryBuilder, "charlie");
+        VARCHAR.writeString(dictionaryBuilder, "dave");
+        return dictionaryBuilder.build();
     }
 }

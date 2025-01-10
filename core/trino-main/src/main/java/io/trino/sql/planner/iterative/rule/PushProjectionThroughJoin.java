@@ -15,7 +15,8 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Streams;
-import io.trino.metadata.Metadata;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.DeterminismEvaluator;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
@@ -24,7 +25,6 @@ import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.List;
 import java.util.Map;
@@ -34,9 +34,8 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static io.trino.sql.planner.SymbolsExtractor.extractUnique;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
+import static io.trino.sql.planner.plan.JoinType.INNER;
 
 /**
  * Utility class for pushing projections through inner join so that joins are not separated
@@ -44,18 +43,20 @@ import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
  */
 public final class PushProjectionThroughJoin
 {
-    public static Optional<PlanNode> pushProjectionThroughJoin(Metadata metadata, ProjectNode projectNode, Lookup lookup, PlanNodeIdAllocator planNodeIdAllocator)
+    public static Optional<PlanNode> pushProjectionThroughJoin(
+            ProjectNode projectNode,
+            Lookup lookup,
+            PlanNodeIdAllocator planNodeIdAllocator)
     {
-        if (!projectNode.getAssignments().getExpressions().stream().allMatch(expression -> isDeterministic(expression, metadata))) {
+        if (!projectNode.getAssignments().getExpressions().stream().allMatch(DeterminismEvaluator::isDeterministic)) {
             return Optional.empty();
         }
 
         PlanNode child = lookup.resolve(projectNode.getSource());
-        if (!(child instanceof JoinNode)) {
+        if (!(child instanceof JoinNode joinNode)) {
             return Optional.empty();
         }
 
-        JoinNode joinNode = (JoinNode) child;
         PlanNode leftChild = joinNode.getLeft();
         PlanNode rightChild = joinNode.getRight();
 
@@ -125,13 +126,14 @@ public final class PushProjectionThroughJoin
                 joinNode.getReorderJoinStatsAndCost()));
     }
 
-    private static PlanNode inlineProjections(ProjectNode parentProjection, Lookup lookup)
+    private static PlanNode inlineProjections(
+            ProjectNode parentProjection,
+            Lookup lookup)
     {
         PlanNode child = lookup.resolve(parentProjection.getSource());
-        if (!(child instanceof ProjectNode)) {
+        if (!(child instanceof ProjectNode childProjection)) {
             return parentProjection;
         }
-        ProjectNode childProjection = (ProjectNode) child;
 
         return InlineProjections.inlineProjections(parentProjection, childProjection)
                 .map(node -> inlineProjections(node, lookup))

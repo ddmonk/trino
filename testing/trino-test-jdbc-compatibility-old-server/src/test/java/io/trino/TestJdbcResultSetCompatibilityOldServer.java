@@ -16,12 +16,14 @@ package io.trino;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Resources;
 import io.trino.jdbc.BaseTestJdbcResultSet;
-import org.testcontainers.containers.PrestoContainer;
+import org.testcontainers.DockerClientFactory;
+import org.testcontainers.containers.TrinoContainer;
 import org.testcontainers.utility.DockerImageName;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Factory;
+import org.testng.annotations.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -34,11 +36,13 @@ import java.util.regex.Pattern;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.getStackTraceAsString;
 import static io.trino.testing.DataProviders.toDataProvider;
+import static java.lang.Integer.parseInt;
+import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
+@Test(singleThreaded = true)
 public class TestJdbcResultSetCompatibilityOldServer
         extends BaseTestJdbcResultSet
 {
@@ -50,7 +54,7 @@ public class TestJdbcResultSetCompatibilityOldServer
      * Empty means that we could not obtain current Trino version and tests defined here will be marked as failed.
      */
     private final Optional<String> testedTrinoVersion;
-    private PrestoContainer<?> trinoContainer;
+    private TrinoContainer trinoContainer;
 
     @Factory(dataProvider = "testedTrinoVersions")
     public TestJdbcResultSetCompatibilityOldServer(Optional<String> testedTrinoVersion)
@@ -65,10 +69,14 @@ public class TestJdbcResultSetCompatibilityOldServer
             String currentVersionString = Resources.toString(Resources.getResource("trino-test-jdbc-compatibility-old-server-version.txt"), UTF_8).trim();
             Matcher matcher = Pattern.compile("(\\d+)(?:-SNAPSHOT)?").matcher(currentVersionString);
             checkState(matcher.matches());
-            int currentVersion = Integer.parseInt(matcher.group(1));
+            int currentVersion = parseInt(matcher.group(1));
             ImmutableList.Builder<String> testedTrinoVersions = ImmutableList.builder();
             int testVersion = currentVersion - 1; // last release version
             for (int i = 0; i < NUMBER_OF_TESTED_VERSIONS; i++) {
+                if (testVersion == 456) {
+                    // 456 release was skipped.
+                    testVersion--;
+                }
                 if (testVersion < FIRST_VERSION) {
                     break;
                 }
@@ -93,23 +101,18 @@ public class TestJdbcResultSetCompatibilityOldServer
     @BeforeClass
     public void setupTrinoContainer()
     {
-        if (testedTrinoVersion.isEmpty()) {
-            throw new AssertionError("Could not determine current Trino version");
-        }
-
-        // TODO: add TrinoContainer to Testcontainers
-        DockerImageName image = DockerImageName.parse("trinodb/trino")
-                .withTag(testedTrinoVersion.get())
-                .asCompatibleSubstituteFor("prestosql/presto");
-        trinoContainer = new PrestoContainer<>(image);
+        DockerImageName image = DockerImageName.parse("trinodb/trino").withTag(getTestedTrinoVersion());
+        trinoContainer = new TrinoContainer(image);
         trinoContainer.start();
 
         // verify that version reported by Trino server matches requested one.
         try (ConnectedStatement statementWrapper = newStatement()) {
             try (ResultSet rs = statementWrapper.getStatement().executeQuery("SELECT node_version FROM system.runtime.nodes")) {
-                assertTrue(rs.next());
+                assertThat(rs.next()).isTrue();
                 String actualTrinoVersion = rs.getString(1);
-                assertEquals(actualTrinoVersion, testedTrinoVersion.get(), "Trino server version reported by container does not match expected one");
+                assertThat(actualTrinoVersion)
+                        .describedAs("Trino server version reported by container does not match expected one")
+                        .isEqualTo(getTestedTrinoVersion());
             }
         }
         catch (SQLException e) {
@@ -122,7 +125,10 @@ public class TestJdbcResultSetCompatibilityOldServer
     {
         if (trinoContainer != null) {
             trinoContainer.stop();
+            String imageName = trinoContainer.getDockerImageName();
             trinoContainer = null;
+
+            removeDockerImage(imageName);
         }
     }
 
@@ -134,16 +140,20 @@ public class TestJdbcResultSetCompatibilityOldServer
     }
 
     @Override
-    protected int getTestedServerVersion()
-    {
-        return Integer.parseInt(testedTrinoVersion.orElseThrow());
-    }
-
-    @Override
     public String toString()
     {
         // This allows distinguishing tests run against different Trino server version from each other.
         // It is included in tests report and maven output.
-        return "TestJdbcResultSetCompatibility[" + testedTrinoVersion.orElse("unknown") + "]";
+        return format("TestJdbcResultSetCompatibility[%s]", testedTrinoVersion.orElse("unknown"));
+    }
+
+    protected String getTestedTrinoVersion()
+    {
+        return testedTrinoVersion.orElseThrow(() -> new IllegalStateException("Trino version not set"));
+    }
+
+    private static void removeDockerImage(String imageName)
+    {
+        DockerClientFactory.lazyClient().removeImageCmd(imageName).exec();
     }
 }

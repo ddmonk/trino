@@ -13,56 +13,27 @@
  */
 package io.trino.spi.connector;
 
-import io.trino.spi.predicate.TupleDomain;
-
-import java.util.function.Supplier;
+import io.trino.spi.Experimental;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 
 public interface ConnectorSplitManager
 {
-    @Deprecated
     default ConnectorSplitSource getSplits(
-            ConnectorTransactionHandle transactionHandle,
+            ConnectorTransactionHandle transaction,
             ConnectorSession session,
-            ConnectorTableLayoutHandle layout,
-            SplitSchedulingStrategy splitSchedulingStrategy)
+            ConnectorTableHandle table,
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         throw new UnsupportedOperationException();
     }
 
-    @Deprecated
+    @Experimental(eta = "2023-07-31")
     default ConnectorSplitSource getSplits(
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
-            ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy)
+            ConnectorTableFunctionHandle function)
     {
         throw new UnsupportedOperationException();
-    }
-
-    @Deprecated
-    default ConnectorSplitSource getSplits(
-            ConnectorTransactionHandle transaction,
-            ConnectorSession session,
-            ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            Supplier<TupleDomain<ColumnHandle>> dynamicFilter)
-    {
-        return getSplits(transaction, session, table, splitSchedulingStrategy);
-    }
-
-    default ConnectorSplitSource getSplits(
-            ConnectorTransactionHandle transaction,
-            ConnectorSession session,
-            ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
-    {
-        return getSplits(transaction, session, table, splitSchedulingStrategy, dynamicFilter::getCurrentPredicate);
-    }
-
-    enum SplitSchedulingStrategy
-    {
-        UNGROUPED_SCHEDULING,
-        GROUPED_SCHEDULING,
     }
 }

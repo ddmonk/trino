@@ -14,6 +14,7 @@
 package io.trino.plugin.pinot.decoders;
 
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.IntArrayBlockBuilder;
 
 import java.util.function.Supplier;
 
@@ -23,6 +24,12 @@ public class IntegerDecoder
     @Override
     public void decode(Supplier<Object> getter, BlockBuilder output)
     {
-        output.writeInt(((Number) getter.get()).intValue());
+        Object value = getter.get();
+        if (value == null) {
+            output.appendNull();
+        }
+        else {
+            ((IntArrayBlockBuilder) output).writeInt(((Number) value).intValue());
+        }
     }
 }

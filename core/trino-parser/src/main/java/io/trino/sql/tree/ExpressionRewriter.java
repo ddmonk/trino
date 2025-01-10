@@ -45,7 +45,7 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
-    public Expression rewriteLogicalBinaryExpression(LogicalBinaryExpression node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    public Expression rewriteLogicalExpression(LogicalExpression node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
@@ -105,12 +105,12 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
-    public Expression rewriteLambdaExpression(LambdaExpression node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    public Expression rewriteWindowOperation(WindowOperation node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
 
-    public Expression rewriteBindExpression(BindExpression node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    public Expression rewriteLambdaExpression(LambdaExpression node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
@@ -140,7 +140,7 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
-    public Expression rewriteArrayConstructor(ArrayConstructor node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    public Expression rewriteArray(Array node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
@@ -165,7 +165,27 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
+    public Expression rewriteCurrentDate(CurrentDate node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
     public Expression rewriteCurrentTime(CurrentTime node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteCurrentTimestamp(CurrentTimestamp node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteLocalTime(LocalTime node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteLocalTimestamp(LocalTimestamp node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
@@ -185,6 +205,16 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
+    public Expression rewriteCurrentCatalog(CurrentCatalog node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteCurrentSchema(CurrentSchema node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
     public Expression rewriteCurrentUser(CurrentUser node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
@@ -195,17 +225,17 @@ public class ExpressionRewriter<C>
         return rewriteExpression(node, context, treeRewriter);
     }
 
+    public Expression rewriteTrim(Trim node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
     public Expression rewriteFormat(Format node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
 
     public Expression rewriteFieldReference(FieldReference node, C context, ExpressionTreeRewriter<C> treeRewriter)
-    {
-        return rewriteExpression(node, context, treeRewriter);
-    }
-
-    public Expression rewriteSymbolReference(SymbolReference node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }
@@ -241,6 +271,31 @@ public class ExpressionRewriter<C>
     }
 
     public Expression rewriteIntervalDayTimeDataType(IntervalDayTimeDataType node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteJsonExists(JsonExists node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteJsonValue(JsonValue node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteJsonQuery(JsonQuery node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteJsonObject(JsonObject node, C context, ExpressionTreeRewriter<C> treeRewriter)
+    {
+        return rewriteExpression(node, context, treeRewriter);
+    }
+
+    public Expression rewriteJsonArray(JsonArray node, C context, ExpressionTreeRewriter<C> treeRewriter)
     {
         return rewriteExpression(node, context, treeRewriter);
     }

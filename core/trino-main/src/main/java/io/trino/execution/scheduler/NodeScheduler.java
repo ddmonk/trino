@@ -13,19 +13,21 @@
  */
 package io.trino.execution.scheduler;
 
-import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.connector.CatalogName;
+import com.google.inject.Inject;
+import io.trino.Session;
 import io.trino.execution.NodeTaskMap;
 import io.trino.execution.RemoteTask;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
 import io.trino.spi.HostAddress;
-
-import javax.inject.Inject;
+import io.trino.spi.SplitWeight;
+import io.trino.spi.connector.CatalogHandle;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -42,8 +44,10 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.whenAnyCompleteCancelOthers;
+import static java.lang.Math.addExact;
 import static java.util.Objects.requireNonNull;
 
 public class NodeScheduler
@@ -56,9 +60,9 @@ public class NodeScheduler
         this.nodeSelectorFactory = requireNonNull(nodeSelectorFactory, "nodeSelectorFactory is null");
     }
 
-    public NodeSelector createNodeSelector(Optional<CatalogName> catalogName)
+    public NodeSelector createNodeSelector(Session session, Optional<CatalogHandle> catalogHandle)
     {
-        return nodeSelectorFactory.createNodeSelector(requireNonNull(catalogName, "catalogName is null"));
+        return nodeSelectorFactory.createNodeSelector(requireNonNull(session, "session is null"), requireNonNull(catalogHandle, "catalogHandle is null"));
     }
 
     public static List<InternalNode> getAllNodes(NodeMap nodeMap, boolean includeCoordinator)
@@ -82,11 +86,15 @@ public class NodeScheduler
 
     public static ResettableRandomizedIterator<InternalNode> randomizedNodes(NodeMap nodeMap, boolean includeCoordinator, Set<InternalNode> excludedNodes)
     {
-        ImmutableList<InternalNode> nodes = nodeMap.getNodesByHostAndPort().values().stream()
+        return new ResettableRandomizedIterator<>(filterNodes(nodeMap, includeCoordinator, excludedNodes));
+    }
+
+    public static List<InternalNode> filterNodes(NodeMap nodeMap, boolean includeCoordinator, Set<InternalNode> excludedNodes)
+    {
+        return nodeMap.getNodesByHostAndPort().values().stream()
                 .filter(node -> includeCoordinator || !nodeMap.getCoordinatorNodeIds().contains(node.getNodeIdentifier()))
                 .filter(node -> !excludedNodes.contains(node))
                 .collect(toImmutableList());
-        return new ResettableRandomizedIterator<>(nodes);
     }
 
     public static List<InternalNode> selectExactNodes(NodeMap nodeMap, List<HostAddress> hosts, boolean includeCoordinator)
@@ -99,17 +107,17 @@ public class NodeScheduler
                     .filter(node -> includeCoordinator || !coordinatorIds.contains(node.getNodeIdentifier()))
                     .forEach(chosen::add);
 
-            InetAddress address;
-            try {
-                address = host.toInetAddress();
-            }
-            catch (UnknownHostException e) {
-                // skip hosts that don't resolve
-                continue;
-            }
-
             // consider a split with a host without a port as being accessible by all nodes in that host
             if (!host.hasPort()) {
+                InetAddress address;
+                try {
+                    address = host.toInetAddress();
+                }
+                catch (UnknownHostException e) {
+                    // skip hosts that don't resolve
+                    continue;
+                }
+
                 nodeMap.getNodesByHost().get(address).stream()
                         .filter(node -> includeCoordinator || !coordinatorIds.contains(node.getNodeIdentifier()))
                         .forEach(chosen::add);
@@ -125,17 +133,17 @@ public class NodeScheduler
 
                 chosen.addAll(nodeMap.getNodesByHostAndPort().get(host));
 
-                InetAddress address;
-                try {
-                    address = host.toInetAddress();
-                }
-                catch (UnknownHostException e) {
-                    // skip hosts that don't resolve
-                    continue;
-                }
-
                 // consider a split with a host without a port as being accessible by all nodes in that host
                 if (!host.hasPort()) {
+                    InetAddress address;
+                    try {
+                        address = host.toInetAddress();
+                    }
+                    catch (UnknownHostException e) {
+                        // skip hosts that don't resolve
+                        continue;
+                    }
+
                     chosen.addAll(nodeMap.getNodesByHost().get(address));
                 }
             }
@@ -147,69 +155,89 @@ public class NodeScheduler
     public static SplitPlacementResult selectDistributionNodes(
             NodeMap nodeMap,
             NodeTaskMap nodeTaskMap,
-            int maxSplitsPerNode,
-            int maxPendingSplitsPerTask,
+            long maxSplitsWeightPerNode,
+            long minPendingSplitsWeightPerTask,
+            int maxUnacknowledgedSplitsPerTask,
             Set<Split> splits,
             List<RemoteTask> existingTasks,
             BucketNodeMap bucketNodeMap)
     {
-        Multimap<InternalNode, Split> assignments = HashMultimap.create();
+        Multimap<InternalNode, Split> assignments = LinkedHashMultimap.create();
         NodeAssignmentStats assignmentStats = new NodeAssignmentStats(nodeTaskMap, nodeMap, existingTasks);
 
         Set<InternalNode> blockedNodes = new HashSet<>();
         for (Split split : splits) {
             // node placement is forced by the bucket to node map
-            InternalNode node = bucketNodeMap.getAssignedNode(split).get();
+            InternalNode node = bucketNodeMap.getAssignedNode(split);
+            SplitWeight splitWeight = split.getSplitWeight();
 
             // if node is full, don't schedule now, which will push back on the scheduling of splits
-            if (assignmentStats.getTotalSplitCount(node) < maxSplitsPerNode ||
-                    assignmentStats.getQueuedSplitCountForStage(node) < maxPendingSplitsPerTask) {
+            if (canAssignSplitToDistributionNode(assignmentStats, node, maxSplitsWeightPerNode, minPendingSplitsWeightPerTask, maxUnacknowledgedSplitsPerTask, splitWeight)) {
                 assignments.put(node, split);
-                assignmentStats.addAssignedSplit(node);
+                assignmentStats.addAssignedSplit(node, splitWeight);
             }
             else {
                 blockedNodes.add(node);
             }
         }
 
-        ListenableFuture<?> blocked = toWhenHasSplitQueueSpaceFuture(blockedNodes, existingTasks, calculateLowWatermark(maxPendingSplitsPerTask));
+        ListenableFuture<Void> blocked = toWhenHasSplitQueueSpaceFuture(blockedNodes, existingTasks, calculateLowWatermark(minPendingSplitsWeightPerTask));
         return new SplitPlacementResult(blocked, ImmutableMultimap.copyOf(assignments));
     }
 
-    public static int calculateLowWatermark(int maxPendingSplitsPerTask)
+    private static boolean canAssignSplitToDistributionNode(NodeAssignmentStats assignmentStats, InternalNode node, long maxSplitsWeightPerNode, long minPendingSplitsWeightPerTask, int maxUnacknowledgedSplitsPerTask, SplitWeight splitWeight)
     {
-        return (int) Math.ceil(maxPendingSplitsPerTask / 2.0);
+        return assignmentStats.getUnacknowledgedSplitCountForStage(node) < maxUnacknowledgedSplitsPerTask &&
+                (canAssignSplitBasedOnWeight(assignmentStats.getTotalSplitsWeight(node), maxSplitsWeightPerNode, splitWeight) ||
+                        canAssignSplitBasedOnWeight(assignmentStats.getQueuedSplitsWeightForStage(node), minPendingSplitsWeightPerTask, splitWeight));
     }
 
-    public static ListenableFuture<?> toWhenHasSplitQueueSpaceFuture(Set<InternalNode> blockedNodes, List<RemoteTask> existingTasks, int spaceThreshold)
+    public static boolean canAssignSplitBasedOnWeight(long currentWeight, long weightLimit, SplitWeight splitWeight)
+    {
+        // Nodes or tasks that are configured to accept any splits (ie: weightLimit > 0) should always accept at least one split when
+        // empty (ie: currentWeight == 0) to ensure that forward progress can be made if split weights are huge
+        return addExact(currentWeight, splitWeight.getRawValue()) <= weightLimit || (currentWeight == 0 && weightLimit > 0);
+    }
+
+    public static long calculateLowWatermark(long minPendingSplitsWeightPerTask)
+    {
+        return (long) Math.ceil(minPendingSplitsWeightPerTask * 0.5);
+    }
+
+    public static ListenableFuture<Void> toWhenHasSplitQueueSpaceFuture(Set<InternalNode> blockedNodes, List<RemoteTask> existingTasks, long weightSpaceThreshold)
     {
         if (blockedNodes.isEmpty()) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
         Map<String, RemoteTask> nodeToTaskMap = new HashMap<>();
         for (RemoteTask task : existingTasks) {
             nodeToTaskMap.put(task.getNodeId(), task);
         }
-        List<ListenableFuture<?>> blockedFutures = blockedNodes.stream()
+        List<ListenableFuture<Void>> blockedFutures = blockedNodes.stream()
                 .map(InternalNode::getNodeIdentifier)
                 .map(nodeToTaskMap::get)
                 .filter(Objects::nonNull)
-                .map(remoteTask -> remoteTask.whenSplitQueueHasSpace(spaceThreshold))
+                .map(remoteTask -> remoteTask.whenSplitQueueHasSpace(weightSpaceThreshold))
                 .collect(toImmutableList());
         if (blockedFutures.isEmpty()) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
-        return whenAnyCompleteCancelOthers(blockedFutures);
+        return asVoid(whenAnyCompleteCancelOthers(blockedFutures));
     }
 
-    public static ListenableFuture<?> toWhenHasSplitQueueSpaceFuture(List<RemoteTask> existingTasks, int spaceThreshold)
+    public static ListenableFuture<Void> toWhenHasSplitQueueSpaceFuture(List<RemoteTask> existingTasks, long weightSpaceThreshold)
     {
         if (existingTasks.isEmpty()) {
-            return immediateFuture(null);
+            return immediateVoidFuture();
         }
-        List<ListenableFuture<?>> stateChangeFutures = existingTasks.stream()
-                .map(remoteTask -> remoteTask.whenSplitQueueHasSpace(spaceThreshold))
+        List<ListenableFuture<Void>> stateChangeFutures = existingTasks.stream()
+                .map(remoteTask -> remoteTask.whenSplitQueueHasSpace(weightSpaceThreshold))
                 .collect(toImmutableList());
-        return whenAnyCompleteCancelOthers(stateChangeFutures);
+        return asVoid(whenAnyCompleteCancelOthers(stateChangeFutures));
+    }
+
+    private static <T> ListenableFuture<Void> asVoid(ListenableFuture<T> future)
+    {
+        return Futures.transform(future, v -> null, directExecutor());
     }
 }

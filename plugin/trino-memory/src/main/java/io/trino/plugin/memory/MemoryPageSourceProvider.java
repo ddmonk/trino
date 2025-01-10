@@ -13,6 +13,10 @@
  */
 package io.trino.plugin.memory;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -23,19 +27,19 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedPageSource;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeUtils;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 public final class MemoryPageSourceProvider
         implements ConnectorPageSourceProvider
@@ -60,23 +64,29 @@ public final class MemoryPageSourceProvider
             DynamicFilter dynamicFilter)
     {
         MemorySplit memorySplit = (MemorySplit) split;
-        long tableId = memorySplit.getTable();
-        int partNumber = memorySplit.getPartNumber();
-        int totalParts = memorySplit.getTotalPartsPerWorker();
-        long expectedRows = memorySplit.getExpectedRows();
+        long tableId = memorySplit.table();
+        int partNumber = memorySplit.partNumber();
+        int totalParts = memorySplit.totalPartsPerWorker();
+        long expectedRows = memorySplit.expectedRows();
         MemoryTableHandle memoryTable = (MemoryTableHandle) table;
-        OptionalDouble sampleRatio = memoryTable.getSampleRatio();
+        OptionalDouble sampleRatio = memoryTable.sampleRatio();
 
-        List<Integer> columnIndexes = columns.stream()
-                .map(MemoryColumnHandle.class::cast)
-                .map(MemoryColumnHandle::getColumnIndex).collect(toList());
+        int[] columnIndexes = new int[columns.size()];
+        ImmutableList.Builder<Type> columnTypes = ImmutableList.builder();
+        for (int i = 0; i < columns.size(); i++) {
+            MemoryColumnHandle column = (MemoryColumnHandle) columns.get(i);
+            columnIndexes[i] = column.columnIndex();
+            columnTypes.add(column.type());
+        }
+
         List<Page> pages = pagesStore.getPages(
                 tableId,
                 partNumber,
                 totalParts,
                 columnIndexes,
+                columnTypes.build(),
                 expectedRows,
-                memorySplit.getLimit(),
+                memorySplit.limit(),
                 sampleRatio);
 
         return new DynamicFilteringPageSource(new FixedPageSource(pages), columns, dynamicFilter, enableLazyDynamicFiltering);
@@ -89,6 +99,9 @@ public final class MemoryPageSourceProvider
         private final List<ColumnHandle> columns;
         private final DynamicFilter dynamicFilter;
         private final boolean enableLazyDynamicFiltering;
+        private long rows;
+        private long completedPositions;
+        private boolean closed;
 
         private DynamicFilteringPageSource(FixedPageSource delegate, List<ColumnHandle> columns, DynamicFilter dynamicFilter, boolean enableLazyDynamicFiltering)
         {
@@ -102,6 +115,12 @@ public final class MemoryPageSourceProvider
         public long getCompletedBytes()
         {
             return delegate.getCompletedBytes();
+        }
+
+        @Override
+        public OptionalLong getCompletedPositions()
+        {
+            return OptionalLong.of(completedPositions);
         }
 
         @Override
@@ -128,9 +147,15 @@ public final class MemoryPageSourceProvider
                 return null;
             }
             Page page = delegate.getNextPage();
-            if (page != null && !predicate.isAll()) {
-                page = applyFilter(page, predicate.transform(columns::indexOf).getDomains().get());
+            if (page == null) {
+                return null;
             }
+            completedPositions += page.getPositionCount();
+
+            if (!predicate.isAll()) {
+                page = applyFilter(page, predicate.transformKeys(columns::indexOf).getDomains().get());
+            }
+            rows += page.getPositionCount();
             return page;
         }
 
@@ -144,15 +169,25 @@ public final class MemoryPageSourceProvider
         }
 
         @Override
-        public long getSystemMemoryUsage()
+        public long getMemoryUsage()
         {
-            return delegate.getSystemMemoryUsage();
+            return delegate.getMemoryUsage();
         }
 
         @Override
         public void close()
         {
             delegate.close();
+            closed = true;
+        }
+
+        @Override
+        public Metrics getMetrics()
+        {
+            return new Metrics(ImmutableMap.of(
+                    "rows", new LongCount(rows),
+                    "finished", new LongCount(closed ? 1 : 0),
+                    "started", new LongCount(1)));
         }
     }
 

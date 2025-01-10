@@ -69,7 +69,7 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitArrayConstructor(ArrayConstructor node, C context)
+    protected Void visitArray(Array node, C context)
     {
         for (Expression expression : node.getValues()) {
             process(expression, context);
@@ -92,6 +92,15 @@ public abstract class DefaultTraversalVisitor<C>
     {
         process(node.getLeft(), context);
         process(node.getRight(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitTrim(Trim node, C context)
+    {
+        process(node.getTrimSource(), context);
+        node.getTrimCharacter().ifPresent(trimChar -> process(trimChar, context));
 
         return null;
     }
@@ -210,6 +219,15 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitWindowOperation(WindowOperation node, C context)
+    {
+        process(node.getName(), context);
+        process((Node) node.getWindow(), context);
+
+        return null;
+    }
+
+    @Override
     protected Void visitGroupingOperation(GroupingOperation node, C context)
     {
         for (Expression columnArgument : node.getGroupingColumns()) {
@@ -271,7 +289,27 @@ public abstract class DefaultTraversalVisitor<C>
         if (node.getEnd().isPresent()) {
             process(node.getEnd().get(), context);
         }
+        for (MeasureDefinition measureDefinition : node.getMeasures()) {
+            process(measureDefinition, context);
+        }
+        for (VariableDefinition variableDefinition : node.getVariableDefinitions()) {
+            process(variableDefinition, context);
+        }
 
+        return null;
+    }
+
+    @Override
+    protected Void visitMeasureDefinition(MeasureDefinition node, C context)
+    {
+        process(node.getExpression(), context);
+        return null;
+    }
+
+    @Override
+    protected Void visitVariableDefinition(VariableDefinition node, C context)
+    {
+        process(node.getExpression(), context);
         return null;
     }
 
@@ -362,17 +400,6 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitBindExpression(BindExpression node, C context)
-    {
-        for (Expression value : node.getValues()) {
-            process(value, context);
-        }
-        process(node.getFunction(), context);
-
-        return null;
-    }
-
-    @Override
     protected Void visitArithmeticUnary(ArithmeticUnaryExpression node, C context)
     {
         process(node.getValue(), context);
@@ -423,10 +450,11 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitLogicalBinaryExpression(LogicalBinaryExpression node, C context)
+    protected Void visitLogicalExpression(LogicalExpression node, C context)
     {
-        process(node.getLeft(), context);
-        process(node.getRight(), context);
+        for (Node child : node.getTerms()) {
+            process(child, context);
+        }
 
         return null;
     }
@@ -568,18 +596,6 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitCube(Cube node, C context)
-    {
-        return null;
-    }
-
-    @Override
-    protected Void visitRollup(Rollup node, C context)
-    {
-        return null;
-    }
-
-    @Override
     protected Void visitSimpleGroupBy(SimpleGroupBy node, C context)
     {
         for (Expression expression : node.getExpressions()) {
@@ -637,6 +653,43 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitMerge(Merge node, C context)
+    {
+        process(node.getTarget(), context);
+        process(node.getSource(), context);
+        process(node.getPredicate(), context);
+        node.getMergeCases().forEach(mergeCase -> process(mergeCase, context));
+        return null;
+    }
+
+    @Override
+    protected Void visitMergeInsert(MergeInsert node, C context)
+    {
+        node.getExpression().ifPresent(expression -> process(expression, context));
+        node.getColumns().forEach(column -> process(column, context));
+        node.getValues().forEach(expression -> process(expression, context));
+        return null;
+    }
+
+    @Override
+    protected Void visitMergeUpdate(MergeUpdate node, C context)
+    {
+        node.getExpression().ifPresent(expression -> process(expression, context));
+        node.getAssignments().forEach(assignment -> {
+            process(assignment.getTarget(), context);
+            process(assignment.getValue(), context);
+        });
+        return null;
+    }
+
+    @Override
+    protected Void visitMergeDelete(MergeDelete node, C context)
+    {
+        node.getExpression().ifPresent(expression -> process(expression, context));
+        return null;
+    }
+
+    @Override
     protected Void visitCreateTableAsSelect(CreateTableAsSelect node, C context)
     {
         process(node.getQuery(), context);
@@ -651,8 +704,9 @@ public abstract class DefaultTraversalVisitor<C>
     protected Void visitProperty(Property node, C context)
     {
         process(node.getName(), context);
-        process(node.getValue(), context);
-
+        if (!node.isSetToDefault()) {
+            process(node.getNonDefaultValue(), context);
+        }
         return null;
     }
 
@@ -685,6 +739,16 @@ public abstract class DefaultTraversalVisitor<C>
     protected Void visitAddColumn(AddColumn node, C context)
     {
         process(node.getColumn(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitCreateSchema(CreateSchema node, C context)
+    {
+        for (Property property : node.getProperties()) {
+            process(property, context);
+        }
 
         return null;
     }
@@ -725,6 +789,13 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
+    protected Void visitExplainAnalyze(ExplainAnalyze node, C context)
+    {
+        process(node.getStatement(), context);
+        return null;
+    }
+
+    @Override
     protected Void visitShowStats(ShowStats node, C context)
     {
         process(node.getRelation(), context);
@@ -760,6 +831,174 @@ public abstract class DefaultTraversalVisitor<C>
     protected Void visitLambdaExpression(LambdaExpression node, C context)
     {
         process(node.getBody(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitExcludedPattern(ExcludedPattern node, C context)
+    {
+        process(node.getPattern(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPatternAlternation(PatternAlternation node, C context)
+    {
+        for (RowPattern rowPattern : node.getPatterns()) {
+            process(rowPattern, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPatternConcatenation(PatternConcatenation node, C context)
+    {
+        for (RowPattern rowPattern : node.getPatterns()) {
+            process(rowPattern, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPatternPermutation(PatternPermutation node, C context)
+    {
+        for (RowPattern rowPattern : node.getPatterns()) {
+            process(rowPattern, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitPatternVariable(PatternVariable node, C context)
+    {
+        process(node.getName(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitQuantifiedPattern(QuantifiedPattern node, C context)
+    {
+        process(node.getPattern(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonExists(JsonExists node, C context)
+    {
+        process(node.getJsonPathInvocation(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonValue(JsonValue node, C context)
+    {
+        process(node.getJsonPathInvocation(), context);
+        node.getEmptyDefault().ifPresent(expression -> process(expression, context));
+        node.getErrorDefault().ifPresent(expression -> process(expression, context));
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonQuery(JsonQuery node, C context)
+    {
+        process(node.getJsonPathInvocation(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonPathInvocation(JsonPathInvocation node, C context)
+    {
+        process(node.getInputExpression(), context);
+        for (JsonPathParameter parameter : node.getPathParameters()) {
+            process(parameter.getParameter(), context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonObject(JsonObject node, C context)
+    {
+        for (JsonObjectMember member : node.getMembers()) {
+            process(member, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonObjectMember(JsonObjectMember node, C context)
+    {
+        process(node.getKey(), context);
+        process(node.getValue(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonArray(JsonArray node, C context)
+    {
+        for (JsonArrayElement element : node.getElements()) {
+            process(element, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonArrayElement(JsonArrayElement node, C context)
+    {
+        process(node.getValue(), context);
+
+        return null;
+    }
+
+    @Override
+    protected Void visitTableFunctionInvocation(TableFunctionInvocation node, C context)
+    {
+        for (TableFunctionArgument argument : node.getArguments()) {
+            process(argument.getValue(), context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitJsonTable(JsonTable node, C context)
+    {
+        process(node.getJsonPathInvocation(), context);
+        for (JsonTableColumnDefinition column : node.getColumns()) {
+            process(column, context);
+        }
+
+        return null;
+    }
+
+    @Override
+    protected Void visitValueColumn(ValueColumn node, C context)
+    {
+        node.getEmptyDefault().ifPresent(expression -> process(expression, context));
+        node.getErrorDefault().ifPresent(expression -> process(expression, context));
+
+        return null;
+    }
+
+    @Override
+    protected Void visitNestedColumns(NestedColumns node, C context)
+    {
+        for (JsonTableColumnDefinition column : node.getColumns()) {
+            process(column, context);
+        }
 
         return null;
     }

@@ -20,13 +20,14 @@ import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
-
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
 import java.io.File;
+import java.util.List;
 import java.util.Optional;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -53,13 +54,15 @@ public class ElasticsearchConfig
         PASSWORD,
     }
 
-    private String host;
+    private List<String> hosts;
     private int port = 9200;
     private String defaultSchema = "default";
     private int scrollSize = 1_000;
     private Duration scrollTimeout = new Duration(1, MINUTES);
     private Duration requestTimeout = new Duration(10, SECONDS);
     private Duration connectTimeout = new Duration(1, SECONDS);
+    private Duration backoffInitDelay = new Duration(500, MILLISECONDS);
+    private Duration backoffMaxDelay = new Duration(20, SECONDS);
     private Duration maxRetryTime = new Duration(30, SECONDS);
     private Duration nodeRefreshInterval = new Duration(1, MINUTES);
     private int maxHttpConnections = 25;
@@ -76,15 +79,15 @@ public class ElasticsearchConfig
     private Security security;
 
     @NotNull
-    public String getHost()
+    public List<String> getHosts()
     {
-        return host;
+        return hosts;
     }
 
     @Config("elasticsearch.host")
-    public ElasticsearchConfig setHost(String host)
+    public ElasticsearchConfig setHosts(List<String> hosts)
     {
-        this.host = host;
+        this.hosts = hosts;
         return this;
     }
 
@@ -114,7 +117,6 @@ public class ElasticsearchConfig
         return this;
     }
 
-    @NotNull
     @Min(1)
     public int getScrollSize()
     {
@@ -172,6 +174,34 @@ public class ElasticsearchConfig
     }
 
     @NotNull
+    public Duration getBackoffInitDelay()
+    {
+        return backoffInitDelay;
+    }
+
+    @Config("elasticsearch.backoff-init-delay")
+    @ConfigDescription("Initial delay to wait between backpressure retries")
+    public ElasticsearchConfig setBackoffInitDelay(Duration backoffInitDelay)
+    {
+        this.backoffInitDelay = backoffInitDelay;
+        return this;
+    }
+
+    @NotNull
+    public Duration getBackoffMaxDelay()
+    {
+        return backoffMaxDelay;
+    }
+
+    @Config("elasticsearch.backoff-max-delay")
+    @ConfigDescription("Maximum delay to wait between backpressure retries")
+    public ElasticsearchConfig setBackoffMaxDelay(Duration backoffMaxDelay)
+    {
+        this.backoffMaxDelay = backoffMaxDelay;
+        return this;
+    }
+
+    @NotNull
     public Duration getMaxRetryTime()
     {
         return maxRetryTime;
@@ -208,7 +238,6 @@ public class ElasticsearchConfig
         return this;
     }
 
-    @NotNull
     public int getMaxHttpConnections()
     {
         return maxHttpConnections;
@@ -222,7 +251,6 @@ public class ElasticsearchConfig
         return this;
     }
 
-    @NotNull
     public int getHttpThreadCount()
     {
         return httpThreadCount;

@@ -16,8 +16,9 @@ package io.trino.plugin.hive;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.trino.orc.OrcWriteValidation.OrcWriteValidationMode;
+import io.trino.orc.OrcWriterOptions.WriterIdentification;
 import io.trino.plugin.hive.orc.OrcWriterConfig;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -41,7 +42,7 @@ public class TestOrcWriterConfig
                 .setStringStatisticsLimit(DataSize.ofBytes(64))
                 .setMaxCompressionBufferSize(DataSize.of(256, KILOBYTE))
                 .setDefaultBloomFilterFpp(0.05)
-                .setUseLegacyVersion(false)
+                .setWriterIdentification(WriterIdentification.TRINO)
                 .setValidationPercentage(0.0)
                 .setValidationMode(OrcWriteValidationMode.BOTH));
     }
@@ -49,7 +50,7 @@ public class TestOrcWriterConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.orc.writer.stripe-min-size", "13MB")
                 .put("hive.orc.writer.stripe-max-size", "27MB")
                 .put("hive.orc.writer.stripe-max-rows", "44")
@@ -58,10 +59,10 @@ public class TestOrcWriterConfig
                 .put("hive.orc.writer.string-statistics-limit", "17MB")
                 .put("hive.orc.writer.max-compression-buffer-size", "19MB")
                 .put("hive.orc.default-bloom-filter-fpp", "0.96")
-                .put("hive.orc.writer.use-legacy-version-number", "true")
+                .put("hive.orc.writer.writer-identification", "LEGACY_HIVE_COMPATIBLE")
                 .put("hive.orc.writer.validation-percentage", "0.16")
                 .put("hive.orc.writer.validation-mode", "DETAILED")
-                .build();
+                .buildOrThrow();
 
         OrcWriterConfig expected = new OrcWriterConfig()
                 .setStripeMinSize(DataSize.of(13, MEGABYTE))
@@ -72,7 +73,7 @@ public class TestOrcWriterConfig
                 .setStringStatisticsLimit(DataSize.of(17, MEGABYTE))
                 .setMaxCompressionBufferSize(DataSize.of(19, MEGABYTE))
                 .setDefaultBloomFilterFpp(0.96)
-                .setUseLegacyVersion(true)
+                .setWriterIdentification(WriterIdentification.LEGACY_HIVE_COMPATIBLE)
                 .setValidationPercentage(0.16)
                 .setValidationMode(OrcWriteValidationMode.DETAILED);
 

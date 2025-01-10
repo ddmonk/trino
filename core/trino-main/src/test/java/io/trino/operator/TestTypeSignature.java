@@ -21,7 +21,8 @@ import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.TypeSignatureParameter;
 import io.trino.spi.type.VarcharType;
-import org.testng.annotations.Test;
+import io.trino.sql.parser.ParsingException;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -41,11 +42,8 @@ import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.parseTypeSignature;
 import static java.util.Arrays.asList;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotEquals;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTypeSignature
 {
@@ -53,9 +51,9 @@ public class TestTypeSignature
     public void parseSignatureWithLiterals()
     {
         TypeSignature result = new TypeSignature("decimal", typeVariable("X"), numericParameter(42));
-        assertEquals(result.getParameters().size(), 2);
-        assertEquals(result.getParameters().get(0).isVariable(), true);
-        assertEquals(result.getParameters().get(1).isLongLiteral(), true);
+        assertThat(result.getParameters()).hasSize(2);
+        assertThat(result.getParameters().get(0).isVariable()).isEqualTo(true);
+        assertThat(result.getParameters().get(1).isLongLiteral()).isEqualTo(true);
     }
 
     @Test
@@ -266,25 +264,26 @@ public class TestTypeSignature
     @Test
     public void testVarchar()
     {
-        assertEquals(VARCHAR.getTypeSignature().toString(), "varchar");
-        assertEquals(createVarcharType(42).getTypeSignature().toString(), "varchar(42)");
-        assertEquals(VARCHAR.getTypeSignature(), createUnboundedVarcharType().getTypeSignature());
-        assertEquals(createUnboundedVarcharType().getTypeSignature(), VARCHAR.getTypeSignature());
-        assertEquals(VARCHAR.getTypeSignature().hashCode(), createUnboundedVarcharType().getTypeSignature().hashCode());
-        assertNotEquals(createUnboundedVarcharType().getTypeSignature(), createVarcharType(10).getTypeSignature());
+        assertThat(VARCHAR.getTypeSignature().toString()).isEqualTo("varchar");
+        assertThat(createVarcharType(42).getTypeSignature().toString()).isEqualTo("varchar(42)");
+        assertThat(VARCHAR.getTypeSignature()).isEqualTo(createUnboundedVarcharType().getTypeSignature());
+        assertThat(createUnboundedVarcharType().getTypeSignature()).isEqualTo(VARCHAR.getTypeSignature());
+        assertThat(VARCHAR.getTypeSignature().hashCode()).isEqualTo(createUnboundedVarcharType().getTypeSignature().hashCode());
+        assertThat(createUnboundedVarcharType().getTypeSignature())
+                .isNotEqualTo(createVarcharType(10).getTypeSignature());
     }
 
     @Test
     public void testIsCalculated()
     {
-        assertFalse(BIGINT.getTypeSignature().isCalculated());
-        assertTrue(new TypeSignature("decimal", typeVariable("p"), typeVariable("s")).isCalculated());
-        assertFalse(createDecimalType(2, 1).getTypeSignature().isCalculated());
-        assertTrue(arrayType(new TypeSignature("decimal", typeVariable("p"), typeVariable("s"))).isCalculated());
-        assertFalse(arrayType(createDecimalType(2, 1).getTypeSignature()).isCalculated());
-        assertTrue(mapType(new TypeSignature("decimal", typeVariable("p1"), typeVariable("s1")), new TypeSignature("decimal", typeVariable("p2"), typeVariable("s2"))).isCalculated());
-        assertFalse(mapType(createDecimalType(2, 1).getTypeSignature(), createDecimalType(3, 1).getTypeSignature()).isCalculated());
-        assertTrue(rowType(namedField("a", new TypeSignature("decimal", typeVariable("p1"), typeVariable("s1"))), namedField("b", new TypeSignature("decimal", typeVariable("p2"), typeVariable("s2")))).isCalculated());
+        assertThat(BIGINT.getTypeSignature().isCalculated()).isFalse();
+        assertThat(new TypeSignature("decimal", typeVariable("p"), typeVariable("s")).isCalculated()).isTrue();
+        assertThat(createDecimalType(2, 1).getTypeSignature().isCalculated()).isFalse();
+        assertThat(arrayType(new TypeSignature("decimal", typeVariable("p"), typeVariable("s"))).isCalculated()).isTrue();
+        assertThat(arrayType(createDecimalType(2, 1).getTypeSignature()).isCalculated()).isFalse();
+        assertThat(mapType(new TypeSignature("decimal", typeVariable("p1"), typeVariable("s1")), new TypeSignature("decimal", typeVariable("p2"), typeVariable("s2"))).isCalculated()).isTrue();
+        assertThat(mapType(createDecimalType(2, 1).getTypeSignature(), createDecimalType(3, 1).getTypeSignature()).isCalculated()).isFalse();
+        assertThat(rowType(namedField("a", new TypeSignature("decimal", typeVariable("p1"), typeVariable("s1"))), namedField("b", new TypeSignature("decimal", typeVariable("p2"), typeVariable("s2")))).isCalculated()).isTrue();
     }
 
     private static void assertRowSignature(
@@ -293,7 +292,7 @@ public class TestTypeSignature
             TypeSignature expectedSignature)
     {
         TypeSignature signature = parseTypeSignature(typeName, literalParameters);
-        assertEquals(signature, expectedSignature);
+        assertThat(signature).isEqualTo(expectedSignature);
     }
 
     private static void assertRowSignature(
@@ -315,33 +314,25 @@ public class TestTypeSignature
             String expectedTypeName)
     {
         TypeSignature signature = parseTypeSignature(typeName, ImmutableSet.of());
-        assertEquals(signature.getBase(), base);
-        assertEquals(signature.getParameters().size(), parameters.size());
+        assertThat(signature.getBase()).isEqualTo(base);
+        assertThat(signature.getParameters()).hasSize(parameters.size());
         for (int i = 0; i < signature.getParameters().size(); i++) {
-            assertEquals(signature.getParameters().get(i).toString(), parameters.get(i));
+            assertThat(signature.getParameters().get(i).toString()).isEqualTo(parameters.get(i));
         }
-        assertEquals(signature.toString(), expectedTypeName);
+        assertThat(signature.toString()).isEqualTo(expectedTypeName);
     }
 
     private void assertSignatureFail(String typeName)
     {
-        try {
-            parseTypeSignature(typeName, ImmutableSet.of());
-            fail("Type signatures with zero parameters should fail to parse");
-        }
-        catch (RuntimeException e) {
-            // Expected
-        }
+        assertThatThrownBy(() -> parseTypeSignature(typeName, ImmutableSet.of()))
+                .isInstanceOf(ParsingException.class)
+                .hasMessageMatching("line [1-9][0-9]*:[1-9][0-9]*: mismatched input '.*'\\. Expecting: .*");
     }
 
     private void assertSignatureFail(String typeName, Set<String> literalCalculationParameters)
     {
-        try {
-            parseTypeSignature(typeName, literalCalculationParameters);
-            fail("Type signatures with zero parameters should fail to parse");
-        }
-        catch (RuntimeException e) {
-            // Expected
-        }
+        assertThatThrownBy(() -> parseTypeSignature(typeName, literalCalculationParameters))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Base type name cannot be a type variable");
     }
 }

@@ -53,12 +53,12 @@ public final class PropertyMetadata<T>
     {
         requireNonNull(name, "name is null");
         requireNonNull(description, "description is null");
-        requireNonNull(sqlType, "type is null");
+        requireNonNull(sqlType, "sqlType is null");
         requireNonNull(javaType, "javaType is null");
         requireNonNull(decoder, "decoder is null");
         requireNonNull(encoder, "encoder is null");
 
-        if (name.isEmpty() || !name.trim().toLowerCase(ENGLISH).equals(name)) {
+        if (name.isEmpty() || !name.trim().toLowerCase(ENGLISH).equals(name) || name.contains(".")) {
             throw new IllegalArgumentException(format("Invalid property name '%s'", name));
         }
         if (description.isEmpty() || !description.trim().equals(description)) {
@@ -137,6 +137,12 @@ public final class PropertyMetadata<T>
     public Object encode(T value)
     {
         return encoder.apply(value);
+    }
+
+    @Override
+    public String toString()
+    {
+        return "PropertyMetadata{" + name + "}";
     }
 
     public static PropertyMetadata<Boolean> booleanProperty(String name, String description, Boolean defaultValue, boolean hidden)

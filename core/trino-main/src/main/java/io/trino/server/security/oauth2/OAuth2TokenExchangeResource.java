@@ -15,39 +15,47 @@ package io.trino.server.security.oauth2;
 
 import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.trino.dispatcher.DispatchExecutor;
+import io.trino.server.ExternalUriInfo;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.server.security.oauth2.OAuth2TokenExchange.TokenPoll;
-
-import javax.inject.Inject;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.container.AsyncResponse;
-import javax.ws.rs.container.Suspended;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.BeanParam;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.AsyncResponse;
+import jakarta.ws.rs.container.Suspended;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 
+import static com.google.common.util.concurrent.Futures.transform;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.jaxrs.AsyncResponseHandler.bindAsyncResponse;
+import static io.trino.server.AsyncResponseUtils.withFallbackAfterTimeout;
 import static io.trino.server.security.ResourceSecurity.AccessType.PUBLIC;
+import static io.trino.server.security.oauth2.OAuth2CallbackResource.CALLBACK_ENDPOINT;
 import static io.trino.server.security.oauth2.OAuth2TokenExchange.MAX_POLL_TIME;
+import static io.trino.server.security.oauth2.OAuth2TokenExchange.hashAuthId;
+import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON_TYPE;
 import static java.util.Objects.requireNonNull;
-import static javax.ws.rs.core.MediaType.APPLICATION_JSON_TYPE;
 
 @Path(OAuth2TokenExchangeResource.TOKEN_ENDPOINT)
+@ResourceSecurity(PUBLIC)
 public class OAuth2TokenExchangeResource
 {
     static final String TOKEN_ENDPOINT = "/oauth2/token/";
@@ -55,19 +63,30 @@ public class OAuth2TokenExchangeResource
     private static final JsonCodec<Map<String, Object>> MAP_CODEC = new JsonCodecFactory().mapJsonCodec(String.class, Object.class);
 
     private final OAuth2TokenExchange tokenExchange;
-    private final ListeningExecutorService responseExecutor;
+    private final OAuth2Service service;
+    private final Executor responseExecutor;
+    private final ScheduledExecutorService timeoutExecutor;
 
     @Inject
-    public OAuth2TokenExchangeResource(OAuth2TokenExchange tokenExchange, DispatchExecutor executor)
+    public OAuth2TokenExchangeResource(OAuth2TokenExchange tokenExchange, OAuth2Service service, DispatchExecutor executor)
     {
         this.tokenExchange = requireNonNull(tokenExchange, "tokenExchange is null");
-        this.responseExecutor = requireNonNull(executor, "responseExecutor is null").getExecutor();
+        this.service = requireNonNull(service, "service is null");
+        this.responseExecutor = executor.getExecutor();
+        this.timeoutExecutor = executor.getScheduledExecutor();
     }
 
-    @ResourceSecurity(PUBLIC)
+    @Path("initiate/{authIdHash}")
+    @GET
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response initiateTokenExchange(@PathParam("authIdHash") String authIdHash, @BeanParam ExternalUriInfo externalUriInfo)
+    {
+        return service.startOAuth2Challenge(externalUriInfo.absolutePath(CALLBACK_ENDPOINT), Optional.ofNullable(authIdHash));
+    }
+
     @Path("{authId}")
     @GET
-    @Produces(MediaType.TEXT_PLAIN)
+    @Produces(MediaType.APPLICATION_JSON)
     public void getAuthenticationToken(@PathParam("authId") UUID authId, @Suspended AsyncResponse asyncResponse, @Context HttpServletRequest request)
     {
         if (authId == null) {
@@ -77,9 +96,10 @@ public class OAuth2TokenExchangeResource
         // Do not drop the response from the cache on failure, as this would result in a
         // hang if the client retries the request. The response will timeout eventually.
         ListenableFuture<TokenPoll> tokenFuture = tokenExchange.getTokenPoll(authId);
-        ListenableFuture<Response> responseFuture = Futures.transform(tokenFuture, OAuth2TokenExchangeResource::toResponse, responseExecutor);
-        bindAsyncResponse(asyncResponse, responseFuture, responseExecutor)
-                .withTimeout(MAX_POLL_TIME, pendingResponse(request));
+        ListenableFuture<Response> responseFuture = withFallbackAfterTimeout(
+                transform(tokenFuture, OAuth2TokenExchangeResource::toResponse, directExecutor()),
+                MAX_POLL_TIME, () -> pendingResponse(request), timeoutExecutor);
+        bindAsyncResponse(asyncResponse, responseFuture, responseExecutor);
     }
 
     private static Response toResponse(TokenPoll poll)
@@ -98,21 +118,28 @@ public class OAuth2TokenExchangeResource
         return Response.ok(jsonMap("nextUri", request.getRequestURL()), APPLICATION_JSON_TYPE).build();
     }
 
-    @ResourceSecurity(PUBLIC)
     @DELETE
     @Path("{authId}")
-    public void deleteAuthenticationToken(@PathParam("authId") UUID authId)
+    public Response deleteAuthenticationToken(@PathParam("authId") UUID authId)
     {
         if (authId == null) {
             throw new BadRequestException();
         }
 
         tokenExchange.dropToken(authId);
+        return Response
+                .ok()
+                .build();
     }
 
     public static String getTokenUri(UUID authId)
     {
         return TOKEN_ENDPOINT + authId;
+    }
+
+    public static String getInitiateUri(UUID authId)
+    {
+        return TOKEN_ENDPOINT + "initiate/" + hashAuthId(authId);
     }
 
     private static String jsonMap(String key, Object value)

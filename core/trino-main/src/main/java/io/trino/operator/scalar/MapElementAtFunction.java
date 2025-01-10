@@ -16,22 +16,19 @@ package io.trino.operator.scalar;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Primitives;
 import io.trino.annotation.UsedByGeneratedCode;
-import io.trino.metadata.FunctionArgumentDefinition;
-import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.FunctionDependencyDeclaration;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.Signature;
 import io.trino.metadata.SqlScalarFunction;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.SingleMapBlock;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionDependencyDeclaration;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 
 import java.lang.invoke.MethodHandle;
 
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.typeVariable;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.OperatorType.EQUAL;
@@ -44,29 +41,24 @@ public class MapElementAtFunction
 {
     public static final MapElementAtFunction MAP_ELEMENT_AT = new MapElementAtFunction();
 
-    private static final MethodHandle METHOD_HANDLE_BOOLEAN = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, Block.class, boolean.class);
-    private static final MethodHandle METHOD_HANDLE_LONG = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, Block.class, long.class);
-    private static final MethodHandle METHOD_HANDLE_DOUBLE = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, Block.class, double.class);
-    private static final MethodHandle METHOD_HANDLE_OBJECT = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, Block.class, Object.class);
+    private static final MethodHandle METHOD_HANDLE_BOOLEAN = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, SqlMap.class, boolean.class);
+    private static final MethodHandle METHOD_HANDLE_LONG = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, SqlMap.class, long.class);
+    private static final MethodHandle METHOD_HANDLE_DOUBLE = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, SqlMap.class, double.class);
+    private static final MethodHandle METHOD_HANDLE_OBJECT = methodHandle(MapElementAtFunction.class, "elementAt", Type.class, SqlMap.class, Object.class);
 
     protected MapElementAtFunction()
     {
-        super(new FunctionMetadata(
-                new Signature(
-                        "element_at",
-                        ImmutableList.of(typeVariable("K"), typeVariable("V")),
-                        ImmutableList.of(),
-                        new TypeSignature("V"),
-                        ImmutableList.of(mapType(new TypeSignature("K"), new TypeSignature("V")), new TypeSignature("K")),
-                        false),
-                true,
-                ImmutableList.of(
-                        new FunctionArgumentDefinition(false),
-                        new FunctionArgumentDefinition(false)),
-                false,
-                true,
-                "Get value for the given key, or null if it does not exist",
-                SCALAR));
+        super(FunctionMetadata.scalarBuilder("element_at")
+                .signature(Signature.builder()
+                        .typeVariable("K")
+                        .typeVariable("V")
+                        .returnType(new TypeSignature("V"))
+                        .argumentType(mapType(new TypeSignature("K"), new TypeSignature("V")))
+                        .argumentType(new TypeSignature("K"))
+                        .build())
+                .nullable()
+                .description("Get value for the given key, or null if it does not exist")
+                .build());
     }
 
     @Override
@@ -78,10 +70,11 @@ public class MapElementAtFunction
     }
 
     @Override
-    public ScalarFunctionImplementation specialize(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
-        Type keyType = functionBinding.getTypeVariable("K");
-        Type valueType = functionBinding.getTypeVariable("V");
+        MapType mapType = (MapType) boundSignature.getArgumentType(0);
+        Type keyType = mapType.getKeyType();
+        Type valueType = mapType.getValueType();
 
         MethodHandle methodHandle;
         if (keyType.getJavaType() == boolean.class) {
@@ -99,54 +92,50 @@ public class MapElementAtFunction
         methodHandle = methodHandle.bindTo(valueType);
         methodHandle = methodHandle.asType(methodHandle.type().changeReturnType(Primitives.wrap(valueType.getJavaType())));
 
-        return new ChoicesScalarFunctionImplementation(
-                functionBinding,
+        return new ChoicesSpecializedSqlScalarFunction(
+                boundSignature,
                 NULLABLE_RETURN,
                 ImmutableList.of(NEVER_NULL, NEVER_NULL),
                 methodHandle);
     }
 
     @UsedByGeneratedCode
-    public static Object elementAt(Type valueType, Block map, boolean key)
+    public static Object elementAt(Type valueType, SqlMap sqlMap, boolean key)
     {
-        SingleMapBlock mapBlock = (SingleMapBlock) map;
-        int valuePosition = mapBlock.seekKeyExact(key);
-        if (valuePosition == -1) {
+        int index = sqlMap.seekKeyExact(key);
+        if (index == -1) {
             return null;
         }
-        return readNativeValue(valueType, mapBlock, valuePosition);
+        return readNativeValue(valueType, sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + index);
     }
 
     @UsedByGeneratedCode
-    public static Object elementAt(Type valueType, Block map, long key)
+    public static Object elementAt(Type valueType, SqlMap sqlMap, long key)
     {
-        SingleMapBlock mapBlock = (SingleMapBlock) map;
-        int valuePosition = mapBlock.seekKeyExact(key);
-        if (valuePosition == -1) {
+        int index = sqlMap.seekKeyExact(key);
+        if (index == -1) {
             return null;
         }
-        return readNativeValue(valueType, mapBlock, valuePosition);
+        return readNativeValue(valueType, sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + index);
     }
 
     @UsedByGeneratedCode
-    public static Object elementAt(Type valueType, Block map, double key)
+    public static Object elementAt(Type valueType, SqlMap sqlMap, double key)
     {
-        SingleMapBlock mapBlock = (SingleMapBlock) map;
-        int valuePosition = mapBlock.seekKeyExact(key);
-        if (valuePosition == -1) {
+        int index = sqlMap.seekKeyExact(key);
+        if (index == -1) {
             return null;
         }
-        return readNativeValue(valueType, mapBlock, valuePosition);
+        return readNativeValue(valueType, sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + index);
     }
 
     @UsedByGeneratedCode
-    public static Object elementAt(Type valueType, Block map, Object key)
+    public static Object elementAt(Type valueType, SqlMap sqlMap, Object key)
     {
-        SingleMapBlock mapBlock = (SingleMapBlock) map;
-        int valuePosition = mapBlock.seekKeyExact(key);
-        if (valuePosition == -1) {
+        int index = sqlMap.seekKeyExact(key);
+        if (index == -1) {
             return null;
         }
-        return readNativeValue(valueType, mapBlock, valuePosition);
+        return readNativeValue(valueType, sqlMap.getRawValueBlock(), sqlMap.getRawOffset() + index);
     }
 }

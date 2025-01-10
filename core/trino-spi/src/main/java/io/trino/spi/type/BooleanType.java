@@ -17,15 +17,24 @@ import io.airlift.slice.XxHash64;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.FlatFixed;
+import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
-import static io.trino.spi.function.OperatorType.COMPARISON;
+import java.util.Optional;
+
+import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
+import static io.trino.spi.function.OperatorType.READ_VALUE;
 import static io.trino.spi.function.OperatorType.XX_HASH_64;
 import static io.trino.spi.type.TypeOperatorDeclaration.extractOperatorDeclaration;
 import static java.lang.invoke.MethodHandles.lookup;
@@ -41,9 +50,26 @@ public final class BooleanType
 
     public static final BooleanType BOOLEAN = new BooleanType();
 
+    /**
+     * This method signifies a contract to callers that as an optimization, they can encode BooleanType blocks as a byte[] directly
+     * and potentially bypass the BlockBuilder / BooleanType abstraction in the name of efficiency. If in the future BooleanType
+     * encoding changes such that {@link ByteArrayBlock} is not always a valid or efficient representation, then this method must be
+     * removed and any usages changed
+     */
+    public static Block wrapByteArrayAsBooleanBlockWithoutNulls(byte[] booleansAsBytes)
+    {
+        return new ByteArrayBlock(booleansAsBytes.length, Optional.empty(), booleansAsBytes);
+    }
+
+    public static Block createBlockForSingleNonNullValue(boolean value)
+    {
+        byte byteValue = value ? (byte) 1 : 0;
+        return new ByteArrayBlock(1, Optional.empty(), new byte[] {byteValue});
+    }
+
     private BooleanType()
     {
-        super(new TypeSignature(StandardTypes.BOOLEAN), boolean.class);
+        super(new TypeSignature(StandardTypes.BOOLEAN), boolean.class, ByteArrayBlock.class);
     }
 
     @Override
@@ -53,7 +79,7 @@ public final class BooleanType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -65,12 +91,6 @@ public final class BooleanType
         return new ByteArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / Byte.BYTES));
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Byte.BYTES);
     }
 
     @Override
@@ -104,7 +124,7 @@ public final class BooleanType
             return null;
         }
 
-        return block.getByte(position, 0) != 0;
+        return getBoolean(block, position);
     }
 
     @Override
@@ -114,20 +134,26 @@ public final class BooleanType
             blockBuilder.appendNull();
         }
         else {
-            blockBuilder.writeByte(block.getByte(position, 0)).closeEntry();
+            ((ByteArrayBlockBuilder) blockBuilder).writeByte(getBoolean(block, position) ? (byte) 1 : 0);
         }
     }
 
     @Override
     public boolean getBoolean(Block block, int position)
     {
-        return block.getByte(position, 0) != 0;
+        return read((ByteArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
     public void writeBoolean(BlockBuilder blockBuilder, boolean value)
     {
-        blockBuilder.writeByte(value ? 1 : 0).closeEntry();
+        ((ByteArrayBlockBuilder) blockBuilder).writeByte((byte) (value ? 1 : 0));
+    }
+
+    @Override
+    public int getFlatFixedSize()
+    {
+        return 1;
     }
 
     @Override
@@ -142,6 +168,32 @@ public final class BooleanType
         return getClass().hashCode();
     }
 
+    @ScalarOperator(READ_VALUE)
+    private static boolean read(@BlockPosition ByteArrayBlock block, @BlockIndex int position)
+    {
+        return block.getByte(position) != 0;
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static boolean readFlat(
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+    {
+        return fixedSizeSlice[fixedSizeOffset] != 0;
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static void writeFlat(
+            boolean value,
+            byte[] fixedSizeSlice,
+            int fixedSizeOffset,
+            byte[] unusedVariableSizeSlice,
+            int unusedVariableSizeOffset)
+    {
+        fixedSizeSlice[fixedSizeOffset] = (byte) (value ? 1 : 0);
+    }
+
     @ScalarOperator(EQUAL)
     private static boolean equalOperator(boolean left, boolean right)
     {
@@ -154,7 +206,7 @@ public final class BooleanType
         return value ? TRUE_XX_HASH : FALSE_XX_HASH;
     }
 
-    @ScalarOperator(COMPARISON)
+    @ScalarOperator(COMPARISON_UNORDERED_LAST)
     private static long comparisonOperator(boolean left, boolean right)
     {
         return Boolean.compare(left, right);

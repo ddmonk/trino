@@ -33,6 +33,7 @@ import io.trino.plugin.thrift.api.TrinoThriftSplit;
 import io.trino.plugin.thrift.api.TrinoThriftSplitBatch;
 import io.trino.plugin.thrift.api.TrinoThriftTableMetadata;
 import io.trino.plugin.thrift.api.TrinoThriftTupleDomain;
+import io.trino.plugin.tpch.DecimalTypeMapping;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.RecordPageSource;
@@ -41,9 +42,8 @@ import io.trino.spi.type.Type;
 import io.trino.tpch.TpchColumn;
 import io.trino.tpch.TpchEntity;
 import io.trino.tpch.TpchTable;
-
-import javax.annotation.Nullable;
-import javax.annotation.PreDestroy;
+import jakarta.annotation.Nullable;
+import jakarta.annotation.PreDestroy;
 
 import java.io.Closeable;
 import java.util.ArrayList;
@@ -218,7 +218,7 @@ public class ThriftTpchService
     public static List<Type> types(String tableName, List<String> columnNames)
     {
         TpchTable<?> table = TpchTable.getTable(tableName);
-        return columnNames.stream().map(name -> getTrinoType(table.getColumn(name))).collect(toList());
+        return columnNames.stream().map(name -> getTrinoType(table.getColumn(name), DecimalTypeMapping.DOUBLE)).collect(toList());
     }
 
     public static double schemaNameToScaleFactor(String schemaName)
@@ -297,6 +297,7 @@ public class ThriftTpchService
         return new RecordPageSource(createTpchRecordSet(
                 table,
                 columns,
+                DecimalTypeMapping.DOUBLE,
                 schemaNameToScaleFactor(splitInfo.getSchemaName()),
                 splitInfo.getPartNumber(),
                 splitInfo.getTotalParts(),
@@ -308,16 +309,14 @@ public class ThriftTpchService
         if (schemaNameOrNull == null) {
             return SCHEMAS;
         }
-        else if (SCHEMAS.contains(schemaNameOrNull)) {
+        if (SCHEMAS.contains(schemaNameOrNull)) {
             return ImmutableList.of(schemaNameOrNull);
         }
-        else {
-            return ImmutableList.of();
-        }
+        return ImmutableList.of();
     }
 
     private static String getTypeString(TpchColumn<?> column)
     {
-        return getTrinoType(column).getTypeSignature().toString();
+        return getTrinoType(column, DecimalTypeMapping.DOUBLE).getTypeSignature().toString();
     }
 }

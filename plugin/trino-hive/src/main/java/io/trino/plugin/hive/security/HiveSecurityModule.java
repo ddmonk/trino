@@ -16,51 +16,36 @@ package io.trino.plugin.hive.security;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.base.security.ConnectorAccessControlModule;
 import io.trino.plugin.base.security.FileBasedAccessControlModule;
 import io.trino.plugin.base.security.ReadOnlySecurityModule;
 
-import static io.airlift.configuration.ConditionalModule.installModuleIf;
-import static io.airlift.configuration.ConfigurationModule.installModules;
-import static java.util.Objects.requireNonNull;
+import static io.airlift.configuration.ConfigurationAwareModule.combine;
 
 public class HiveSecurityModule
         extends AbstractConfigurationAwareModule
 {
-    private final String catalogName;
-
-    public HiveSecurityModule(String catalogName)
+    public enum HiveSecurity
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        ALLOW_ALL,
+        READ_ONLY,
+        FILE,
+        SQL_STANDARD,
+        SYSTEM,
+        /**/
     }
 
     @Override
     protected void setup(Binder binder)
     {
-        bindSecurityModule(
-                "legacy",
-                installModules(
-                        new LegacySecurityModule(),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule(
-                "file",
-                installModules(
-                        new FileBasedAccessControlModule(catalogName),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule(
-                "read-only",
-                installModules(
-                        new ReadOnlySecurityModule(),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule("sql-standard", new SqlStandardSecurityModule());
-        bindSecurityModule("allow-all", new AllowAllSecurityModule());
-    }
-
-    private void bindSecurityModule(String name, Module module)
-    {
-        install(installModuleIf(
-                SecurityConfig.class,
-                security -> name.equalsIgnoreCase(security.getSecuritySystem()),
-                module));
+        install(new ConnectorAccessControlModule());
+        install(switch (buildConfigObject(SecurityConfig.class).getSecuritySystem()) {
+            case ALLOW_ALL -> new AllowAllSecurityModule();
+            case READ_ONLY -> combine(new ReadOnlySecurityModule(), new StaticAccessControlMetadataModule());
+            case FILE -> combine(new FileBasedAccessControlModule(), new StaticAccessControlMetadataModule());
+            case SQL_STANDARD -> new SqlStandardSecurityModule();
+            case SYSTEM -> new SystemSecurityModule();
+        });
     }
 
     private static class StaticAccessControlMetadataModule
@@ -69,7 +54,7 @@ public class HiveSecurityModule
         @Override
         public void configure(Binder binder)
         {
-            binder.bind(AccessControlMetadataFactory.class).toInstance((metastore) -> new AccessControlMetadata() {});
+            binder.bind(AccessControlMetadataFactory.class).toInstance(metastore -> new AccessControlMetadata() {});
         }
     }
 }

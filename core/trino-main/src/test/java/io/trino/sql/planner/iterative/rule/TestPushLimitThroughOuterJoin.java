@@ -17,15 +17,14 @@ import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.JoinNode.EquiJoinClause;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.limit;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.plan.JoinNode.Type.FULL;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
-import static io.trino.sql.planner.plan.JoinNode.Type.RIGHT;
+import static io.trino.sql.planner.plan.JoinType.FULL;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
+import static io.trino.sql.planner.plan.JoinType.RIGHT;
 
 public class TestPushLimitThroughOuterJoin
         extends BaseRuleTest
@@ -46,11 +45,10 @@ public class TestPushLimitThroughOuterJoin
                 })
                 .matches(
                         limit(1,
-                                join(
-                                        LEFT,
-                                        ImmutableList.of(equiJoinClause("leftKey", "rightKey")),
-                                        limit(1, ImmutableList.of(), true, values("leftKey")),
-                                        values("rightKey"))));
+                               join(LEFT, builder -> builder
+                                        .equiCriteria("leftKey", "rightKey")
+                                        .left(limit(1, ImmutableList.of(), true, values("leftKey")))
+                                        .right(values("rightKey")))));
     }
 
     @Test
@@ -69,11 +67,10 @@ public class TestPushLimitThroughOuterJoin
                 })
                 .matches(
                         limit(1,
-                                join(
-                                        RIGHT,
-                                        ImmutableList.of(equiJoinClause("leftKey", "rightKey")),
-                                        values("leftKey"),
-                                        limit(1, ImmutableList.of(), true, values("rightKey")))));
+                                join(RIGHT, builder -> builder
+                                        .equiCriteria("leftKey", "rightKey")
+                                        .left(values("leftKey"))
+                                        .right(limit(1, ImmutableList.of(), true, values("rightKey"))))));
     }
 
     @Test
@@ -127,5 +124,87 @@ public class TestPushLimitThroughOuterJoin
                                     new EquiJoinClause(leftKey, rightKey)));
                 })
                 .doesNotFire();
+    }
+
+    @Test
+    public void testLimitWithPreSortedInputsLeftJoin()
+    {
+        tester().assertThat(new PushLimitThroughOuterJoin())
+                .on(p -> {
+                    Symbol leftKey = p.symbol("leftKey");
+                    Symbol rightKey = p.symbol("rightKey");
+                    return p.limit(
+                            1,
+                            false,
+                            ImmutableList.of(rightKey),
+                            p.join(
+                                    LEFT,
+                                    p.values(5, leftKey),
+                                    p.values(5, rightKey),
+                                    new EquiJoinClause(leftKey, rightKey)));
+                })
+                .doesNotFire();
+
+        tester().assertThat(new PushLimitThroughOuterJoin())
+                .on(p -> {
+                    Symbol leftKey = p.symbol("leftKey");
+                    Symbol rightKey = p.symbol("rightKey");
+                    return p.limit(
+                            1,
+                            false,
+                            ImmutableList.of(leftKey),
+                            p.join(
+                                    LEFT,
+                                    p.values(5, leftKey),
+                                    p.values(5, rightKey),
+                                    new EquiJoinClause(leftKey, rightKey)));
+                })
+                .matches(
+                        limit(1, ImmutableList.of(), false, ImmutableList.of("leftKey"),
+                               join(LEFT, builder -> builder
+                                        .equiCriteria("leftKey", "rightKey")
+                                        .left(limit(1, ImmutableList.of(), true, ImmutableList.of("leftKey"), values("leftKey")))
+                                        .right(values("rightKey")))));
+    }
+
+    @Test
+    public void testLimitWithPreSortedInputsRightJoin()
+    {
+        tester().assertThat(new PushLimitThroughOuterJoin())
+                .on(p -> {
+                    Symbol leftKey = p.symbol("leftKey");
+                    Symbol rightKey = p.symbol("rightKey");
+                    return p.limit(
+                            1,
+                            false,
+                            ImmutableList.of(leftKey),
+                            p.join(
+                                    RIGHT,
+                                    p.values(5, leftKey),
+                                    p.values(5, rightKey),
+                                    new EquiJoinClause(leftKey, rightKey)));
+                })
+                .doesNotFire();
+
+        tester().assertThat(new PushLimitThroughOuterJoin())
+                .on(p -> {
+                    Symbol leftKey = p.symbol("leftKey");
+                    Symbol rightKey = p.symbol("rightKey");
+                    return p.limit(
+                            1,
+                            false,
+                            ImmutableList.of(rightKey),
+                            p.join(
+                                    RIGHT,
+                                    p.values(5, leftKey),
+                                    p.values(5, rightKey),
+                                    new EquiJoinClause(leftKey, rightKey)));
+                })
+                .matches(
+                        limit(1, ImmutableList.of(), false, ImmutableList.of("rightKey"),
+                                join(RIGHT, builder -> builder
+                                        .equiCriteria("leftKey", "rightKey")
+                                        .left(values("leftKey"))
+                                        .right(limit(1, ImmutableList.of(), true, ImmutableList.of("rightKey"), values("rightKey"))))));
     }
 }

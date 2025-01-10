@@ -19,12 +19,13 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.execution.QueryState;
+import io.trino.operator.RetryPolicy;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.BasicQueryStats;
 import io.trino.spi.QueryId;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import org.joda.time.DateTime;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.Optional;
@@ -33,11 +34,10 @@ import java.util.OptionalDouble;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.QueryState.FINISHED;
 import static io.trino.execution.QueryState.RUNNING;
-import static io.trino.memory.LocalMemoryManager.GENERAL_POOL;
 import static io.trino.operator.BlockedReason.WAITING_FOR_MEMORY;
-import static org.testng.Assert.assertEquals;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.assertj.core.api.Assertions.assertThat;
 
-@Test
 public class TestClusterMemoryLeakDetector
 {
     @Test
@@ -47,23 +47,23 @@ public class TestClusterMemoryLeakDetector
         ClusterMemoryLeakDetector leakDetector = new ClusterMemoryLeakDetector();
 
         leakDetector.checkForMemoryLeaks(ImmutableList::of, ImmutableMap.of());
-        assertEquals(leakDetector.getNumberOfLeakedQueries(), 0);
+        assertThat(leakDetector.getNumberOfLeakedQueries()).isEqualTo(0);
 
         // the leak detector should report no leaked queries as the query is still running
         leakDetector.checkForMemoryLeaks(() -> ImmutableList.of(createQueryInfo(testQuery.getId(), RUNNING)), ImmutableMap.of(testQuery, 1L));
-        assertEquals(leakDetector.getNumberOfLeakedQueries(), 0);
+        assertThat(leakDetector.getNumberOfLeakedQueries()).isEqualTo(0);
 
         // the leak detector should report exactly one leaked query since the query is finished, and its end time is way in the past
         leakDetector.checkForMemoryLeaks(() -> ImmutableList.of(createQueryInfo(testQuery.getId(), FINISHED)), ImmutableMap.of(testQuery, 1L));
-        assertEquals(leakDetector.getNumberOfLeakedQueries(), 1);
+        assertThat(leakDetector.getNumberOfLeakedQueries()).isEqualTo(1);
 
         // the leak detector should report no leaked queries as the query doesn't have any memory reservation
         leakDetector.checkForMemoryLeaks(() -> ImmutableList.of(createQueryInfo(testQuery.getId(), FINISHED)), ImmutableMap.of(testQuery, 0L));
-        assertEquals(leakDetector.getNumberOfLeakedQueries(), 0);
+        assertThat(leakDetector.getNumberOfLeakedQueries()).isEqualTo(0);
 
         // the leak detector should report exactly one leaked query since the coordinator doesn't know of any query
         leakDetector.checkForMemoryLeaks(ImmutableList::of, ImmutableMap.of(testQuery, 1L));
-        assertEquals(leakDetector.getNumberOfLeakedQueries(), 1);
+        assertThat(leakDetector.getNumberOfLeakedQueries()).isEqualTo(1);
     }
 
     private static BasicQueryInfo createQueryInfo(String queryId, QueryState state)
@@ -73,7 +73,6 @@ public class TestClusterMemoryLeakDetector
                 TEST_SESSION.toSessionRepresentation(),
                 Optional.of(new ResourceGroupId("global")),
                 state,
-                GENERAL_POOL,
                 true,
                 URI.create("1"),
                 "",
@@ -82,28 +81,42 @@ public class TestClusterMemoryLeakDetector
                 new BasicQueryStats(
                         DateTime.parse("1991-09-06T05:00-05:30"),
                         DateTime.parse("1991-09-06T05:01-05:30"),
-                        Duration.valueOf("8m"),
-                        Duration.valueOf("7m"),
-                        Duration.valueOf("34m"),
+                        new Duration(8, MINUTES),
+                        new Duration(7, MINUTES),
+                        new Duration(34, MINUTES),
+                        99,
                         13,
                         14,
                         15,
                         100,
+                        0,
                         DataSize.valueOf("21GB"),
                         22,
-                        DataSize.valueOf("20GB"),
-                        23,
                         DataSize.valueOf("23GB"),
-                        DataSize.valueOf("24GB"),
-                        DataSize.valueOf("25GB"),
+                        DataSize.valueOf("23GB"),
+                        DataSize.valueOf("23GB"),
+                        DataSize.valueOf("23GB"),
+                        24,
+                        25,
                         DataSize.valueOf("26GB"),
-                        Duration.valueOf("23m"),
-                        Duration.valueOf("24m"),
+                        DataSize.valueOf("27GB"),
+                        DataSize.valueOf("28GB"),
+                        DataSize.valueOf("29GB"),
+                        new Duration(30, MINUTES),
+                        new Duration(31, MINUTES),
+                        new Duration(32, MINUTES),
+                        new Duration(33, MINUTES),
+                        new Duration(34, MINUTES),
+                        new Duration(35, MINUTES),
+                        new Duration(36, MINUTES),
+                        new Duration(37, MINUTES),
                         true,
                         ImmutableSet.of(WAITING_FOR_MEMORY),
-                        OptionalDouble.of(20)),
+                        OptionalDouble.of(20),
+                        OptionalDouble.of(0)),
                 null,
                 null,
-                Optional.empty());
+                Optional.empty(),
+                RetryPolicy.NONE);
     }
 }

@@ -16,20 +16,25 @@ package io.trino.operator;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.operator.window.WindowPartition;
-import io.trino.util.Mergeable;
-
-import javax.annotation.concurrent.Immutable;
+import io.trino.spi.Mergeable;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Iterables.concat;
 
 public class WindowInfo
         implements Mergeable<WindowInfo>, OperatorInfo
 {
+    private static final WindowInfo EMPTY_INFO = new WindowInfo(ImmutableList.of());
+
+    public static WindowInfo emptyInfo()
+    {
+        return EMPTY_INFO;
+    }
+
     private final List<DriverWindowInfo> windowInfos;
 
     @JsonCreator
@@ -47,7 +52,18 @@ public class WindowInfo
     @Override
     public WindowInfo mergeWith(WindowInfo other)
     {
-        return new WindowInfo(ImmutableList.copyOf(concat(this.windowInfos, other.windowInfos)));
+        int otherSize = other.windowInfos.size();
+        if (otherSize == 0) {
+            return this;
+        }
+        int thisSize = windowInfos.size();
+        if (thisSize == 0) {
+            return other;
+        }
+        return new WindowInfo(ImmutableList.<DriverWindowInfo>builderWithExpectedSize(thisSize + otherSize)
+                .addAll(windowInfos)
+                .addAll(other.windowInfos)
+                .build());
     }
 
     static class DriverWindowInfoBuilder
@@ -79,13 +95,13 @@ public class WindowInfo
             }
 
             List<IndexInfo> indexInfos = indexInfosBuilder.build();
-            if (indexInfos.size() == 0) {
+            if (indexInfos.isEmpty()) {
                 return new DriverWindowInfo(0.0, 0.0, 0.0, 0, 0, 0);
             }
             long totalRowsCount = indexInfos.stream()
                     .mapToLong(IndexInfo::getTotalRowsCount)
                     .sum();
-            double averageIndexPositions = totalRowsCount / indexInfos.size();
+            double averageIndexPositions = (double) totalRowsCount / indexInfos.size();
             double squaredDifferencesPositionsOfIndex = indexInfos.stream()
                     .mapToDouble(index -> Math.pow(index.getTotalRowsCount() - averageIndexPositions, 2))
                     .sum();
@@ -197,12 +213,15 @@ public class WindowInfo
         public Optional<IndexInfo> build()
         {
             List<Integer> partitions = partitionsSizes.build();
-            if (partitions.size() == 0) {
+            if (partitions.isEmpty()) {
                 return Optional.empty();
             }
             double avgSize = partitions.stream().mapToLong(Integer::longValue).average().getAsDouble();
             double squaredDifferences = partitions.stream().mapToDouble(size -> Math.pow(size - avgSize, 2)).sum();
-            checkState(partitions.stream().mapToLong(Integer::longValue).sum() == rowsNumber, "Total number of rows in index does not match number of rows in partitions within that index");
+            if (partitions.stream().mapToLong(Integer::longValue).sum() != rowsNumber) {
+                // when operator is cancelled, then rows in index might not match row count from processed partitions
+                return Optional.empty();
+            }
 
             return Optional.of(new IndexInfo(rowsNumber, sizeInBytes, squaredDifferences, partitions.size()));
         }

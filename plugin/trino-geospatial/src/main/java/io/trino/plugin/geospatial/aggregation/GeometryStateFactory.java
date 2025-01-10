@@ -17,12 +17,13 @@ import com.esri.core.geometry.ogc.OGCGeometry;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.GroupedAccumulatorState;
-import org.openjdk.jol.info.ClassLayout;
+
+import static io.airlift.slice.SizeOf.instanceSize;
 
 public class GeometryStateFactory
         implements AccumulatorStateFactory<GeometryState>
 {
-    private static final long OGC_GEOMETRY_BASE_INSTANCE_SIZE = ClassLayout.parseClass(OGCGeometry.class).instanceSize();
+    private static final long OGC_GEOMETRY_BASE_INSTANCE_SIZE = instanceSize(OGCGeometry.class);
 
     @Override
     public GeometryState createSingleState()
@@ -31,28 +32,17 @@ public class GeometryStateFactory
     }
 
     @Override
-    public Class<? extends GeometryState> getSingleStateClass()
-    {
-        return SingleGeometryState.class;
-    }
-
-    @Override
     public GeometryState createGroupedState()
     {
         return new GroupedGeometryState();
     }
 
-    @Override
-    public Class<? extends GeometryState> getGroupedStateClass()
-    {
-        return GroupedGeometryState.class;
-    }
-
     public static class GroupedGeometryState
             implements GeometryState, GroupedAccumulatorState
     {
-        private long groupId;
-        private ObjectBigArray<OGCGeometry> geometries = new ObjectBigArray<>();
+        private final ObjectBigArray<OGCGeometry> geometries = new ObjectBigArray<>();
+
+        private int groupId;
         private long size;
 
         @Override
@@ -64,14 +54,13 @@ public class GeometryStateFactory
         @Override
         public void setGeometry(OGCGeometry geometry)
         {
-            OGCGeometry previousValue = this.geometries.get(groupId);
+            OGCGeometry previousValue = this.geometries.getAndSet(groupId, geometry);
             size -= getGeometryMemorySize(previousValue);
             size += getGeometryMemorySize(geometry);
-            this.geometries.set(groupId, geometry);
         }
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             geometries.ensureCapacity(size);
         }
@@ -83,7 +72,7 @@ public class GeometryStateFactory
         }
 
         @Override
-        public final void setGroupId(long groupId)
+        public final void setGroupId(int groupId)
         {
             this.groupId = groupId;
         }

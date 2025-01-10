@@ -13,16 +13,20 @@
  */
 package io.trino.operator.scalar;
 
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.trino.annotation.UsedByGeneratedCode;
-import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.SqlOperator;
+import io.trino.metadata.SqlScalarFunction;
 import io.trino.spi.block.Block;
-import io.trino.spi.function.OperatorType;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 
@@ -31,12 +35,10 @@ import java.lang.invoke.MethodHandle;
 import java.util.Map;
 import java.util.TreeMap;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.metadata.Signature.castableToTypeParameter;
-import static io.trino.operator.scalar.JsonOperators.JSON_FACTORY;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
+import static io.trino.spi.function.OperatorType.CAST;
 import static io.trino.spi.type.TypeSignature.mapType;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.JsonType.JSON;
@@ -44,55 +46,61 @@ import static io.trino.util.Failures.checkCondition;
 import static io.trino.util.JsonUtil.JsonGeneratorWriter;
 import static io.trino.util.JsonUtil.ObjectKeyProvider;
 import static io.trino.util.JsonUtil.canCastToJson;
+import static io.trino.util.JsonUtil.createJsonFactory;
 import static io.trino.util.JsonUtil.createJsonGenerator;
 import static io.trino.util.Reflection.methodHandle;
 
 public class MapToJsonCast
-        extends SqlOperator
+        extends SqlScalarFunction
 {
     public static final MapToJsonCast MAP_TO_JSON = new MapToJsonCast();
-    private static final MethodHandle METHOD_HANDLE = methodHandle(MapToJsonCast.class, "toJson", ObjectKeyProvider.class, JsonGeneratorWriter.class, Block.class);
+    private static final MethodHandle METHOD_HANDLE = methodHandle(MapToJsonCast.class, "toJson", ObjectKeyProvider.class, JsonGeneratorWriter.class, SqlMap.class);
+
+    private static final JsonFactory JSON_FACTORY = createJsonFactory();
 
     private MapToJsonCast()
     {
-        super(OperatorType.CAST,
-                ImmutableList.of(
-                        castableToTypeParameter("K", VARCHAR.getTypeSignature()),
-                        castableToTypeParameter("V", JSON.getTypeSignature())),
-                ImmutableList.of(),
-                JSON.getTypeSignature(),
-                ImmutableList.of(mapType(new TypeSignature("K"), new TypeSignature("V"))),
-                false);
+        super(FunctionMetadata.operatorBuilder(CAST)
+                .signature(Signature.builder()
+                        .castableToTypeParameter("K", VARCHAR.getTypeSignature())
+                        .castableToTypeParameter("V", JSON.getTypeSignature())
+                        .returnType(JSON)
+                        .argumentType(mapType(new TypeSignature("K"), new TypeSignature("V")))
+                        .build())
+                .build());
     }
 
     @Override
-    public ScalarFunctionImplementation specialize(FunctionBinding functionBinding)
+    public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
     {
-        checkArgument(functionBinding.getArity() == 1, "Expected arity to be 1");
-        Type keyType = functionBinding.getTypeVariable("K");
-        Type valueType = functionBinding.getTypeVariable("V");
-        Type mapType = functionBinding.getBoundSignature().getArgumentTypes().get(0);
+        MapType mapType = (MapType) boundSignature.getArgumentType(0);
+        Type keyType = mapType.getKeyType();
+        Type valueType = mapType.getValueType();
         checkCondition(canCastToJson(mapType), INVALID_CAST_ARGUMENT, "Cannot cast %s to JSON", mapType);
 
         ObjectKeyProvider provider = ObjectKeyProvider.createObjectKeyProvider(keyType);
         JsonGeneratorWriter writer = JsonGeneratorWriter.createJsonGeneratorWriter(valueType);
         MethodHandle methodHandle = METHOD_HANDLE.bindTo(provider).bindTo(writer);
 
-        return new ChoicesScalarFunctionImplementation(
-                functionBinding,
+        return new ChoicesSpecializedSqlScalarFunction(
+                boundSignature,
                 FAIL_ON_NULL,
                 ImmutableList.of(NEVER_NULL),
                 methodHandle);
     }
 
     @UsedByGeneratedCode
-    public static Slice toJson(ObjectKeyProvider provider, JsonGeneratorWriter writer, Block block)
+    public static Slice toJson(ObjectKeyProvider provider, JsonGeneratorWriter writer, SqlMap map)
     {
         try {
+            int rawOffset = map.getRawOffset();
+            Block rawKeyBlock = map.getRawKeyBlock();
+            Block rawValueBlock = map.getRawValueBlock();
+
             Map<String, Integer> orderedKeyToValuePosition = new TreeMap<>();
-            for (int i = 0; i < block.getPositionCount(); i += 2) {
-                String objectKey = provider.getObjectKey(block, i);
-                orderedKeyToValuePosition.put(objectKey, i + 1);
+            for (int i = 0; i < map.getSize(); i++) {
+                String objectKey = provider.getObjectKey(rawKeyBlock, rawOffset + i);
+                orderedKeyToValuePosition.put(objectKey, i);
             }
 
             SliceOutput output = new DynamicSliceOutput(40);
@@ -100,7 +108,7 @@ public class MapToJsonCast
                 jsonGenerator.writeStartObject();
                 for (Map.Entry<String, Integer> entry : orderedKeyToValuePosition.entrySet()) {
                     jsonGenerator.writeFieldName(entry.getKey());
-                    writer.writeJsonValue(jsonGenerator, block, entry.getValue());
+                    writer.writeJsonValue(jsonGenerator, rawValueBlock, rawOffset + entry.getValue());
                 }
                 jsonGenerator.writeEndObject();
             }

@@ -15,16 +15,22 @@ package io.trino.plugin.resourcegroups.db;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.AssertTrue;
 
 import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class DbResourceGroupConfig
 {
     private String configUrl;
+    private String user;
+    private String password;
     private boolean exactMatchSelectorEnabled;
     private Duration maxRefreshInterval = new Duration(1, HOURS);
+    private Duration refreshInterval = new Duration(1, SECONDS);
 
     public String getConfigDbUrl()
     {
@@ -35,6 +41,33 @@ public class DbResourceGroupConfig
     public DbResourceGroupConfig setConfigDbUrl(String configUrl)
     {
         this.configUrl = configUrl;
+        return this;
+    }
+
+    public String getConfigDbUser()
+    {
+        return user;
+    }
+
+    @Config("resource-groups.config-db-user")
+    @ConfigDescription("Database user name")
+    public DbResourceGroupConfig setConfigDbUser(String configUser)
+    {
+        this.user = configUser;
+        return this;
+    }
+
+    public String getConfigDbPassword()
+    {
+        return password;
+    }
+
+    @ConfigSecuritySensitive
+    @Config("resource-groups.config-db-password")
+    @ConfigDescription("Database password")
+    public DbResourceGroupConfig setConfigDbPassword(String configPassword)
+    {
+        this.password = configPassword;
         return this;
     }
 
@@ -52,6 +85,20 @@ public class DbResourceGroupConfig
         return this;
     }
 
+    @MinDuration("1s")
+    public Duration getRefreshInterval()
+    {
+        return refreshInterval;
+    }
+
+    @Config("resource-groups.refresh-interval")
+    @ConfigDescription("How often the cluster reloads from the database")
+    public DbResourceGroupConfig setRefreshInterval(Duration refreshInterval)
+    {
+        this.refreshInterval = refreshInterval;
+        return this;
+    }
+
     public boolean getExactMatchSelectorEnabled()
     {
         return exactMatchSelectorEnabled;
@@ -62,5 +109,11 @@ public class DbResourceGroupConfig
     {
         this.exactMatchSelectorEnabled = exactMatchSelectorEnabled;
         return this;
+    }
+
+    @AssertTrue(message = "maxRefreshInterval must be greater than refreshInterval")
+    public boolean isRefreshIntervalValid()
+    {
+        return maxRefreshInterval.compareTo(refreshInterval) > 0;
     }
 }

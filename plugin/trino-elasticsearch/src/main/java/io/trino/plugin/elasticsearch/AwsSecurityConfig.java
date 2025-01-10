@@ -14,10 +14,10 @@
 package io.trino.plugin.elasticsearch;
 
 import io.airlift.configuration.Config;
+import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
-
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 import java.util.Optional;
 
@@ -27,6 +27,8 @@ public class AwsSecurityConfig
     private String accessKey;
     private String secretKey;
     private String region;
+    private String iamRole;
+    private String externalId;
 
     @NotNull
     public Optional<String> getAccessKey()
@@ -64,6 +66,34 @@ public class AwsSecurityConfig
     public AwsSecurityConfig setRegion(String region)
     {
         this.region = region;
+        return this;
+    }
+
+    @NotNull
+    public Optional<String> getIamRole()
+    {
+        return Optional.ofNullable(iamRole);
+    }
+
+    @Config("elasticsearch.aws.iam-role")
+    @ConfigDescription("Optional AWS IAM role to assume for authenticating. If set, this role will be used to get credentials to sign requests to ES.")
+    public AwsSecurityConfig setIamRole(String iamRole)
+    {
+        this.iamRole = iamRole;
+        return this;
+    }
+
+    @NotNull
+    public Optional<String> getExternalId()
+    {
+        return Optional.ofNullable(externalId);
+    }
+
+    @Config("elasticsearch.aws.external-id")
+    @ConfigDescription("Optional external id to pass to AWS STS while assuming a role")
+    public AwsSecurityConfig setExternalId(String externalId)
+    {
+        this.externalId = externalId;
         return this;
     }
 }

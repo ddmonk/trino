@@ -30,30 +30,31 @@ import io.trino.server.security.Authenticator;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.security.Identity;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.Response;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.Response;
-
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Map;
@@ -75,23 +76,26 @@ import static io.trino.jdbc.TestJdbcExternalAuthentication.WwwAuthenticateHeader
 import static io.trino.jdbc.TrinoDriverUri.setRedirectHandler;
 import static io.trino.server.security.ResourceSecurity.AccessType.PUBLIC;
 import static io.trino.server.security.ServerSecurityModule.authenticatorModule;
+import static jakarta.ws.rs.core.HttpHeaders.AUTHORIZATION;
+import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON_TYPE;
+import static jakarta.ws.rs.core.MediaType.TEXT_PLAIN;
+import static jakarta.ws.rs.core.Response.Status.NOT_FOUND;
 import static java.lang.String.format;
 import static java.net.HttpURLConnection.HTTP_OK;
 import static java.util.Objects.requireNonNull;
-import static javax.ws.rs.core.HttpHeaders.AUTHORIZATION;
-import static javax.ws.rs.core.MediaType.APPLICATION_JSON_TYPE;
-import static javax.ws.rs.core.MediaType.TEXT_PLAIN;
-import static javax.ws.rs.core.Response.Status.NOT_FOUND;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
 public class TestJdbcExternalAuthentication
 {
     private static final String TEST_CATALOG = "test_catalog";
     private TestingTrinoServer server;
 
-    @BeforeClass
+    @BeforeAll
     public void setup()
             throws Exception
     {
@@ -102,17 +106,16 @@ public class TestJdbcExternalAuthentication
                 .setProperties(ImmutableMap.<String, String>builder()
                         .put("http-server.authentication.type", "dummy-external")
                         .put("http-server.https.enabled", "true")
-                        .put("http-server.https.keystore.path", getResource("localhost.keystore").getPath())
+                        .put("http-server.https.keystore.path", new File(getResource("localhost.keystore").toURI()).getPath())
                         .put("http-server.https.keystore.key", "changeit")
                         .put("web-ui.enabled", "false")
-                        .build())
+                        .buildOrThrow())
                 .build();
         server.installPlugin(new TpchPlugin());
         server.createCatalog(TEST_CATALOG, "tpch");
-        server.waitForNodeRefresh(Duration.ofSeconds(10));
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
             throws Exception
     {
@@ -120,16 +123,12 @@ public class TestJdbcExternalAuthentication
         server = null;
     }
 
-    @BeforeMethod(alwaysRun = true)
-    public void clearUpLoggingSessions()
-    {
-        invalidateAllTokens();
-    }
-
     @Test
     public void testSuccessfulAuthenticationWithHttpGetOnlyRedirectHandler()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new HttpGetOnlyRedirectHandler());
                 Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
@@ -141,10 +140,13 @@ public class TestJdbcExternalAuthentication
      * Ignored due to lack of ui environment with web-browser on CI servers.
      * Still this test is useful for local environments.
      */
-    @Test(enabled = false)
+    @Test
+    @Disabled
     public void testSuccessfulAuthenticationWithDefaultBrowserRedirect()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
             assertThat(statement.execute("SELECT 123")).isTrue();
@@ -155,6 +157,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationFailsAfterUnfinishedRedirect()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new NoOpRedirectHandler());
                 Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
@@ -167,6 +171,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationFailsAfterRedirectException()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new FailingRedirectHandler());
                 Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
@@ -180,6 +186,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationFailsAfterServerAuthenticationFailure()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new HttpGetOnlyRedirectHandler());
                 AutoCloseable ignore2 = withPollingError("error occurred during token polling");
                 Connection connection = createConnection();
@@ -194,6 +202,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationFailsAfterReceivingMalformedHeaderFromServer()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new HttpGetOnlyRedirectHandler());
                 AutoCloseable ignored = withWwwAuthenticate("Bearer no-valid-fields");
                 Connection connection = createConnection();
@@ -209,6 +219,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationReusesObtainedTokenPerConnection()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new HttpGetOnlyRedirectHandler());
                 Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
@@ -224,6 +236,8 @@ public class TestJdbcExternalAuthentication
     public void testAuthenticationAfterInitialTokenHasBeenInvalidated()
             throws Exception
     {
+        invalidateAllTokens();
+
         try (RedirectHandlerFixture ignore = withHandler(new HttpGetOnlyRedirectHandler());
                 Connection connection = createConnection();
                 Statement statement = connection.createStatement()) {
@@ -237,13 +251,12 @@ public class TestJdbcExternalAuthentication
     }
 
     private Connection createConnection()
-            throws SQLException
+            throws Exception
     {
-        String url = format("jdbc:presto://localhost:%s", server.getHttpsAddress().getPort());
+        String url = format("jdbc:trino://localhost:%s", server.getHttpsAddress().getPort());
         Properties properties = new Properties();
-        properties.setProperty("user", "test");
         properties.setProperty("SSL", "true");
-        properties.setProperty("SSLTrustStorePath", getResource("localhost.truststore").getPath());
+        properties.setProperty("SSLTrustStorePath", new File(getResource("localhost.truststore").toURI()).getPath());
         properties.setProperty("SSLTrustStorePassword", "changeit");
         properties.setProperty("externalAuthentication", "true");
         properties.setProperty("externalAuthenticationTimeout", "2s");

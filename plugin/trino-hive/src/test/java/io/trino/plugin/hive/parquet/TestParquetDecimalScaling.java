@@ -16,7 +16,7 @@ package io.trino.plugin.hive.parquet;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.hive.HiveQueryRunner;
-import io.trino.plugin.hive.parquet.write.TestMapredParquetOutputFormat;
+import io.trino.plugin.hive.parquet.write.TestingMapredParquetOutputFormat;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
@@ -34,8 +34,9 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.parquet.schema.MessageType;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.intellij.lang.annotations.Language;
+import org.joda.time.DateTimeZone;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -54,6 +55,9 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.transform;
 import static io.trino.plugin.hive.parquet.TestParquetDecimalScaling.ParquetDecimalInsert.maximumValue;
 import static io.trino.plugin.hive.parquet.TestParquetDecimalScaling.ParquetDecimalInsert.minimumValue;
+import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMNS;
+import static io.trino.plugin.hive.util.SerdeConstants.LIST_COLUMN_TYPES;
+import static io.trino.spi.type.Decimals.overflows;
 import static io.trino.tpch.TpchTable.NATION;
 import static java.lang.Integer.MAX_VALUE;
 import static java.lang.String.format;
@@ -62,7 +66,7 @@ import static java.util.Arrays.stream;
 import static org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory.getStandardStructObjectInspector;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.javaIntObjectInspector;
 import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.javaLongObjectInspector;
-import static org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_2_0;
+import static org.apache.parquet.column.ParquetProperties.WriterVersion;
 import static org.apache.parquet.hadoop.ParquetOutputFormat.COMPRESSION;
 import static org.apache.parquet.hadoop.ParquetOutputFormat.ENABLE_DICTIONARY;
 import static org.apache.parquet.hadoop.ParquetOutputFormat.WRITER_VERSION;
@@ -92,8 +96,83 @@ public class TestParquetDecimalScaling
      * Tests if Parquet decimal with given precision and scale can be read into Trino decimal with different precision and scale
      * if Parquet decimal value could be rescaled into Trino decimal without losing most and least significant digits.
      */
-    @Test(dataProvider = "testReadingMatchingPrecisionDataProvider")
-    public void testReadingMatchingPrecision(int precision, int scale, boolean forceFixedLengthArray, List<String> values, List<String> expected)
+    @Test
+    public void testReadingMatchingPrecision()
+    {
+        for (WriterVersion writerVersion : WriterVersion.values()) {
+            testReadingMatchingPrecision(
+                    10,
+                    2,
+                    false,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    10,
+                    2,
+                    true,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    4,
+                    2,
+                    false,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    4,
+                    2,
+                    true,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    14,
+                    2,
+                    false,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(14, 2), minimumValue(14, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(14, 2), minimumValue(14, 2)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    6,
+                    3,
+                    false,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
+                    ImmutableList.of("10.010", "10.000", "1.230", maximumValue(6, 3), minimumValue(6, 3)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    6,
+                    3,
+                    true,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
+                    ImmutableList.of("10.010", "10.000", "1.230", maximumValue(6, 3), minimumValue(6, 3)),
+                    writerVersion);
+
+            testReadingMatchingPrecision(
+                    38,
+                    4,
+                    false,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(38, 4), minimumValue(38, 4)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(38, 4), minimumValue(38, 4)),
+                    writerVersion);
+        }
+    }
+
+    private void testReadingMatchingPrecision(
+            int precision,
+            int scale,
+            boolean forceFixedLengthArray,
+            List<String> values,
+            List<String> expected,
+            WriterVersion writerVersion)
     {
         String tableName = generateTableName("matching_precision", precision, scale);
 
@@ -101,50 +180,162 @@ public class TestParquetDecimalScaling
 
         writeParquetDecimalsRecord(
                 getParquetWritePath(tableName),
-                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)));
+                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)),
+                writerVersion);
 
         assertValues(tableName, scale, expected);
 
         dropTable(tableName);
     }
 
-    @DataProvider
-    public Object[][] testReadingMatchingPrecisionDataProvider()
-    {
-        return new Object[][] {
-                {10, 2, false,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(10, 2), minimumValue(10, 2))},
-                {10, 2, true,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(10, 2), minimumValue(10, 2))},
-                {4, 2, false,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2))},
-                {4, 2, true,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2))},
-                {14, 2, false,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(14, 2), minimumValue(14, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(14, 2), minimumValue(14, 2))},
-                {6, 3, false,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
-                        ImmutableList.of("10.010", "10.000", "1.230", maximumValue(6, 3), minimumValue(6, 3))},
-                {6, 3, true,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
-                        ImmutableList.of("10.010", "10.000", "1.230", maximumValue(6, 3), minimumValue(6, 3))},
-                {38, 4, false,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(38, 4), minimumValue(38, 4)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(38, 4), minimumValue(38, 4))}
-        };
-    }
-
     /**
      * Tests if Parquet decimal with given precision and scale can be read into Trino decimal with different precision and scale
      * if Parquet decimal value could be rescaled into Trino decimal without loosing most and least significant digits.
      */
-    @Test(dataProvider = "testReadingRescaledDecimalsProvider")
-    public void testReadingRescaledDecimals(int precision, int scale, boolean forceFixedLengthArray, int schemaPrecision, int schemaScale, List<String> values, List<String> expected)
+    @Test
+    public void testReadingRescaledDecimals()
+    {
+        for (WriterVersion writerVersion : WriterVersion.values()) {
+            testReadingRescaledDecimals(
+                    10,
+                    2,
+                    false,
+                    12,
+                    4,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    10,
+                    2,
+                    true,
+                    13,
+                    5,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.01000", "10.0000", "1.23000", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    4,
+                    2,
+                    false,
+                    6,
+                    4,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    4,
+                    2,
+                    false,
+                    6,
+                    2,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    10,
+                    2,
+                    false,
+                    11,
+                    3,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.010", "10.000", "1.230", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    10, 2,
+                    true,
+                    12,
+                    4,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    4,
+                    2,
+                    false,
+                    10,
+                    5,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01000", "10.00000", "1.23000", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    4,
+                    2,
+                    true,
+                    10,
+                    5,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01000", "10.00000", "1.23000", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    14,
+                    2,
+                    false,
+                    20,
+                    3,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(14, 2), minimumValue(14, 2)),
+                    ImmutableList.of("10.010", "10.000", "1.230", maximumValue(14, 2), minimumValue(14, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    6,
+                    3,
+                    false,
+                    9,
+                    6,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
+                    ImmutableList.of("10.010000", "10.000000", "1.230000", maximumValue(6, 3), minimumValue(6, 3)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    6,
+                    3,
+                    true,
+                    9,
+                    6,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
+                    ImmutableList.of("10.010000", "10.000000", "1.230000", maximumValue(6, 3), minimumValue(6, 3)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    10,
+                    2,
+                    false,
+                    38,
+                    4,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRescaledDecimals(
+                    18,
+                    4,
+                    false,
+                    38,
+                    14,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(18, 4), minimumValue(18, 4)),
+                    ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(18, 4), minimumValue(18, 4)),
+                    writerVersion);
+        }
+    }
+
+    public void testReadingRescaledDecimals(
+            int precision,
+            int scale,
+            boolean forceFixedLengthArray,
+            int schemaPrecision,
+            int schemaScale,
+            List<String> values,
+            List<String> expected,
+            WriterVersion writerVersion)
     {
         String tableName = generateTableName("rescaled_decimals", precision, scale);
 
@@ -152,66 +343,73 @@ public class TestParquetDecimalScaling
 
         writeParquetDecimalsRecord(
                 getParquetWritePath(tableName),
-                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)));
+                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)),
+                writerVersion);
 
         assertValues(tableName, schemaScale, expected);
 
         dropTable(tableName);
     }
 
-    @DataProvider
-    public Object[][] testReadingRescaledDecimalsProvider()
-    {
-        // parquetPrecision, parquetScale, useFixedLengthArray, schemaPrecision, schemaScale, writeValues, expectedValues
-        return new Object[][] {
-                {10, 2, false, 12, 4,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2))},
-                {10, 2, true, 13, 5,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.01000", "10.0000", "1.23000", maximumValue(10, 2), minimumValue(10, 2))},
-                {4, 2, false, 6, 4,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(4, 2), minimumValue(4, 2))},
-                {4, 2, false, 6, 2,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01", "10.00", "1.23", maximumValue(4, 2), minimumValue(4, 2))},
-                {10, 2, false, 11, 3,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.010", "10.000", "1.230", maximumValue(10, 2), minimumValue(10, 2))},
-                {10, 2, true, 12, 4,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2))},
-                {4, 2, false, 10, 5,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01000", "10.00000", "1.23000", maximumValue(4, 2), minimumValue(4, 2))},
-                {4, 2, true, 10, 5,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01000", "10.00000", "1.23000", maximumValue(4, 2), minimumValue(4, 2))},
-                {14, 2, false, 20, 3,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(14, 2), minimumValue(14, 2)),
-                        ImmutableList.of("10.010", "10.000", "1.230", maximumValue(14, 2), minimumValue(14, 2))},
-                {6, 3, false, 9, 6,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
-                        ImmutableList.of("10.010000", "10.000000", "1.230000", maximumValue(6, 3), minimumValue(6, 3))},
-                {6, 3, true, 9, 6,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(6, 3), minimumValue(6, 3)),
-                        ImmutableList.of("10.010000", "10.000000", "1.230000", maximumValue(6, 3), minimumValue(6, 3))},
-                {10, 2, false, 38, 4,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(10, 2), minimumValue(10, 2))},
-                {18, 4, false, 38, 14,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(18, 4), minimumValue(18, 4)),
-                        ImmutableList.of("10.0100", "10.0000", "1.2300", maximumValue(18, 4), minimumValue(18, 4))},
-        };
-    }
-
     /**
      * Tests if Parquet decimal with given precision and scale can be read into Trino decimal with different precision and scale
      * if Parquet decimal value will be rounded to fit into Trino decimal.
      */
-    @Test(dataProvider = "testReadingRoundedDecimalsProvider")
-    public void testReadingRoundedDecimals(int precision, int scale, boolean forceFixedLengthArray, int schemaPrecision, int schemaScale, List<String> values, List<String> expected)
+    @Test
+    public void testReadingRoundedDecimals()
+    {
+        for (WriterVersion writerVersion : WriterVersion.values()) {
+            testReadingRoundedDecimals(
+                    10,
+                    2,
+                    false,
+                    12,
+                    1,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+
+            testReadingRoundedDecimals(
+                    9,
+                    2,
+                    true,
+                    12,
+                    1,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(9, 2), minimumValue(9, 2)),
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(9, 2), minimumValue(9, 2)),
+                    writerVersion);
+
+            testReadingRoundedDecimals(
+                    4,
+                    2,
+                    false,
+                    7,
+                    1,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
+                    writerVersion);
+
+            testReadingRoundedDecimals(
+                    10,
+                    2,
+                    false,
+                    12,
+                    1,
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
+                    writerVersion);
+        }
+    }
+
+    public void testReadingRoundedDecimals(
+            int precision,
+            int scale,
+            boolean forceFixedLengthArray,
+            int schemaPrecision,
+            int schemaScale,
+            List<String> values,
+            List<String> expected,
+            WriterVersion writerVersion)
     {
         String tableName = generateTableName("rounded_decimals", precision, scale);
 
@@ -219,39 +417,40 @@ public class TestParquetDecimalScaling
 
         writeParquetDecimalsRecord(
                 getParquetWritePath(tableName),
-                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)));
+                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)),
+                writerVersion);
 
         assertRoundedValues(tableName, schemaScale, expected);
 
         dropTable(tableName);
     }
 
-    @DataProvider
-    public Object[][] testReadingRoundedDecimalsProvider()
-    {
-        // parquetPrecision, parquetScale, useFixedLengthArray, schemaPrecision, schemaScale, writeValues, expectedValues
-        return new Object[][] {
-                {10, 2, false, 12, 1,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2))},
-                {9, 2, true, 12, 1,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(9, 2), minimumValue(9, 2)),
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(9, 2), minimumValue(9, 2))},
-                {4, 2, false, 7, 1,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2)),
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(4, 2), minimumValue(4, 2))},
-                {10, 2, false, 12, 1,
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2)),
-                        ImmutableList.of("10.01", "10", "1.23", maximumValue(10, 2), minimumValue(10, 2))},
-        };
-    }
-
     /**
      * Tests if Parquet decimal with given precision and scale cannot be read into Presto decimal with different precision and scale
      * because when rescaling decimal we would loose most significant digits.
      */
-    @Test(dataProvider = "testReadingNonRescalableDecimalsProvider")
-    public void testReadingNonRescalableDecimals(int precision, int scale, boolean forceFixedLengthArray, int schemaPrecision, int schemaScale, List<String> values)
+    @Test
+    public void testReadingNonRescalableDecimals()
+    {
+        for (WriterVersion writerVersion : WriterVersion.values()) {
+            testReadingNonRescalableDecimals(4, 2, false, 4, 3, ImmutableList.of("10.01"), writerVersion);
+            testReadingNonRescalableDecimals(10, 2, false, 10, 3, ImmutableList.of("12345678.91"), writerVersion);
+            testReadingNonRescalableDecimals(10, 2, false, 3, 2, ImmutableList.of("10.01"), writerVersion);
+            testReadingNonRescalableDecimals(10, 2, true, 14, 7, ImmutableList.of("99999999.99"), writerVersion);
+            testReadingNonRescalableDecimals(10, 2, false, 10, 4, ImmutableList.of("99999999.99"), writerVersion);
+            testReadingNonRescalableDecimals(18, 8, false, 32, 23, ImmutableList.of("1234567890.12345678"), writerVersion);
+            testReadingNonRescalableDecimals(20, 8, false, 32, 21, ImmutableList.of("123456789012.12345678"), writerVersion);
+        }
+    }
+
+    private void testReadingNonRescalableDecimals(
+            int precision,
+            int scale,
+            boolean forceFixedLengthArray,
+            int schemaPrecision,
+            int schemaScale,
+            List<String> values,
+            WriterVersion writerVersion)
     {
         String tableName = generateTableName("non_rescalable", precision, scale);
 
@@ -259,26 +458,72 @@ public class TestParquetDecimalScaling
 
         writeParquetDecimalsRecord(
                 getParquetWritePath(tableName),
-                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)));
+                ImmutableList.of(new ParquetDecimalInsert("value", forceFixedLengthArray, precision, scale, values)),
+                writerVersion);
 
-        assertQueryFails(format("SELECT * FROM tpch.%s", tableName), format("Cannot cast DECIMAL\\(%d, %d\\) '.*' to DECIMAL\\(%d, %d\\)", precision, scale, schemaPrecision, schemaScale));
+        @Language("SQL") String query = format("SELECT * FROM tpch.%s", tableName);
+        @Language("RegExp") String expectedMessage = format("Cannot cast DECIMAL\\(%d, %d\\) '.*' to DECIMAL\\(%d, %d\\)", precision, scale, schemaPrecision, schemaScale);
+
+        assertQueryFails(query, expectedMessage);
 
         dropTable(tableName);
     }
 
-    @DataProvider
-    public Object[][] testReadingNonRescalableDecimalsProvider()
+    @Test
+    public void testParquetLongFixedLenByteArrayWithTrinoShortDecimal()
     {
-        // parquetPrecision, parquetScale, useFixedLengthArray, schemaPrecision, schemaScale, writeValues
-        return new Object[][] {
-                {4, 2, false, 4, 3, ImmutableList.of("10.01")},
-                {10, 2, false, 10, 3, ImmutableList.of("12345678.91")},
-                {10, 2, false, 3, 2, ImmutableList.of("10.01")},
-                {10, 2, true, 14, 7, ImmutableList.of("99999999.99")},
-                {10, 2, false, 10, 4, ImmutableList.of("99999999.99")},
-                {18, 8, false, 32, 23, ImmutableList.of("1234567890.12345678")},
-                {20, 8, false, 32, 21, ImmutableList.of("123456789012.12345678")},
-        };
+        for (WriterVersion writerVersion : WriterVersion.values()) {
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(5, 2, 19, 2, "-5", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(5, 2, 20, 2, "999.99", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(7, 2, 24, 2, "-99999.99", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(10, 2, 26, 2, "99999999.99", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(14, 4, 30, 4, "99999999.99", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(18, 8, 32, 8, "1234567890.12345678", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(18, 8, 32, 8, "123456789012.12345678", writerVersion);
+            testParquetLongFixedLenByteArrayWithTrinoShortDecimal(18, 8, 38, 8, "4989875563210.12345678", writerVersion);
+        }
+    }
+
+    private void testParquetLongFixedLenByteArrayWithTrinoShortDecimal(
+            int schemaPrecision,
+            int schemaScale,
+            int parquetPrecision,
+            int parquetScale,
+            String writeValue,
+            WriterVersion writerVersion)
+    {
+        String tableName = generateTableName("rounded_decimals", parquetPrecision, parquetScale);
+        createTable(tableName, schemaPrecision, schemaScale);
+
+        int byteArrayLength = ParquetHiveSerDe.PRECISION_TO_BYTE_COUNT[parquetPrecision - 1];
+        MessageType schema = parseMessageType(format(
+                "message hive_record { optional fixed_len_byte_array(%d) value (DECIMAL(%d, %d)); }",
+                byteArrayLength,
+                schemaPrecision,
+                schemaScale));
+        List<ObjectInspector> inspectors = ImmutableList.of(new JavaHiveDecimalObjectInspector(new DecimalTypeInfo(parquetPrecision, parquetScale)));
+
+        createParquetFile(
+                getParquetWritePath(tableName),
+                getStandardStructObjectInspector(ImmutableList.of("value"), inspectors),
+                new Iterator[] {ImmutableList.of(HiveDecimal.create(writeValue)).stream().iterator()},
+                schema,
+                Collections.singletonList("hive_record"),
+                writerVersion);
+
+        if (overflows(new BigDecimal(writeValue).unscaledValue(), schemaPrecision)) {
+            @Language("SQL") String query = format("SELECT * FROM tpch.%s", tableName);
+            @Language("RegExp") String expectedMessage = format(
+                    "Could not read unscaled value %s into a short decimal from column .*",
+                    new BigDecimal(writeValue).unscaledValue());
+
+            assertQueryFails(query, expectedMessage);
+        }
+        else {
+            assertValues(tableName, schemaScale, ImmutableList.of(writeValue));
+        }
+
+        dropTable(tableName);
     }
 
     protected void createTable(String tableName, int precision, int scale)
@@ -291,7 +536,7 @@ public class TestParquetDecimalScaling
         assertUpdate(format("DROP TABLE %s", tableName));
     }
 
-    protected void assertValues(String tableName, int scale, List<String> expected)
+    private void assertValues(String tableName, int scale, List<String> expected)
     {
         MaterializedResult materializedRows = computeActual(format("SELECT value FROM tpch.%s", tableName));
 
@@ -307,7 +552,7 @@ public class TestParquetDecimalScaling
         assertThat(actualValues).containsExactlyInAnyOrder(expectedValues);
     }
 
-    protected void assertRoundedValues(String tableName, int scale, List<String> expected)
+    private void assertRoundedValues(String tableName, int scale, List<String> expected)
     {
         MaterializedResult materializedRows = computeActual(format("SELECT value FROM tpch.%s", tableName));
 
@@ -335,7 +580,7 @@ public class TestParquetDecimalScaling
 
     private Path getParquetWritePath(String tableName)
     {
-        return new Path(basePath.toString(), format("hive_data/tpch/%s/%s", tableName, UUID.randomUUID().toString()));
+        return new Path(basePath.toString(), format("hive_data/tpch/%s/%s", tableName, UUID.randomUUID()));
     }
 
     private static void createParquetFile(
@@ -343,17 +588,18 @@ public class TestParquetDecimalScaling
             StandardStructObjectInspector inspector,
             Iterator<?>[] iterators,
             MessageType parquetSchema,
-            List<String> columnNames)
+            List<String> columnNames,
+            WriterVersion writerVersion)
     {
         Properties tableProperties = createTableProperties(columnNames, Collections.singletonList(inspector));
 
-        JobConf jobConf = new JobConf();
+        JobConf jobConf = new JobConf(false);
         jobConf.setEnum(COMPRESSION, UNCOMPRESSED);
         jobConf.setBoolean(ENABLE_DICTIONARY, false);
-        jobConf.setEnum(WRITER_VERSION, PARQUET_2_0);
+        jobConf.setEnum(WRITER_VERSION, writerVersion);
 
         try {
-            FileSinkOperator.RecordWriter recordWriter = new TestMapredParquetOutputFormat(Optional.of(parquetSchema), true)
+            FileSinkOperator.RecordWriter recordWriter = new TestingMapredParquetOutputFormat(Optional.of(parquetSchema), true, DateTimeZone.getDefault())
                     .getHiveRecordWriter(
                             jobConf,
                             path,
@@ -384,7 +630,7 @@ public class TestParquetDecimalScaling
         }
     }
 
-    private static void writeParquetDecimalsRecord(Path output, List<ParquetDecimalInsert> inserts)
+    private static void writeParquetDecimalsRecord(Path output, List<ParquetDecimalInsert> inserts, WriterVersion writerVersion)
     {
         List<String> fields = inserts.stream().map(ParquetDecimalInsert::schemaFieldDeclaration).collect(toImmutableList());
         MessageType schema = parseMessageType(format("message hive_record { %s; }", Joiner.on("; ").join(fields)));
@@ -397,14 +643,15 @@ public class TestParquetDecimalScaling
                 getStandardStructObjectInspector(columnNames, inspectors),
                 values,
                 schema,
-                Collections.singletonList("hive_record"));
+                Collections.singletonList("hive_record"),
+                writerVersion);
     }
 
     private static Properties createTableProperties(List<String> columnNames, List<ObjectInspector> objectInspectors)
     {
         Properties tableProperties = new Properties();
-        tableProperties.setProperty("columns", Joiner.on(',').join(columnNames));
-        tableProperties.setProperty("columns.types", Joiner.on(',').join(transform(objectInspectors, ObjectInspector::getTypeName)));
+        tableProperties.setProperty(LIST_COLUMNS, Joiner.on(',').join(columnNames));
+        tableProperties.setProperty(LIST_COLUMN_TYPES, Joiner.on(',').join(transform(objectInspectors, ObjectInspector::getTypeName)));
         return tableProperties;
     }
 
@@ -486,9 +733,7 @@ public class TestParquetDecimalScaling
 
         public Iterable<?> getValues()
         {
-            ImmutableList<String> inserts = ImmutableList.<String>builder()
-                    .addAll(values)
-                    .build();
+            ImmutableList<String> inserts = ImmutableList.copyOf(values);
 
             return inserts.stream().map(this::convertValue).collect(toImmutableList());
         }

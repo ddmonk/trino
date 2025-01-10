@@ -18,25 +18,26 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Primitives;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionArgumentDefinition;
 import io.trino.metadata.FunctionBinding;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.LongVariableConstraint;
-import io.trino.metadata.Signature;
 import io.trino.operator.ParametricImplementation;
 import io.trino.operator.annotations.FunctionsParserHelper;
 import io.trino.operator.annotations.ImplementationDependency;
-import io.trino.operator.scalar.ChoicesScalarFunctionImplementation;
-import io.trino.operator.scalar.ChoicesScalarFunctionImplementation.ScalarImplementationChoice;
-import io.trino.operator.scalar.ScalarFunctionImplementation;
+import io.trino.operator.scalar.ChoicesSpecializedSqlScalarFunction;
+import io.trino.operator.scalar.ChoicesSpecializedSqlScalarFunction.ScalarImplementationChoice;
+import io.trino.operator.scalar.SpecializedSqlScalarFunction;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionNullability;
+import io.trino.spi.function.InOut;
 import io.trino.spi.function.InvocationConvention.InvocationArgumentConvention;
 import io.trino.spi.function.InvocationConvention.InvocationReturnConvention;
 import io.trino.spi.function.IsNull;
+import io.trino.spi.function.Signature;
 import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
@@ -51,8 +52,6 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -61,7 +60,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.ImmutableSortedSet.toImmutableSortedSet;
@@ -78,10 +77,14 @@ import static io.trino.operator.annotations.ImplementationDependency.getImplemen
 import static io.trino.operator.annotations.ImplementationDependency.validateImplementationDependencyAnnotation;
 import static io.trino.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_ERROR;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BOXED_NULLABLE;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.FUNCTION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.IN_OUT;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NULL_FLAG;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.VALUE_BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.VALUE_BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.parseTypeSignature;
@@ -102,8 +105,7 @@ public class ParametricScalarImplementation
     private final Map<String, Class<?>> specializedTypeParameters;
     private final Class<?> returnNativeContainerType;
     private final List<ParametricScalarImplementationChoice> choices;
-    private final boolean nullable;
-    private final List<FunctionArgumentDefinition> argumentDefinitions;
+    private final FunctionNullability functionNullability;
 
     private ParametricScalarImplementation(
             Signature signature,
@@ -117,43 +119,38 @@ public class ParametricScalarImplementation
         this.specializedTypeParameters = ImmutableMap.copyOf(requireNonNull(specializedTypeParameters, "specializedTypeParameters is null"));
         this.choices = requireNonNull(choices, "choices is null");
         checkArgument(!choices.isEmpty(), "choices is empty");
-        this.returnNativeContainerType = requireNonNull(returnContainerType, "return native container type is null");
+        this.returnNativeContainerType = requireNonNull(returnContainerType, "returnContainerType is null");
 
         for (Class<?> specializedJavaType : specializedTypeParameters.values()) {
             checkArgument(!Primitives.isWrapperType(specializedJavaType), "specializedTypeParameter must not contain boxed primitive types");
         }
 
         ParametricScalarImplementationChoice defaultChoice = choices.get(0);
-        boolean expression = defaultChoice.getArgumentConventions().stream()
-                .noneMatch(BLOCK_POSITION::equals);
-        checkArgument(expression, "default choice can not use the BLOCK_AND_POSITION calling convention: %s", signature);
+        boolean hasBlockPositionArgument = defaultChoice.getArgumentConventions().stream()
+                .noneMatch(argumentConvention -> BLOCK_POSITION == argumentConvention || BLOCK_POSITION_NOT_NULL == argumentConvention);
+        checkArgument(hasBlockPositionArgument, "default choice can not use the block and position calling convention: %s", signature);
 
-        this.nullable = defaultChoice.getReturnConvention().isNullable();
-        checkArgument(choices.stream().allMatch(choice -> choice.getReturnConvention().isNullable() == this.nullable), "all choices must have the same nullable flag: %s", signature);
+        boolean returnNullability = defaultChoice.getReturnConvention().isNullable();
+        checkArgument(choices.stream().allMatch(choice -> choice.getReturnConvention().isNullable() == returnNullability), "all choices must have the same nullable flag: %s", signature);
 
-        argumentDefinitions = defaultChoice.getArgumentConventions().stream()
+        List<Boolean> argumentNullability = defaultChoice.getArgumentConventions().stream()
                 .map(InvocationArgumentConvention::isNullable)
-                .map(FunctionArgumentDefinition::new)
                 .collect(toImmutableList());
+        functionNullability = new FunctionNullability(returnNullability, argumentNullability);
+
         checkArgument(
-                choices.stream().allMatch(choice -> matches(argumentDefinitions, choice.getArgumentConventions())),
+                choices.stream().allMatch(choice -> matches(argumentNullability, choice.getArgumentConventions())),
                 "all choices must have the same nullable parameter flags: %s",
                 signature);
     }
 
     @Override
-    public boolean isNullable()
+    public FunctionNullability getFunctionNullability()
     {
-        return nullable;
+        return functionNullability;
     }
 
-    @Override
-    public List<FunctionArgumentDefinition> getArgumentDefinitions()
-    {
-        return argumentDefinitions;
-    }
-
-    public Optional<ScalarFunctionImplementation> specialize(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
+    public Optional<SpecializedSqlScalarFunction> specialize(FunctionBinding functionBinding, FunctionDependencies functionDependencies)
     {
         List<ScalarImplementationChoice> implementationChoices = new ArrayList<>();
         for (Map.Entry<String, Class<?>> entry : specializedTypeParameters.entrySet()) {
@@ -205,7 +202,7 @@ public class ParametricScalarImplementation
                     boundMethodHandle.asType(javaMethodType(choice, boundSignature)),
                     boundConstructor));
         }
-        return Optional.of(new ChoicesScalarFunctionImplementation(functionBinding, implementationChoices));
+        return Optional.of(new ChoicesSpecializedSqlScalarFunction(boundSignature, implementationChoices));
     }
 
     @Override
@@ -256,9 +253,18 @@ public class ParametricScalarImplementation
                 case BOXED_NULLABLE:
                     methodHandleParameterTypes.add(Primitives.wrap(signatureType.getJavaType()));
                     break;
+                case BLOCK_POSITION_NOT_NULL:
                 case BLOCK_POSITION:
                     methodHandleParameterTypes.add(Block.class);
                     methodHandleParameterTypes.add(int.class);
+                    break;
+                case VALUE_BLOCK_POSITION:
+                case VALUE_BLOCK_POSITION_NOT_NULL:
+                    methodHandleParameterTypes.add(ValueBlock.class);
+                    methodHandleParameterTypes.add(int.class);
+                    break;
+                case IN_OUT:
+                    methodHandleParameterTypes.add(InOut.class);
                     break;
                 case FUNCTION:
                     methodHandleParameterTypes.add(choice.getLambdaInterfaces().get(lambdaArgumentIndex));
@@ -277,13 +283,13 @@ public class ParametricScalarImplementation
         return MethodType.methodType(methodHandleReturnType, methodHandleParameterTypes.build());
     }
 
-    private static boolean matches(List<FunctionArgumentDefinition> argumentDefinitions, List<InvocationArgumentConvention> argumentConventions)
+    private static boolean matches(List<Boolean> argumentNullability, List<InvocationArgumentConvention> argumentConventions)
     {
-        if (argumentDefinitions.size() != argumentConventions.size()) {
+        if (argumentNullability.size() != argumentConventions.size()) {
             return false;
         }
-        for (int i = 0; i < argumentDefinitions.size(); i++) {
-            boolean expectedNullable = argumentDefinitions.get(i).isNullable();
+        for (int i = 0; i < argumentNullability.size(); i++) {
+            boolean expectedNullable = argumentNullability.get(i);
             InvocationArgumentConvention argumentConvention = argumentConventions.get(i);
             if (argumentConvention == FUNCTION) {
                 // functions are never null
@@ -291,13 +297,8 @@ public class ParametricScalarImplementation
                     return false;
                 }
             }
-            else {
-                // block and position can be nullable or not
-                if (argumentConvention != BLOCK_POSITION) {
-                    if (expectedNullable != argumentConvention.isNullable()) {
-                        return false;
-                    }
-                }
+            else if (expectedNullable != argumentConvention.isNullable()) {
+                return false;
             }
         }
         return true;
@@ -321,7 +322,7 @@ public class ParametricScalarImplementation
             this.argumentNativeContainerTypes = ImmutableList.copyOf(requireNonNull(argumentNativeContainerTypes, "argumentNativeContainerTypes is null"));
             this.specializedTypeParameters = ImmutableMap.copyOf(requireNonNull(specializedTypeParameters, "specializedTypeParameters is null"));
             this.choices = new ArrayList<>();
-            this.returnNativeContainerType = requireNonNull(returnNativeContainerType, "return native container type is null");
+            this.returnNativeContainerType = requireNonNull(returnNativeContainerType, "returnNativeContainerType is null");
         }
 
         void addChoice(ParametricScalarImplementationChoice choice)
@@ -369,7 +370,7 @@ public class ParametricScalarImplementation
             this.constructorDependencies = ImmutableList.copyOf(requireNonNull(constructorDependencies, "constructorDependencies is null"));
 
             this.numberOfBlockPositionArguments = (int) argumentConventions.stream()
-                    .filter(BLOCK_POSITION::equals)
+                    .filter(argumentConvention -> BLOCK_POSITION == argumentConvention || BLOCK_POSITION_NOT_NULL == argumentConvention)
                     .count();
         }
 
@@ -479,32 +480,27 @@ public class ParametricScalarImplementation
 
     public static final class Parser
     {
-        private final String functionName;
+        private final Signature signature;
         private final List<InvocationArgumentConvention> argumentConventions = new ArrayList<>();
         private final List<Class<?>> lambdaInterfaces = new ArrayList<>();
-        private final TypeSignature returnType;
-        private final List<TypeSignature> argumentTypes = new ArrayList<>();
         private final List<Optional<Class<?>>> argumentNativeContainerTypes = new ArrayList<>();
         private final MethodHandle methodHandle;
-        private final List<ImplementationDependency> dependencies = new ArrayList<>();
-        private final Set<TypeParameter> typeParameters = new LinkedHashSet<>();
+        private final Set<TypeParameter> typeParameters;
         private final Set<String> literalParameters;
         private final Set<String> typeParameterNames;
         private final Map<String, Class<?>> specializedTypeParameters;
-        private final List<ImplementationDependency> constructorDependencies = new ArrayList<>();
-        private final List<LongVariableConstraint> longVariableConstraints;
         private final Class<?> returnNativeContainerType;
         private boolean hasConnectorSession;
 
         private final ParametricScalarImplementationChoice choice;
 
-        Parser(String functionName, Method method, Optional<Constructor<?>> constructor)
+        Parser(Method method, Optional<Constructor<?>> constructor)
         {
-            this.functionName = requireNonNull(functionName, "functionName is null");
+            Signature.Builder signatureBuilder = Signature.builder();
             boolean nullable = method.getAnnotation(SqlNullable.class) != null;
             checkArgument(nullable || !containsLegacyNullable(method.getAnnotations()), "Method [%s] is annotated with @Nullable but not @SqlNullable", method);
 
-            typeParameters.addAll(Arrays.asList(method.getAnnotationsByType(TypeParameter.class)));
+            typeParameters = ImmutableSet.copyOf(method.getAnnotationsByType(TypeParameter.class));
 
             literalParameters = parseLiteralParameters(method);
             typeParameterNames = typeParameters.stream()
@@ -513,7 +509,7 @@ public class ParametricScalarImplementation
 
             SqlType returnType = method.getAnnotation(SqlType.class);
             checkArgument(returnType != null, "Method [%s] is missing @SqlType annotation", method);
-            this.returnType = parseTypeSignature(returnType.value(), literalParameters);
+            signatureBuilder.returnType(parseTypeSignature(returnType.value(), literalParameters));
 
             Class<?> actualReturnType = method.getReturnType();
             this.returnNativeContainerType = Primitives.unwrap(actualReturnType);
@@ -525,7 +521,7 @@ public class ParametricScalarImplementation
                 checkArgument(!nullable, "Method [%s] annotated with @SqlNullable has primitive return type %s", method, actualReturnType.getSimpleName());
             }
 
-            longVariableConstraints = parseLongVariableConstraints(method);
+            parseLongVariableConstraints(method, signatureBuilder);
 
             this.specializedTypeParameters = getDeclaredSpecializedTypeParameters(method, typeParameters);
 
@@ -536,11 +532,14 @@ public class ParametricScalarImplementation
             }
 
             inferSpecialization(method, actualReturnType, returnType.value());
-            parseArguments(method);
 
-            Optional<MethodHandle> constructorMethodHandle = getConstructor(method, constructor);
+            List<ImplementationDependency> dependencies = new ArrayList<>();
+            parseArguments(method, signatureBuilder, dependencies);
 
-            this.methodHandle = getMethodHandle(method);
+            List<ImplementationDependency> constructorDependencies = new ArrayList<>();
+            Optional<MethodHandle> constructorMethodHandle = getConstructor(method, constructor, constructorDependencies);
+
+            this.methodHandle = getMethodHandle(method, dependencies);
 
             this.choice = new ParametricScalarImplementationChoice(
                     nullable ? NULLABLE_RETURN : FAIL_ON_NULL,
@@ -551,9 +550,13 @@ public class ParametricScalarImplementation
                     constructorMethodHandle,
                     dependencies,
                     constructorDependencies);
+
+            createTypeVariableConstraints(typeParameters, dependencies)
+                    .forEach(signatureBuilder::typeVariableConstraint);
+            signature = signatureBuilder.build();
         }
 
-        private void parseArguments(Method method)
+        private void parseArguments(Method method, Signature.Builder signatureBuilder, List<ImplementationDependency> dependencies)
         {
             boolean encounteredNonDependencyAnnotation = false;
             int parameterIndex = 0;
@@ -591,7 +594,7 @@ public class ParametricScalarImplementation
                             .findFirst()
                             .orElseThrow(() -> new IllegalArgumentException(format("Method [%s] is missing @SqlType annotation for parameter", method)));
                     TypeSignature typeSignature = parseTypeSignature(type.value(), literalParameters);
-                    argumentTypes.add(typeSignature);
+                    signatureBuilder.argumentType(typeSignature);
 
                     if (typeSignature.getBase().equals(FunctionType.NAME)) {
                         // function type
@@ -604,18 +607,27 @@ public class ParametricScalarImplementation
                     else {
                         // value type
                         InvocationArgumentConvention argumentConvention;
-                        if (Stream.of(annotations).anyMatch(SqlNullable.class::isInstance)) {
+                        boolean nullable = Stream.of(annotations).anyMatch(SqlNullable.class::isInstance);
+                        if (Stream.of(annotations).anyMatch(BlockPosition.class::isInstance)) {
+                            verify(method.getParameterCount() > (parameterIndex + 1));
+
+                            if (parameterType == Block.class) {
+                                argumentConvention = nullable ? BLOCK_POSITION : BLOCK_POSITION_NOT_NULL;
+                            }
+                            else {
+                                verify(ValueBlock.class.isAssignableFrom(parameterType));
+                                argumentConvention = nullable ? VALUE_BLOCK_POSITION : VALUE_BLOCK_POSITION_NOT_NULL;
+                            }
+                            Annotation[] parameterAnnotations = method.getParameterAnnotations()[parameterIndex + 1];
+                            verify(Stream.of(parameterAnnotations).anyMatch(BlockIndex.class::isInstance));
+                        }
+                        else if (nullable) {
                             checkCondition(!parameterType.isPrimitive(), FUNCTION_IMPLEMENTATION_ERROR, "Method [%s] has parameter with primitive type %s annotated with @SqlNullable", method, parameterType.getSimpleName());
 
                             argumentConvention = BOXED_NULLABLE;
                         }
-                        else if (Stream.of(annotations).anyMatch(BlockPosition.class::isInstance)) {
-                            checkState(method.getParameterCount() > (parameterIndex + 1));
-                            checkState(parameterType == Block.class);
-
-                            argumentConvention = BLOCK_POSITION;
-                            Annotation[] parameterAnnotations = method.getParameterAnnotations()[parameterIndex + 1];
-                            checkState(Stream.of(parameterAnnotations).anyMatch(BlockIndex.class::isInstance));
+                        else if (parameterType.equals(InOut.class)) {
+                            argumentConvention = IN_OUT;
                         }
                         else {
                             // USE_NULL_FLAG or RETURN_NULL_ON_NULL
@@ -643,7 +655,7 @@ public class ParametricScalarImplementation
                             }
                         }
 
-                        if (argumentConvention == BLOCK_POSITION) {
+                        if (argumentConvention == BLOCK_POSITION || argumentConvention == BLOCK_POSITION_NOT_NULL || argumentConvention == VALUE_BLOCK_POSITION || argumentConvention == VALUE_BLOCK_POSITION_NOT_NULL) {
                             argumentNativeContainerTypes.add(Optional.of(type.nativeContainerType()));
                         }
                         else {
@@ -654,10 +666,7 @@ public class ParametricScalarImplementation
                         }
 
                         argumentConventions.add(argumentConvention);
-                        parameterIndex++;
-                        if (argumentConvention == NULL_FLAG || argumentConvention == BLOCK_POSITION) {
-                            parameterIndex++;
-                        }
+                        parameterIndex += argumentConvention.getParameterCount();
                     }
                 }
             }
@@ -676,7 +685,7 @@ public class ParametricScalarImplementation
         }
 
         // Find matching constructor, if this is an instance method, and populate constructorDependencies
-        private Optional<MethodHandle> getConstructor(Method method, Optional<Constructor<?>> optionalConstructor)
+        private Optional<MethodHandle> getConstructor(Method method, Optional<Constructor<?>> optionalConstructor, List<ImplementationDependency> constructorDependencies)
         {
             if (isStatic(method.getModifiers())) {
                 return Optional.empty();
@@ -703,7 +712,7 @@ public class ParametricScalarImplementation
             return Optional.of(result.asType(result.type().changeReturnType(Object.class)));
         }
 
-        private MethodHandle getMethodHandle(Method method)
+        private static MethodHandle getMethodHandle(Method method, List<ImplementationDependency> dependencies)
         {
             MethodHandle methodHandle = methodHandle(FUNCTION_IMPLEMENTATION_ERROR, method);
             if (!isStatic(method.getModifiers())) {
@@ -756,13 +765,7 @@ public class ParametricScalarImplementation
 
         public Signature getSignature()
         {
-            return new Signature(
-                    functionName,
-                    createTypeVariableConstraints(typeParameters, dependencies),
-                    longVariableConstraints,
-                    returnType,
-                    argumentTypes,
-                    false);
+            return signature;
         }
     }
 }

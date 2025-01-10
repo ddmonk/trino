@@ -15,12 +15,14 @@ package io.trino.tests.product.launcher.suite.suites;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
-import io.trino.tests.product.launcher.env.environment.Multinode;
+import io.trino.tests.product.launcher.env.environment.EnvMultinode;
 import io.trino.tests.product.launcher.suite.Suite;
 import io.trino.tests.product.launcher.suite.SuiteTestRun;
 
 import java.util.List;
 
+import static io.trino.tests.product.TestGroups.CONFIGURED_FEATURES;
+import static io.trino.tests.product.TestGroups.TPCDS;
 import static io.trino.tests.product.launcher.suite.SuiteTestRun.testOnEnvironment;
 
 public class SuiteTpcds
@@ -30,8 +32,8 @@ public class SuiteTpcds
     public List<SuiteTestRun> getTestRuns(EnvironmentConfig config)
     {
         return ImmutableList.of(
-                testOnEnvironment(Multinode.class)
-                        .withGroups("tpcds")
+                testOnEnvironment(EnvMultinode.class)
+                        .withGroups(CONFIGURED_FEATURES, TPCDS)
                         // TODO: Results for q72 need to be fixed. https://github.com/trinodb/trino/issues/4564
                         .withExcludedTests("sql_tests.testcases.tpcds.q72")
                         .build());

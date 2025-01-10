@@ -15,11 +15,12 @@ package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.InternalFunctionBundle;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
-import io.trino.operator.aggregation.TypedSet;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.ScalarFunction;
@@ -28,13 +29,11 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.type.BlockTypeOperators;
-import io.trino.type.BlockTypeOperators.BlockPositionEqual;
 import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
+import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -47,10 +46,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.util.List;
 import java.util.Optional;
@@ -58,10 +53,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Verify.verify;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.FunctionExtractor.extractFunctions;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
-import static io.trino.operator.aggregation.TypedSet.createEqualityTypedSet;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.relational.Expressions.field;
@@ -81,7 +74,7 @@ public class BenchmarkArrayDistinct
     private static final int NUM_TYPES = 1;
     private static final List<Type> TYPES = ImmutableList.of(VARCHAR);
     private static final BlockTypeOperators BLOCK_TYPE_OPERATORS = new BlockTypeOperators(new TypeOperators());
-    private static final BlockPositionEqual EQUAL_OPERATOR = BLOCK_TYPE_OPERATORS.getEqualOperator(VARCHAR);
+    private static final BlockPositionIsIdentical DISTINCT_FROM_OPERATOR = BLOCK_TYPE_OPERATORS.getIdenticalOperator(VARCHAR);
     private static final BlockPositionHashCode HASH_CODE_OPERATOR = BLOCK_TYPE_OPERATORS.getHashCodeOperator(VARCHAR);
 
     static {
@@ -113,16 +106,16 @@ public class BenchmarkArrayDistinct
         @Setup
         public void setup()
         {
-            Metadata metadata = createTestMetadataManager();
-            metadata.addFunctions(extractFunctions(BenchmarkArrayDistinct.class));
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution(InternalFunctionBundle.extractFunctions(BenchmarkArrayDistinct.class));
+            ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
+
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Block[] blocks = new Block[TYPES.size()];
             for (int i = 0; i < TYPES.size(); i++) {
                 Type elementType = TYPES.get(i);
                 ArrayType arrayType = new ArrayType(elementType);
                 projectionsBuilder.add(new CallExpression(
-                        metadata.resolveFunction(QualifiedName.of(name), fromTypes(arrayType)),
+                        functionResolution.resolveFunction(name, fromTypes(arrayType)),
                         ImmutableList.of(field(i, arrayType))));
                 blocks[i] = createChannel(POSITIONS, ARRAY_SIZE, arrayType);
             }
@@ -134,21 +127,21 @@ public class BenchmarkArrayDistinct
 
         private static Block createChannel(int positionCount, int arraySize, ArrayType arrayType)
         {
-            BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-                for (int i = 0; i < arraySize; i++) {
-                    if (arrayType.getElementType().getJavaType() == long.class) {
-                        arrayType.getElementType().writeLong(entryBuilder, ThreadLocalRandom.current().nextLong());
+                blockBuilder.buildEntry(elementBuilder -> {
+                    for (int i = 0; i < arraySize; i++) {
+                        if (arrayType.getElementType().getJavaType() == long.class) {
+                            arrayType.getElementType().writeLong(elementBuilder, ThreadLocalRandom.current().nextLong());
+                        }
+                        else if (arrayType.getElementType().equals(VARCHAR)) {
+                            arrayType.getElementType().writeSlice(elementBuilder, Slices.utf8Slice("test_string"));
+                        }
+                        else {
+                            throw new UnsupportedOperationException();
+                        }
                     }
-                    else if (arrayType.getElementType().equals(VARCHAR)) {
-                        arrayType.getElementType().writeSlice(entryBuilder, Slices.utf8Slice("test_string"));
-                    }
-                    else {
-                        throw new UnsupportedOperationException();
-                    }
-                }
-                blockBuilder.closeEntry();
+                });
             }
             return blockBuilder.build();
         }
@@ -172,11 +165,7 @@ public class BenchmarkArrayDistinct
         data.setup();
         new BenchmarkArrayDistinct().arrayDistinct(data);
 
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkArrayDistinct.class.getSimpleName() + ".*")
-                .build();
-        new Runner(options).run();
+        benchmark(BenchmarkArrayDistinct.class).run();
     }
 
     @ScalarFunction
@@ -187,11 +176,10 @@ public class BenchmarkArrayDistinct
             return array;
         }
 
-        TypedSet typedSet = createEqualityTypedSet(VARCHAR, EQUAL_OPERATOR, HASH_CODE_OPERATOR, array.getPositionCount(), "old_array_distinct");
+        BlockSet set = new BlockSet(VARCHAR, DISTINCT_FROM_OPERATOR, HASH_CODE_OPERATOR, array.getPositionCount());
         BlockBuilder distinctElementBlockBuilder = VARCHAR.createBlockBuilder(null, array.getPositionCount());
         for (int i = 0; i < array.getPositionCount(); i++) {
-            if (!typedSet.contains(array, i)) {
-                typedSet.add(array, i);
+            if (set.add(array, i)) {
                 VARCHAR.appendTo(array, i, distinctElementBlockBuilder);
             }
         }

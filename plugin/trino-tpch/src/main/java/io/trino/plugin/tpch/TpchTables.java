@@ -29,25 +29,24 @@ import static io.trino.plugin.tpch.TpchRecordSet.createTpchRecordSet;
 
 public final class TpchTables
 {
-    private TpchTables()
-    {
-    }
+    private TpchTables() {}
 
-    public static List<Type> getTableColumns(String tableName)
+    public static List<Type> getTableColumns(String tableName, DecimalTypeMapping decimalTypeMapping)
     {
         TpchTable<?> table = TpchTable.getTable(tableName);
         return table.getColumns().stream()
-                .map(TpchMetadata::getTrinoType)
+                .map(column -> TpchMetadata.getTrinoType(column, decimalTypeMapping))
                 .collect(toImmutableList());
     }
 
     public static Iterator<Page> getTablePages(
             String tableName,
-            double scaleFactor)
+            double scaleFactor,
+            DecimalTypeMapping decimalTypeMapping)
     {
-        TpchTable table = TpchTable.getTable(tableName);
+        TpchTable<?> table = TpchTable.getTable(tableName);
         ConnectorPageSource pageSource = new RecordPageSource(
-                createTpchRecordSet(table, table.getColumns(), scaleFactor, 1, 1, TupleDomain.all()));
+                createTpchRecordSet(table, decimalTypeMapping, scaleFactor, 1, 1, TupleDomain.all()));
         return new AbstractIterator<>()
         {
             @Override

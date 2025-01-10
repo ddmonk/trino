@@ -18,9 +18,8 @@ import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.validation.FileExists;
-
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotNull;
 
 import java.util.Optional;
 
@@ -38,6 +37,7 @@ public class InternalCommunicationConfig
     private String keyStorePassword;
     private String trustStorePath;
     private String trustStorePassword;
+    private boolean httpServerHttpsEnabled;
 
     @NotNull
     public Optional<String> getSharedSecret()
@@ -134,5 +134,23 @@ public class InternalCommunicationConfig
     public boolean isRequiredSharedSecretSet()
     {
         return !isHttpsRequired() || getSharedSecret().isPresent();
+    }
+
+    public boolean isHttpServerHttpsEnabled()
+    {
+        return httpServerHttpsEnabled;
+    }
+
+    @Config("http-server.https.enabled")
+    public InternalCommunicationConfig setHttpServerHttpsEnabled(boolean httpServerHttpsEnabled)
+    {
+        this.httpServerHttpsEnabled = httpServerHttpsEnabled;
+        return this;
+    }
+
+    @AssertTrue(message = "HTTPS must be enabled when HTTPS is required for internal communications. Set http-server.https.enabled=true")
+    public boolean isHttpsEnabledWhenRequired()
+    {
+        return !isHttpsRequired() || isHttpServerHttpsEnabled();
     }
 }

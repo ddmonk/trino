@@ -13,11 +13,17 @@
  */
 package io.trino.plugin.hive;
 
+import io.trino.plugin.hive.fs.DirectoryLister;
+import io.trino.plugin.hive.metastore.SemiTransactionalHiveMetastore;
 import io.trino.spi.connector.ConnectorMetadata;
 
 public interface TransactionalMetadata
         extends ConnectorMetadata
 {
+    SemiTransactionalHiveMetastore getMetastore();
+
+    DirectoryLister getDirectoryLister();
+
     void commit();
 
     void rollback();

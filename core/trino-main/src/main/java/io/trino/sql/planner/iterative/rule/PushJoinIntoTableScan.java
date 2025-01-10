@@ -15,53 +15,47 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.BasicRelationStatistics;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.JoinApplicationResult;
-import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
-import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.sql.ExpressionUtils;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Booleans;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.ConnectorExpressionTranslator;
+import io.trino.sql.planner.ConnectorExpressionTranslator.ConnectorExpressionTranslation;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.iterative.Rule;
+import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
+import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
-import io.trino.sql.tree.BooleanLiteral;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.SystemSessionProperties.isAllowPushdownIntoConnectors;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.spi.predicate.Domain.onlyNull;
-import static io.trino.sql.ExpressionUtils.and;
-import static io.trino.sql.ExpressionUtils.extractConjuncts;
-import static io.trino.sql.planner.plan.JoinNode.Type.FULL;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
-import static io.trino.sql.planner.plan.JoinNode.Type.RIGHT;
+import static io.trino.sql.ir.IrUtils.and;
+import static io.trino.sql.planner.iterative.rule.Rules.deriveTableStatisticsForPushdown;
+import static io.trino.sql.planner.plan.JoinType.FULL;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
+import static io.trino.sql.planner.plan.JoinType.RIGHT;
 import static io.trino.sql.planner.plan.Patterns.Join.left;
 import static io.trino.sql.planner.plan.Patterns.Join.right;
 import static io.trino.sql.planner.plan.Patterns.tableScan;
@@ -79,17 +73,23 @@ public class PushJoinIntoTableScan
                     .with(left().matching(tableScan().capturedAs(LEFT_TABLE_SCAN)))
                     .with(right().matching(tableScan().capturedAs(RIGHT_TABLE_SCAN)));
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public PushJoinIntoTableScan(Metadata metadata)
+    public PushJoinIntoTableScan(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
     public Pattern<JoinNode> getPattern()
     {
         return PATTERN;
+    }
+
+    @Override
+    public boolean isEnabled(Session session)
+    {
+        return isAllowPushdownIntoConnectors(session);
     }
 
     @Override
@@ -102,12 +102,16 @@ public class PushJoinIntoTableScan
         TableScanNode left = captures.get(LEFT_TABLE_SCAN);
         TableScanNode right = captures.get(RIGHT_TABLE_SCAN);
 
-        verify(!left.isForDelete() && !right.isForDelete(), "Unexpected Join over for-delete table scan");
+        if (left.isUpdateTarget() && !right.isUpdateTarget()) {
+            return Result.empty();
+        }
 
         Expression effectiveFilter = getEffectiveFilter(joinNode);
-        FilterSplitResult filterSplitResult = splitFilter(effectiveFilter, joinNode.getLeftOutputSymbols(), joinNode.getRightOutputSymbols(), context);
+        ConnectorExpressionTranslation translation = ConnectorExpressionTranslator.translateConjuncts(
+                context.getSession(),
+                effectiveFilter);
 
-        if (!filterSplitResult.getRemainingFilter().equals(BooleanLiteral.TRUE_LITERAL)) {
+        if (!translation.remainingExpression().equals(Booleans.TRUE)) {
             // TODO add extra filter node above join
             return Result.empty();
         }
@@ -119,10 +123,10 @@ public class PushJoinIntoTableScan
         }
 
         Map<String, ColumnHandle> leftAssignments = left.getAssignments().entrySet().stream()
-                .collect(toImmutableMap(entry -> entry.getKey().getName(), Map.Entry::getValue));
+                .collect(toImmutableMap(entry -> entry.getKey().name(), Map.Entry::getValue));
 
         Map<String, ColumnHandle> rightAssignments = right.getAssignments().entrySet().stream()
-                .collect(toImmutableMap(entry -> entry.getKey().getName(), Map.Entry::getValue));
+                .collect(toImmutableMap(entry -> entry.getKey().name(), Map.Entry::getValue));
 
         /*
          * We are (lazily) computing estimated statistics for join node and left and right table
@@ -136,13 +140,13 @@ public class PushJoinIntoTableScan
          */
         JoinStatistics joinStatistics = getJoinStatistics(joinNode, left, right, context);
 
-        Optional<JoinApplicationResult<TableHandle>> joinApplicationResult = metadata.applyJoin(
+        Optional<JoinApplicationResult<TableHandle>> joinApplicationResult = plannerContext.getMetadata().applyJoin(
                 context.getSession(),
                 getJoinType(joinNode),
                 left.getTable(),
                 right.getTable(),
-                filterSplitResult.getPushableConditions(),
-                // TODO we could pass only subset of assignments here, those which are needed to resolve filterSplitResult.getPushableConditions
+                translation.connectorExpression(),
+                // TODO we could pass only subset of assignments here, those which are needed to resolve translation.getPushableConditions
                 leftAssignments,
                 rightAssignments,
                 joinStatistics);
@@ -156,16 +160,17 @@ public class PushJoinIntoTableScan
         Map<ColumnHandle, ColumnHandle> leftColumnHandlesMapping = joinApplicationResult.get().getLeftColumnHandles();
         Map<ColumnHandle, ColumnHandle> rightColumnHandlesMapping = joinApplicationResult.get().getRightColumnHandles();
 
-        ImmutableMap.Builder<Symbol, ColumnHandle> newAssignments = ImmutableMap.builder();
-        newAssignments.putAll(left.getAssignments().entrySet().stream().collect(toImmutableMap(
+        ImmutableMap.Builder<Symbol, ColumnHandle> assignmentsBuilder = ImmutableMap.builder();
+        assignmentsBuilder.putAll(left.getAssignments().entrySet().stream().collect(toImmutableMap(
                 Map.Entry::getKey,
                 entry -> leftColumnHandlesMapping.get(entry.getValue()))));
-        newAssignments.putAll(right.getAssignments().entrySet().stream().collect(toImmutableMap(
+        assignmentsBuilder.putAll(right.getAssignments().entrySet().stream().collect(toImmutableMap(
                 Map.Entry::getKey,
                 entry -> rightColumnHandlesMapping.get(entry.getValue()))));
+        Map<Symbol, ColumnHandle> assignments = assignmentsBuilder.buildOrThrow();
 
         // convert enforced constraint
-        JoinNode.Type joinType = joinNode.getType();
+        io.trino.sql.planner.plan.JoinType joinType = joinNode.getType();
         TupleDomain<ColumnHandle> leftConstraint = deriveConstraint(left.getEnforcedConstraint(), leftColumnHandlesMapping, joinType == RIGHT || joinType == FULL);
         TupleDomain<ColumnHandle> rightConstraint = deriveConstraint(right.getEnforcedConstraint(), rightColumnHandlesMapping, joinType == LEFT || joinType == FULL);
 
@@ -174,9 +179,21 @@ public class PushJoinIntoTableScan
                         // we are sure that domains map is present as we bailed out on isNone above
                         .putAll(leftConstraint.getDomains().orElseThrow())
                         .putAll(rightConstraint.getDomains().orElseThrow())
-                        .build());
+                        .buildOrThrow());
 
-        return Result.ofPlanNode(new TableScanNode(joinNode.getId(), handle, joinNode.getOutputSymbols(), newAssignments.build(), newEnforcedConstraint, false));
+        return Result.ofPlanNode(
+                new ProjectNode(
+                        context.getIdAllocator().getNextId(),
+                        new TableScanNode(
+                                joinNode.getId(),
+                                handle,
+                                ImmutableList.copyOf(assignments.keySet()),
+                                assignments,
+                                newEnforcedConstraint,
+                                deriveTableStatisticsForPushdown(context.getStatsProvider(), context.getSession(), joinApplicationResult.get().isPrecalculateStatistics(), joinNode),
+                                false,
+                                Optional.empty()),
+                        Assignments.identity(joinNode.getOutputSymbols())));
     }
 
     private JoinStatistics getJoinStatistics(JoinNode join, TableScanNode left, TableScanNode right, Context context)
@@ -186,13 +203,13 @@ public class PushJoinIntoTableScan
             @Override
             public Optional<BasicRelationStatistics> getLeftStatistics()
             {
-                return getBasicRelationStats(left, join.getLeftOutputSymbols(), context);
+                return getBasicRelationStats(left, left.getOutputSymbols(), context);
             }
 
             @Override
             public Optional<BasicRelationStatistics> getRightStatistics()
             {
-                return getBasicRelationStats(right, join.getRightOutputSymbols(), context);
+                return getBasicRelationStats(right, right.getOutputSymbols(), context);
             }
 
             @Override
@@ -204,9 +221,8 @@ public class PushJoinIntoTableScan
             private Optional<BasicRelationStatistics> getBasicRelationStats(PlanNode node, List<Symbol> outputSymbols, Context context)
             {
                 PlanNodeStatsEstimate stats = context.getStatsProvider().getStats(node);
-                TypeProvider types = context.getSymbolAllocator().getTypes();
                 double outputRowCount = stats.getOutputRowCount();
-                double outputSize = stats.getOutputSizeInBytes(outputSymbols, types);
+                double outputSize = stats.getOutputSizeInBytes(outputSymbols);
                 if (isNaN(outputRowCount) || isNaN(outputSize)) {
                     return Optional.empty();
                 }
@@ -215,32 +231,12 @@ public class PushJoinIntoTableScan
         };
     }
 
-    private TupleDomain<ColumnHandle> deriveConstraint(TupleDomain<ColumnHandle> sourceConstraint, Map<ColumnHandle, ColumnHandle> columnMapping, boolean nullable)
+    private TupleDomain<ColumnHandle> deriveConstraint(TupleDomain<ColumnHandle> constraint, Map<ColumnHandle, ColumnHandle> columnMapping, boolean nullable)
     {
-        TupleDomain<ColumnHandle> constraint = sourceConstraint;
         if (nullable) {
             constraint = constraint.transformDomains((columnHandle, domain) -> domain.union(onlyNull(domain.getType())));
         }
-        return constraint.transform(handle -> {
-            ColumnHandle newHandle = columnMapping.get(handle);
-            checkArgument(newHandle != null, "Mapping not found for handle %s", handle);
-            return newHandle;
-        });
-    }
-
-    @Override
-    public boolean isEnabled(Session session)
-    {
-        return isAllowPushdownIntoConnectors(session);
-    }
-
-    private TupleDomain<ColumnHandle> transformToNewAssignments(TupleDomain<ColumnHandle> tupleDomain, Map<ColumnHandle, ColumnHandle> newAssignments)
-    {
-        return tupleDomain.transform(handle -> {
-            ColumnHandle newHandle = newAssignments.get(handle);
-            checkArgument(newHandle != null, "Mapping not found for handle %s", handle);
-            return newHandle;
-        });
+        return constraint.transformKeys(columnMapping::get);
     }
 
     public Expression getEffectiveFilter(JoinNode node)
@@ -252,108 +248,13 @@ public class PushJoinIntoTableScan
         return effectiveFilter;
     }
 
-    private FilterSplitResult splitFilter(Expression filter, List<Symbol> leftSymbolsList, List<Symbol> rightSymbolsList, Context context)
-    {
-        Set<Symbol> leftSymbols = ImmutableSet.copyOf(leftSymbolsList);
-        Set<Symbol> rightSymbols = ImmutableSet.copyOf(rightSymbolsList);
-
-        ImmutableList.Builder<JoinCondition> comparisonConditions = ImmutableList.builder();
-        ImmutableList.Builder<Expression> remainingConjuncts = ImmutableList.builder();
-
-        for (Expression conjunct : extractConjuncts(filter)) {
-            getPushableJoinCondition(conjunct, leftSymbols, rightSymbols, context)
-                    .ifPresentOrElse(comparisonConditions::add, () -> remainingConjuncts.add(conjunct));
-        }
-
-        return new FilterSplitResult(comparisonConditions.build(), ExpressionUtils.and(remainingConjuncts.build()));
-    }
-
-    private Optional<JoinCondition> getPushableJoinCondition(Expression conjunct, Set<Symbol> leftSymbols, Set<Symbol> rightSymbols, Context context)
-    {
-        if (!(conjunct instanceof ComparisonExpression)) {
-            return Optional.empty();
-        }
-        ComparisonExpression comparison = (ComparisonExpression) conjunct;
-
-        if (!(comparison.getLeft() instanceof SymbolReference) || !(comparison.getRight() instanceof SymbolReference)) {
-            return Optional.empty();
-        }
-        Symbol left = Symbol.from(comparison.getLeft());
-        Symbol right = Symbol.from(comparison.getRight());
-        ComparisonExpression.Operator operator = comparison.getOperator();
-
-        if (!leftSymbols.contains(left)) {
-            // lets try with flipped expression
-            Symbol tmp = left;
-            left = right;
-            right = tmp;
-            operator = operator.flip();
-        }
-
-        if (leftSymbols.contains(left) && rightSymbols.contains(right)) {
-            return Optional.of(new JoinCondition(
-                    joinConditionOperator(operator),
-                    new Variable(left.getName(), context.getSymbolAllocator().getTypes().get(left)),
-                    new Variable(right.getName(), context.getSymbolAllocator().getTypes().get(right))));
-        }
-        return Optional.empty();
-    }
-
-    private static class FilterSplitResult
-    {
-        private final List<JoinCondition> pushableConditions;
-        private final Expression remainingFilter;
-
-        public FilterSplitResult(List<JoinCondition> pushableConditions, Expression remainingFilter)
-        {
-            this.pushableConditions = requireNonNull(pushableConditions, "pushableConditions is null");
-            this.remainingFilter = requireNonNull(remainingFilter, "remainingFilter is null");
-        }
-
-        public List<JoinCondition> getPushableConditions()
-        {
-            return pushableConditions;
-        }
-
-        public Expression getRemainingFilter()
-        {
-            return remainingFilter;
-        }
-    }
-
-    private JoinCondition.Operator joinConditionOperator(ComparisonExpression.Operator operator)
-    {
-        switch (operator) {
-            case EQUAL:
-                return JoinCondition.Operator.EQUAL;
-            case NOT_EQUAL:
-                return JoinCondition.Operator.NOT_EQUAL;
-            case LESS_THAN:
-                return JoinCondition.Operator.LESS_THAN;
-            case LESS_THAN_OR_EQUAL:
-                return JoinCondition.Operator.LESS_THAN_OR_EQUAL;
-            case GREATER_THAN:
-                return JoinCondition.Operator.GREATER_THAN;
-            case GREATER_THAN_OR_EQUAL:
-                return JoinCondition.Operator.GREATER_THAN_OR_EQUAL;
-            case IS_DISTINCT_FROM:
-                return JoinCondition.Operator.IS_DISTINCT_FROM;
-        }
-        throw new IllegalArgumentException("Unknown operator: " + operator);
-    }
-
     private JoinType getJoinType(JoinNode joinNode)
     {
-        switch (joinNode.getType()) {
-            case INNER:
-                return JoinType.INNER;
-            case LEFT:
-                return JoinType.LEFT_OUTER;
-            case RIGHT:
-                return JoinType.RIGHT_OUTER;
-            case FULL:
-                return JoinType.FULL_OUTER;
-        }
-        throw new IllegalArgumentException("Unknown join type: " + joinNode.getType());
+        return switch (joinNode.getType()) {
+            case INNER -> JoinType.INNER;
+            case LEFT -> JoinType.LEFT_OUTER;
+            case RIGHT -> JoinType.RIGHT_OUTER;
+            case FULL -> JoinType.FULL_OUTER;
+        };
     }
 }

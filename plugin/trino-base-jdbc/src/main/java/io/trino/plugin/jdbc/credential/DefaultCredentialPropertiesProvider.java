@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc.credential;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.jdbc.JdbcIdentity;
+import io.trino.spi.security.ConnectorIdentity;
 
 import java.util.Map;
 import java.util.Optional;
@@ -32,11 +32,11 @@ public class DefaultCredentialPropertiesProvider
     }
 
     @Override
-    public Map<String, String> getCredentialProperties(JdbcIdentity identity)
+    public Map<String, Object> getCredentialProperties(ConnectorIdentity identity)
     {
-        ImmutableMap.Builder<String, String> properties = ImmutableMap.builder();
+        ImmutableMap.Builder<String, Object> properties = ImmutableMap.builder();
         provider.getConnectionUser(Optional.of(identity)).ifPresent(user -> properties.put("user", user));
         provider.getConnectionPassword(Optional.of(identity)).ifPresent(password -> properties.put("password", password));
-        return properties.build();
+        return properties.buildOrThrow();
     }
 }

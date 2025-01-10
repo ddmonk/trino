@@ -14,10 +14,11 @@
 package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.FunctionListBuilder;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.operator.aggregation.state.NullableLongState;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.BlockIndex;
@@ -25,10 +26,10 @@ import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
-import org.testng.annotations.BeforeClass;
 
 import java.util.List;
 
@@ -37,16 +38,15 @@ import static io.trino.spi.type.BigintType.BIGINT;
 public class TestCountNullAggregation
         extends AbstractTestAggregationFunction
 {
-    @BeforeClass
-    public void setup()
+    public TestCountNullAggregation()
     {
-        metadata.addFunctions(new FunctionListBuilder().aggregates(CountNull.class).getFunctions());
+        super(InternalFunctionBundle.extractFunctions(CountNull.class));
     }
 
     @Override
     protected Block[] getSequenceBlocks(int start, int length)
     {
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(length);
         for (int i = start; i < start + length; i++) {
             BIGINT.writeLong(blockBuilder, i);
         }
@@ -74,10 +74,10 @@ public class TestCountNullAggregation
         private CountNull() {}
 
         @InputFunction
-        public static void input(@AggregationState NullableLongState state, @BlockPosition @NullablePosition @SqlType(StandardTypes.BIGINT) Block block, @BlockIndex int position)
+        public static void input(@AggregationState NullableLongState state, @BlockPosition @SqlNullable @SqlType(StandardTypes.BIGINT) ValueBlock block, @BlockIndex int position)
         {
             if (block.isNull(position)) {
-                state.setLong(state.getLong() + 1);
+                state.setValue(state.getValue() + 1);
             }
             state.setNull(false);
         }
@@ -85,7 +85,7 @@ public class TestCountNullAggregation
         @CombineFunction
         public static void combine(@AggregationState NullableLongState state, @AggregationState NullableLongState scratchState)
         {
-            state.setLong(state.getLong() + scratchState.getLong());
+            state.setValue(state.getValue() + scratchState.getValue());
             state.setNull(state.isNull() && scratchState.isNull());
         }
 

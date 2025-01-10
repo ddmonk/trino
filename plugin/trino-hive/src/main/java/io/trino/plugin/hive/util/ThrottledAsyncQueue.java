@@ -16,15 +16,14 @@ package io.trino.plugin.hive.util;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.RateLimiter;
-
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
 
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 
 /**
  * An asynchronous queue that limits the rate at which batches will be
@@ -37,13 +36,11 @@ public class ThrottledAsyncQueue<T>
         extends AsyncQueue<T>
 {
     private final int maxBatchSizePerSec;
-    private final Executor executor;
     private final RateLimiter rateLimiter;
 
     public ThrottledAsyncQueue(int maxBatchSizePerSec, int targetQueueSize, Executor executor)
     {
         super(targetQueueSize, executor);
-        this.executor = executor;
         this.maxBatchSizePerSec = maxBatchSizePerSec;
         this.rateLimiter = RateLimiter.create(maxBatchSizePerSec);
     }
@@ -53,7 +50,7 @@ public class ThrottledAsyncQueue<T>
     {
         checkArgument(maxSize >= 0, "maxSize must be at least 0");
 
-        ListenableFuture<?> throttleFuture = immediateFuture(null);
+        ListenableFuture<Void> throttleFuture = immediateVoidFuture();
         if (size() > 0) {
             // the queue is not empty, try to return a batch immediately if we are not throttled
             int size = maxBatchSize(maxSize);

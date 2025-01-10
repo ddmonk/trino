@@ -15,14 +15,17 @@ package io.trino.plugin.hive;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
+import io.trino.metastore.HiveType;
 import io.trino.plugin.hive.util.HiveBucketing.BucketingVersion;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.OptionalInt;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 public class HivePartitioningHandle
@@ -31,7 +34,6 @@ public class HivePartitioningHandle
     private final BucketingVersion bucketingVersion;
     private final int bucketCount;
     private final List<HiveType> hiveTypes;
-    private final OptionalInt maxCompatibleBucketCount;
     private final boolean usePartitionedBucketing;
 
     @JsonCreator
@@ -39,13 +41,12 @@ public class HivePartitioningHandle
             @JsonProperty("bucketingVersion") BucketingVersion bucketingVersion,
             @JsonProperty("bucketCount") int bucketCount,
             @JsonProperty("hiveBucketTypes") List<HiveType> hiveTypes,
-            @JsonProperty("maxCompatibleBucketCount") OptionalInt maxCompatibleBucketCount,
             @JsonProperty("usePartitionedBucketing") boolean usePartitionedBucketing)
     {
         this.bucketingVersion = requireNonNull(bucketingVersion, "bucketingVersion is null");
         this.bucketCount = bucketCount;
+        checkArgument(bucketCount > 0, "bucketCount must be greater than zero");
         this.hiveTypes = requireNonNull(hiveTypes, "hiveTypes is null");
-        this.maxCompatibleBucketCount = maxCompatibleBucketCount;
         this.usePartitionedBucketing = usePartitionedBucketing;
     }
 
@@ -68,24 +69,31 @@ public class HivePartitioningHandle
     }
 
     @JsonProperty
-    public OptionalInt getMaxCompatibleBucketCount()
-    {
-        return maxCompatibleBucketCount;
-    }
-
-    @JsonProperty
     public boolean isUsePartitionedBucketing()
     {
         return usePartitionedBucketing;
+    }
+
+    public long getCacheKeyHint()
+    {
+        Hasher hasher = Hashing.goodFastHash(64).newHasher();
+        hasher.putInt(bucketingVersion.getVersion());
+        hasher.putInt(bucketCount);
+        for (HiveType hiveType : hiveTypes) {
+            hasher.putString(hiveType.toString(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        return hasher.hash().asLong();
     }
 
     @Override
     public String toString()
     {
         return toStringHelper(this)
+                .omitNullValues()
                 .add("buckets", bucketCount)
                 .add("hiveTypes", hiveTypes)
-                .add("usePartitionedBucketing", usePartitionedBucketing)
+                .add("version", bucketingVersion.getVersion())
+                .add("usePartitionedBucketing", usePartitionedBucketing ? true : null)
                 .toString();
     }
 
@@ -99,7 +107,8 @@ public class HivePartitioningHandle
             return false;
         }
         HivePartitioningHandle that = (HivePartitioningHandle) o;
-        return bucketCount == that.bucketCount &&
+        return bucketingVersion == that.bucketingVersion &&
+                bucketCount == that.bucketCount &&
                 usePartitionedBucketing == that.usePartitionedBucketing &&
                 Objects.equals(hiveTypes, that.hiveTypes);
     }
@@ -107,6 +116,6 @@ public class HivePartitioningHandle
     @Override
     public int hashCode()
     {
-        return Objects.hash(bucketCount, hiveTypes, usePartitionedBucketing);
+        return Objects.hash(bucketingVersion, bucketCount, hiveTypes, usePartitionedBucketing);
     }
 }

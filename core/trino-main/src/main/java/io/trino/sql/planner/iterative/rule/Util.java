@@ -16,13 +16,17 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.CatalogSchemaFunctionName;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
+import io.trino.sql.planner.plan.TopNRankingNode.RankingType;
+import io.trino.sql.planner.plan.WindowNode;
 
 import java.util.Collection;
 import java.util.List;
@@ -31,12 +35,17 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.sql.planner.plan.TopNRankingNode.RankingType.RANK;
+import static io.trino.sql.planner.plan.TopNRankingNode.RankingType.ROW_NUMBER;
 
 final class Util
 {
-    private Util()
-    {
-    }
+    private static final CatalogSchemaFunctionName ROW_NUMBER_NAME = builtinFunctionName("row_number");
+    private static final CatalogSchemaFunctionName RANK_NAME = builtinFunctionName("rank");
+
+    private Util() {}
 
     /**
      * Prune the set of available inputs to those required by the given expressions.
@@ -114,5 +123,24 @@ final class Util
             return Optional.empty();
         }
         return Optional.of(node.replaceChildren(newChildrenBuilder.build()));
+    }
+
+    public static Optional<RankingType> toTopNRankingType(WindowNode node)
+    {
+        if (node.getWindowFunctions().size() != 1 || node.getOrderingScheme().isEmpty()) {
+            return Optional.empty();
+        }
+
+        BoundSignature signature = getOnlyElement(node.getWindowFunctions().values()).getResolvedFunction().signature();
+        if (!signature.getArgumentTypes().isEmpty()) {
+            return Optional.empty();
+        }
+        if (signature.getName().equals(ROW_NUMBER_NAME)) {
+            return Optional.of(ROW_NUMBER);
+        }
+        if (signature.getName().equals(RANK_NAME)) {
+            return Optional.of(RANK);
+        }
+        return Optional.empty();
     }
 }

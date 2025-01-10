@@ -20,8 +20,10 @@ from sphinx.errors import SphinxError
 GROUP_ID = 'io.trino'
 ARTIFACTS = {
     'server': ('trino-server', 'tar.gz', None),
+    'server-rpm': ('trino-server-rpm', 'rpm', None),
     'cli': ('trino-cli', 'jar', 'executable'),
     'jdbc': ('trino-jdbc', 'jar', None),
+
 }
 
 
@@ -43,7 +45,7 @@ def setup(app):
         version = app.config.release
 
         if not text in ARTIFACTS:
-            inliner.reporter.error('Unsupported download type: ' + text)
+            inliner.reporter.error('Unsupported download type: ' + text, line=lineno)
             return [], []
 
         artifact, packaging, classifier = ARTIFACTS[text]

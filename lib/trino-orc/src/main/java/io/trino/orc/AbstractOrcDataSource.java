@@ -31,6 +31,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static io.trino.orc.OrcDataSourceUtils.getDiskRangeSlice;
 import static io.trino.orc.OrcDataSourceUtils.mergeAdjacentDiskRanges;
+import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -49,6 +50,13 @@ public abstract class AbstractOrcDataSource
 
         this.estimatedSize = estimatedSize;
         this.options = requireNonNull(options, "options is null");
+    }
+
+    protected Slice readTailInternal(int length)
+            throws IOException
+    {
+        int readSize = toIntExact(min(estimatedSize, length));
+        return readFully(estimatedSize - readSize, readSize);
     }
 
     protected abstract void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
@@ -82,7 +90,14 @@ public abstract class AbstractOrcDataSource
     public Slice readTail(int length)
             throws IOException
     {
-        return readFully(estimatedSize - length, length);
+        long start = System.nanoTime();
+
+        Slice tailSlice = readTailInternal(length);
+
+        readTimeNanos += System.nanoTime() - start;
+        readBytes += tailSlice.length();
+
+        return tailSlice;
     }
 
     @Override
@@ -137,15 +152,15 @@ public abstract class AbstractOrcDataSource
                 largeRangesBuilder.put(entry);
             }
         }
-        Map<K, DiskRange> smallRanges = smallRangesBuilder.build();
-        Map<K, DiskRange> largeRanges = largeRangesBuilder.build();
+        Map<K, DiskRange> smallRanges = smallRangesBuilder.buildOrThrow();
+        Map<K, DiskRange> largeRanges = largeRangesBuilder.buildOrThrow();
 
         // read ranges
         ImmutableMap.Builder<K, OrcDataReader> slices = ImmutableMap.builder();
         slices.putAll(readSmallDiskRanges(smallRanges));
         slices.putAll(readLargeDiskRanges(largeRanges));
 
-        return slices.build();
+        return slices.buildOrThrow();
     }
 
     private <K> Map<K, OrcDataReader> readSmallDiskRanges(Map<K, DiskRange> diskRanges)
@@ -182,7 +197,7 @@ public abstract class AbstractOrcDataSource
             }
         }
 
-        Map<K, OrcDataReader> sliceStreams = slices.build();
+        Map<K, OrcDataReader> sliceStreams = slices.buildOrThrow();
         verify(sliceStreams.keySet().equals(diskRanges.keySet()));
         return sliceStreams;
     }
@@ -198,7 +213,7 @@ public abstract class AbstractOrcDataSource
             DiskRange diskRange = entry.getValue();
             slices.put(entry.getKey(), new DiskOrcDataReader(diskRange));
         }
-        return slices.build();
+        return slices.buildOrThrow();
     }
 
     @Override
@@ -312,7 +327,7 @@ public abstract class AbstractOrcDataSource
 
         public DiskOrcDataReader(DiskRange diskRange)
         {
-            super(id, requireNonNull(diskRange, "diskRange is null").getLength(), toIntExact(options.getStreamBufferSize().toBytes()));
+            super(id, diskRange.getLength(), toIntExact(options.getStreamBufferSize().toBytes()));
             this.diskRange = diskRange;
         }
 

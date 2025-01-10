@@ -24,6 +24,7 @@ import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.OrderingCompiler;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -33,12 +34,7 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-import org.openjdk.jmh.runner.options.VerboseMode;
-import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -48,15 +44,16 @@ import java.util.stream.Collectors;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SequencePageBuilder.createSequencePage;
+import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.util.MergeSortedPages.mergeSortedPages;
 import static java.util.Collections.nCopies;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.openjdk.jmh.annotations.Mode.AverageTime;
 import static org.openjdk.jmh.annotations.Scope.Thread;
-import static org.testng.Assert.assertEquals;
 
 @State(Thread)
 @OutputTimeUnit(MILLISECONDS)
@@ -93,7 +90,7 @@ public class BenchmarkPagesSort
         int positionCount = pages.stream()
                 .mapToInt(Page::getPositionCount)
                 .sum();
-        assertEquals(positionCount, state.getTotalPositions());
+        assertThat(positionCount).isEqualTo(state.getTotalPositions());
     }
 
     @State(Thread)
@@ -154,7 +151,7 @@ public class BenchmarkPagesSort
         int positionCount = pages.stream()
                 .mapToInt(Page::getPositionCount)
                 .sum();
-        assertEquals(positionCount, state.getTotalPositions());
+        assertThat(positionCount).isEqualTo(state.getTotalPositions());
     }
 
     @State(Thread)
@@ -222,10 +219,9 @@ public class BenchmarkPagesSort
         private void createPageProducers(int numMergeSources)
         {
             AtomicInteger counter = new AtomicInteger(0);
-            splitPages = pages.stream()
+            splitPages = ImmutableList.copyOf(pages.stream()
                     .collect(Collectors.groupingBy(it -> counter.getAndIncrement() % numMergeSources))
-                    .values().stream()
-                    .collect(toImmutableList());
+                    .values());
         }
 
         List<Page> getPages()
@@ -272,11 +268,6 @@ public class BenchmarkPagesSort
     public static void main(String[] args)
             throws RunnerException
     {
-        Options options = new OptionsBuilder()
-                .verbosity(VerboseMode.NORMAL)
-                .include(".*" + BenchmarkPagesSort.class.getSimpleName() + ".*")
-                .build();
-
-        new Runner(options).run();
+        benchmark(BenchmarkPagesSort.class).run();
     }
 }

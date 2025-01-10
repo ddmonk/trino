@@ -15,12 +15,10 @@ package io.trino.split;
 
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.connector.CatalogName;
-import io.trino.execution.Lifespan;
-import io.trino.spi.connector.ConnectorPartitionHandle;
+import io.trino.spi.connector.CatalogHandle;
+import jakarta.annotation.Nullable;
 
-import javax.annotation.Nullable;
-
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -36,21 +34,21 @@ public class SampledSplitSource
 
     public SampledSplitSource(SplitSource splitSource, double sampleRatio)
     {
-        this.splitSource = requireNonNull(splitSource, "dataSource is null");
+        this.splitSource = requireNonNull(splitSource, "splitSource is null");
         this.sampleRatio = sampleRatio;
     }
 
     @Nullable
     @Override
-    public CatalogName getCatalogName()
+    public CatalogHandle getCatalogHandle()
     {
-        return splitSource.getCatalogName();
+        return splitSource.getCatalogHandle();
     }
 
     @Override
-    public ListenableFuture<SplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, Lifespan lifespan, int maxSize)
+    public ListenableFuture<SplitBatch> getNextBatch(int maxSize)
     {
-        ListenableFuture<SplitBatch> batch = splitSource.getNextBatch(partitionHandle, lifespan, maxSize);
+        ListenableFuture<SplitBatch> batch = splitSource.getNextBatch(maxSize);
         return Futures.transform(batch, splitBatch -> new SplitBatch(
                 splitBatch.getSplits().stream()
                         .filter(input -> ThreadLocalRandom.current().nextDouble() < sampleRatio)
@@ -71,8 +69,11 @@ public class SampledSplitSource
     }
 
     @Override
-    public Optional<Integer> getMinScheduleSplitBatchSize()
+    public Optional<List<Object>> getTableExecuteSplitsInfo()
     {
-        return splitSource.getMinScheduleSplitBatchSize();
+        splitSource.getTableExecuteSplitsInfo().ifPresent(splitInfo -> {
+            throw new IllegalStateException("Cannot use SampledSplitSource with SplitSource which returns non-empty TableExecuteSplitsInfo=" + splitInfo);
+        });
+        return Optional.empty();
     }
 }

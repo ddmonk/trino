@@ -15,17 +15,17 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.sql.gen.ExpressionCompiler;
-import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.relational.RowExpression;
 import io.trino.testing.MaterializedResult;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
 import java.util.Optional;
@@ -37,7 +37,6 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.operator.OperatorAssertion.assertOperatorEquals;
 import static io.trino.spi.function.OperatorType.ADD;
 import static io.trino.spi.function.OperatorType.EQUAL;
@@ -50,15 +49,16 @@ import static io.trino.sql.relational.Expressions.field;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestFilterAndProjectOperator
 {
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
@@ -69,7 +69,7 @@ public class TestFilterAndProjectOperator
                 .addDriverContext();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         executor.shutdownNow();
@@ -83,19 +83,19 @@ public class TestFilterAndProjectOperator
                 .addSequencePage(100, 0, 0)
                 .build();
 
-        Metadata metadata = createTestMetadataManager();
+        TestingFunctionResolution functionResolution = new TestingFunctionResolution();
         RowExpression filter = call(
-                metadata.resolveOperator(LESS_THAN_OR_EQUAL, ImmutableList.of(BIGINT, BIGINT)),
+                functionResolution.resolveOperator(LESS_THAN_OR_EQUAL, ImmutableList.of(BIGINT, BIGINT)),
                 field(1, BIGINT),
                 constant(9L, BIGINT));
 
         RowExpression field0 = field(0, VARCHAR);
         RowExpression add5 = call(
-                metadata.resolveOperator(ADD, ImmutableList.of(BIGINT, BIGINT)),
+                functionResolution.resolveOperator(ADD, ImmutableList.of(BIGINT, BIGINT)),
                 field(1, BIGINT),
                 constant(5L, BIGINT));
 
-        ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+        ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
         Supplier<PageProcessor> processor = compiler.compilePageProcessor(Optional.of(filter), ImmutableList.of(field0, add5));
 
         OperatorFactory operatorFactory = FilterAndProjectOperator.createOperatorFactory(
@@ -133,13 +133,13 @@ public class TestFilterAndProjectOperator
                 .addSequencePage(100, 0, 0)
                 .build();
 
-        Metadata metadata = createTestMetadataManager();
+        TestingFunctionResolution functionResolution = new TestingFunctionResolution();
         RowExpression filter = call(
-                metadata.resolveOperator(EQUAL, ImmutableList.of(BIGINT, BIGINT)),
+                functionResolution.resolveOperator(EQUAL, ImmutableList.of(BIGINT, BIGINT)),
                 field(1, BIGINT),
                 constant(10L, BIGINT));
 
-        ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
+        ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
         Supplier<PageProcessor> processor = compiler.compilePageProcessor(Optional.of(filter), ImmutableList.of(field(1, BIGINT)));
 
         OperatorFactory operatorFactory = FilterAndProjectOperator.createOperatorFactory(

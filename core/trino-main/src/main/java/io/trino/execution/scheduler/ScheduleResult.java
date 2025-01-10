@@ -21,7 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static java.util.Objects.requireNonNull;
 
 public class ScheduleResult
@@ -29,47 +29,28 @@ public class ScheduleResult
     public enum BlockedReason
     {
         WRITER_SCALING,
-        NO_ACTIVE_DRIVER_GROUP,
         SPLIT_QUEUES_FULL,
         WAITING_FOR_SOURCE,
-        MIXED_SPLIT_QUEUES_FULL_AND_WAITING_FOR_SOURCE,
         /**/;
-
-        public BlockedReason combineWith(BlockedReason other)
-        {
-            switch (this) {
-                case WRITER_SCALING:
-                    throw new IllegalArgumentException("cannot be combined");
-                case NO_ACTIVE_DRIVER_GROUP:
-                    return other;
-                case SPLIT_QUEUES_FULL:
-                    return other == SPLIT_QUEUES_FULL || other == NO_ACTIVE_DRIVER_GROUP ? SPLIT_QUEUES_FULL : MIXED_SPLIT_QUEUES_FULL_AND_WAITING_FOR_SOURCE;
-                case WAITING_FOR_SOURCE:
-                    return other == WAITING_FOR_SOURCE || other == NO_ACTIVE_DRIVER_GROUP ? WAITING_FOR_SOURCE : MIXED_SPLIT_QUEUES_FULL_AND_WAITING_FOR_SOURCE;
-                case MIXED_SPLIT_QUEUES_FULL_AND_WAITING_FOR_SOURCE:
-                    return MIXED_SPLIT_QUEUES_FULL_AND_WAITING_FOR_SOURCE;
-            }
-            throw new IllegalArgumentException("Unknown blocked reason: " + other);
-        }
     }
 
     private final Set<RemoteTask> newTasks;
-    private final ListenableFuture<?> blocked;
+    private final ListenableFuture<Void> blocked;
     private final Optional<BlockedReason> blockedReason;
     private final boolean finished;
     private final int splitsScheduled;
 
     public ScheduleResult(boolean finished, Iterable<? extends RemoteTask> newTasks, int splitsScheduled)
     {
-        this(finished, newTasks, immediateFuture(null), Optional.empty(), splitsScheduled);
+        this(finished, newTasks, immediateVoidFuture(), Optional.empty(), splitsScheduled);
     }
 
-    public ScheduleResult(boolean finished, Iterable<? extends RemoteTask> newTasks, ListenableFuture<?> blocked, BlockedReason blockedReason, int splitsScheduled)
+    public ScheduleResult(boolean finished, Iterable<? extends RemoteTask> newTasks, ListenableFuture<Void> blocked, BlockedReason blockedReason, int splitsScheduled)
     {
         this(finished, newTasks, blocked, Optional.of(requireNonNull(blockedReason, "blockedReason is null")), splitsScheduled);
     }
 
-    private ScheduleResult(boolean finished, Iterable<? extends RemoteTask> newTasks, ListenableFuture<?> blocked, Optional<BlockedReason> blockedReason, int splitsScheduled)
+    private ScheduleResult(boolean finished, Iterable<? extends RemoteTask> newTasks, ListenableFuture<Void> blocked, Optional<BlockedReason> blockedReason, int splitsScheduled)
     {
         this.finished = finished;
         this.newTasks = ImmutableSet.copyOf(requireNonNull(newTasks, "newTasks is null"));
@@ -88,7 +69,7 @@ public class ScheduleResult
         return newTasks;
     }
 
-    public ListenableFuture<?> getBlocked()
+    public ListenableFuture<Void> getBlocked()
     {
         return blocked;
     }
